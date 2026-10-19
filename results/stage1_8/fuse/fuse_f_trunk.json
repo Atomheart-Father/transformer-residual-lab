@@ -1,0 +1,19 @@
+{
+  "tag": "f_trunk",
+  "mode": "trunk",
+  "n_params": 787712,
+  "n_train_windows": 576,
+  "epochs": 30,
+  "train": {
+    "rel_err": 0.7595353722572327,
+    "mse": 0.6882532835006714,
+    "target_rms": 1.0922603607177734
+  },
+  "val": {
+    "rel_err": 0.7639289498329163,
+    "mse": 0.6948121190071106,
+    "target_rms": 1.091140627861023
+  },
+  "final_train_mse": 0.6874373431007067,
+  "git_commit": "50dac94de29ca68174d60453abbc557cde425664"
+}

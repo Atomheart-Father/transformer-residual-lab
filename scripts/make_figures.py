@@ -809,6 +809,160 @@ def fig_stage17(root: Path, out: Path) -> None:
     plt.close(fig)
 
 
+def fig_stage18(root: Path, out: Path) -> None:
+    """Stage 1.8: distillation quality, inheritance effect, fusion outcomes.
+
+    Everything is read from table.json / fit_stats.json / paired_stats.json so the
+    figures and the report table cannot drift apart (the Stage 1.7 lesson).
+    """
+    table_p = root / "table.json"
+    table = json.loads(table_p.read_text(encoding="utf-8")) if table_p.exists() else {}
+    fit_stats = {}
+    fs_p = root / "fit_stats.json"
+    if fs_p.exists():
+        fit_stats = json.loads(fs_p.read_text(encoding="utf-8"))
+    paired = {}
+    ps_p = root / "paired_stats.json"
+    if ps_p.exists():
+        paired = json.loads(ps_p.read_text(encoding="utf-8"))
+
+    names = {"a1": "A1 serial MLP", "a2": "A2 tiny (random)",
+             "a3": "A3 tiny (inherited)"}
+
+    # -------------------------------------------------- 1. distillation quality
+    fig, axes = plt.subplots(1, 2, figsize=(9.4, 3.6))
+
+    ax = axes[0]
+    keys = ["a1", "a2", "a3"]
+    before = [r.get("before_rel_err") for r in table.get("fit", [])]
+    after = [r.get("after_rel_err") for r in table.get("fit", [])]
+    bcos = [r.get("before_cosine") for r in table.get("fit", [])]
+    acos = [r.get("after_cosine") for r in table.get("fit", [])]
+    x = np.arange(len(keys))
+    w = 0.36
+    ax.bar(x - w / 2, before, w, color=C_LOCAL, label="before training")
+    ax.bar(x + w / 2, after, w, color=C_PAR, label="after training")
+    ax.axhline(1.0, color=C_DEL, lw=0.9, ls="--", label="chance (rel.err 1.0)")
+    ax.set_xticks(x)
+    ax.set_xticklabels([names[k] for k in keys], rotation=12, ha="right")
+    ax.set_ylabel("rel.err on distillation target")
+    ax.set_title("All three narrow units fit the 8-layer delta")
+    ax.legend(loc="upper right")
+    for xi, v in zip(x - w / 2, before):
+        ax.text(xi, v + 0.02, f"{v:.2f}", ha="center", fontsize=7)
+    for xi, v in zip(x + w / 2, after):
+        ax.text(xi, v + 0.02, f"{v:.2f}", ha="center", fontsize=7)
+
+    ax = axes[1]
+    hist = {}
+    for tag in ("a1_short", "a2_short", "a3_short"):
+        d = table.get("fit", [])
+        p = root / "fit" / f"fit_{tag}.json"
+        if p.exists():
+            hist[tag] = json.loads(p.read_text(encoding="utf-8"))
+    styles = {"a1_short": (C_LOCAL, "o-"), "a2_short": (C_ACC[1], "s-"),
+              "a3_short": (C_PAR, "^-")}
+    labels = {"a1_short": "A1 serial MLP (random)",
+              "a2_short": "A2 tiny (random)",
+              "a3_short": "A3 tiny (inherited)"}
+    for tag, h in hist.items():
+        col, st = styles[tag]
+        eps = [r["epoch"] for r in h["history"]]
+        rel = [r["val_rel_err"] for r in h["history"]]
+        ax.plot(eps, rel, st, ms=5, lw=1.4, color=col, label=labels[tag])
+    # full-budget endpoints, drawn as isolated markers for the same units
+    end_tags = ["a1_serial", "a2_random", "a3_inherited"]
+    end_cols = {"a1_serial": C_LOCAL, "a2_random": C_ACC[1], "a3_inherited": C_PAR}
+    for i, r in enumerate(table.get("fit", [])):
+        t = end_tags[i]
+        ax.plot([r["epochs"]], [r["after_rel_err"]], "o", ms=8,
+                mfc="none", mew=1.6, color=end_cols[t],
+                label=f"{names[keys[i]]} @ {r['epochs']} ep")
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("val rel.err on distillation target")
+    ax.set_title("3-epoch budget: inherited leads, random catches up by 20")
+    ax.legend(fontsize=7, loc="upper right")
+    fig.suptitle("A narrow serial unit reproduces the 8-layer delta; "
+                 "inheritance buys speed, not accuracy", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out / "fig18_distillation.png", bbox_inches="tight")
+    plt.close(fig)
+
+    # -------------------------------------------------- 2. inheritance forest plot
+    res = fit_stats.get("results", {})
+    pool = []
+    for split, d in res.items():
+        for r in d.get("paired", []):
+            r = dict(r)
+            r["split"] = split
+            pool.append(r)
+    if pool:
+        want = [r for r in pool if r["metric"] == "rel_err"]
+        order = ["A3(inherited) vs A2(random) short",
+                 "A3(inherited) vs A2(random) full",
+                 "A1(serial MLP) vs A2(random) full",
+                 "A3(inherited) vs A1(serial MLP) full",
+                 "A1(serial MLP) vs A3(inherited) short"]
+        labels, vals, los, his, cols = [], [], [], [], []
+        for tag in order:
+            for r in want:
+                if r["contrast"] != tag:
+                    continue
+                labels.append(f"{tag} [{r['split']}] n={r['n']}")
+                vals.append(r["mean_diff"])
+                los.append(r["ci95"][0])
+                his.append(r["ci95"][1])
+                sig = r["significant_95"]
+                # d = rel_err(A) - rel_err(B); negative means A is the better fit
+                cols.append(C_ACC[2] if (sig and r["mean_diff"] < 0)
+                            else (C_DEL if (sig and r["mean_diff"] > 0) else C_LOCAL))
+        if labels:
+            fig, ax = plt.subplots(figsize=(8.6, 0.5 * len(labels) + 1.6))
+            y = np.arange(len(labels))[::-1]
+            for yi, v, lo, hi, c in zip(y, vals, los, his, cols):
+                ax.plot([lo, hi], [yi, yi], color=c, lw=2.2, solid_capstyle="round")
+                ax.plot(v, yi, "o", ms=6, color=c)
+            ax.axvline(0, color="k", lw=0.9)
+            ax.set_yticks(y)
+            ax.set_yticklabels(labels, fontsize=8)
+            ax.set_xlabel("paired bootstrap mean difference of rel.err (A − B)")
+            ax.set_title("Distillation target: inheritance helps at 3 ep, reverses by 20")
+            ax.set_xlim(min(los) * 1.15 - 0.002, max(his) * 1.15 + 0.002)
+            fig.tight_layout()
+            fig.savefig(out / "fig18_inheritance.png", bbox_inches="tight")
+            plt.close(fig)
+
+    # -------------------------------------------------- 3. fusion outcomes
+    ev = table.get("eval", {})
+    runs = [r for r in ev if "variants" in ev.get(r, {})]
+    if runs:
+        show = ["irr-a", "irr-a+oracle", "tiny_sub_a3_inherited", "fuse_f_a3z",
+                "fuse_f_trunk", "fuse_f_a1", "fuse_f_a3", "fuse_f_a2"]
+        fig, ax = plt.subplots(figsize=(9.6, 3.6))
+        x = np.arange(len(runs))
+        w = 0.8 / len(show)
+        palette = {"irr-a": C_LOCAL, "irr-a+oracle": C_ACC[3]}
+        for j, v in enumerate(show):
+            vals, errs = [], []
+            for r in runs:
+                m = ev[r]["variants"].get(v)
+                vals.append(m["delta_nll_mean"] if m else np.nan)
+                errs.append(m["delta_nll_std"] / np.sqrt(m["n"]) if m else np.nan)
+            col = palette.get(v, C_ACC[j % 3])
+            ax.bar(x + (j - len(show) / 2 + 0.5) * w, vals, w,
+                   color=col, label=v, yerr=errs,
+                   error_kw={"elinewidth": 0.7, "capsize": 2})
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"{r}\n(n={ev[r].get('n_samples')})" for r in runs],
+                           fontsize=8)
+        ax.set_ylabel("ΔNLL vs the teacher")
+        ax.set_title("Fusion heads plugged into the free-running parallel trunk")
+        ax.legend(fontsize=7, ncol=2, loc="upper right")
+        fig.tight_layout()
+        fig.savefig(out / "fig18_fusion.png", bbox_inches="tight")
+        plt.close(fig)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", type=Path, default=Path("results/stage1"))
@@ -821,6 +975,8 @@ def main() -> None:
                     help="results/stage1_6 root; also renders boundary + compensation")
     ap.add_argument("--stage17", type=Path, default=None,
                     help="results/stage1_7 root; renders the Stage 1.7 figures")
+    ap.add_argument("--stage18", type=Path, default=None,
+                    help="results/stage1_8 root; renders the Stage 1.8 figures")
     args = ap.parse_args()
 
     runs = [Path(x.strip()) for x in args.runs.split(",")] if args.runs else [args.run]
@@ -832,6 +988,14 @@ def main() -> None:
         if not (runs[0] / "summary.json").exists():
             print(f"figures -> {out}")
             for p in sorted(out.glob("fig17_*.png")):
+                print(" ", p.name)
+            return
+
+    if args.stage18:
+        fig_stage18(args.stage18, out)
+        if not (runs[0] / "summary.json").exists():
+            print(f"figures -> {out}")
+            for p in sorted(out.glob("fig18_*.png")):
                 print(" ", p.name)
             return
 

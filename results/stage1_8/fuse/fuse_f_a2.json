@@ -1,0 +1,19 @@
+{
+  "tag": "f_a2",
+  "mode": "tiny",
+  "n_params": 1049856,
+  "n_train_windows": 576,
+  "epochs": 30,
+  "train": {
+    "rel_err": 0.7694928646087646,
+    "mse": 0.7064176201820374,
+    "target_rms": 1.0922603607177734
+  },
+  "val": {
+    "rel_err": 0.7766352295875549,
+    "mse": 0.7181176543235779,
+    "target_rms": 1.091140627861023
+  },
+  "final_train_mse": 0.7055507078766823,
+  "git_commit": "50dac94de29ca68174d60453abbc557cde425664"
+}

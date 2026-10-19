@@ -1,0 +1,161 @@
+{
+ "units": [
+  {
+   "checkpoint": "a1_serial.npz",
+   "kind": "mlp",
+   "hidden": 128,
+   "n_layers": 4,
+   "n_params": 1245696,
+   "tokens": 256,
+   "note": "standalone forward, one call, 256 tokens",
+   "median_ms": 0.5315004964359105,
+   "p10_ms": 0.4907286172965541,
+   "p90_ms": 1.0007035889429976,
+   "repeat": 60,
+   "peak_memory_mb": 16.626968383789062
+  },
+  {
+   "checkpoint": "a2_random.npz",
+   "kind": "tiny",
+   "hidden": 128,
+   "n_layers": 4,
+   "n_params": 1312768,
+   "tokens": 256,
+   "note": "standalone forward, one call, 256 tokens",
+   "median_ms": 0.8754794980632141,
+   "p10_ms": 0.8169996959622949,
+   "p90_ms": 0.9772086865268647,
+   "repeat": 60,
+   "peak_memory_mb": 16.382858276367188
+  },
+  {
+   "checkpoint": "a3_inherited.npz",
+   "kind": "tiny",
+   "hidden": 128,
+   "n_layers": 4,
+   "n_params": 1312768,
+   "tokens": 256,
+   "note": "standalone forward, one call, 256 tokens",
+   "median_ms": 0.9009579953271896,
+   "p10_ms": 0.8320915920194238,
+   "p90_ms": 1.1119252943899482,
+   "repeat": 60,
+   "peak_memory_mb": 16.382858276367188
+  }
+ ],
+ "fuse_heads": [
+  {
+   "checkpoint": "f_a1.npz",
+   "mode": "tiny",
+   "n_params": 1049856,
+   "tokens": 256,
+   "note": "standalone head forward, 256 tokens",
+   "median_ms": 0.350208007148467,
+   "p10_ms": 0.2787619101582095,
+   "p90_ms": 0.4396496835397557,
+   "repeat": 60,
+   "peak_memory_mb": 11.50490951538086
+  },
+  {
+   "checkpoint": "f_a2.npz",
+   "mode": "tiny",
+   "n_params": 1049856,
+   "tokens": 256,
+   "note": "standalone head forward, 256 tokens",
+   "median_ms": 0.34904200583696365,
+   "p10_ms": 0.2566833049058914,
+   "p90_ms": 0.4525993863353506,
+   "repeat": 60,
+   "peak_memory_mb": 10.50490951538086
+  },
+  {
+   "checkpoint": "f_a3.npz",
+   "mode": "tiny",
+   "n_params": 1049856,
+   "tokens": 256,
+   "note": "standalone head forward, 256 tokens",
+   "median_ms": 0.4191879997961223,
+   "p10_ms": 0.26605831808410585,
+   "p90_ms": 0.5994707928039134,
+   "repeat": 60,
+   "peak_memory_mb": 11.25490951538086
+  },
+  {
+   "checkpoint": "f_a3z.npz",
+   "mode": "zero_trunk",
+   "n_params": 1049856,
+   "tokens": 256,
+   "note": "standalone head forward, 256 tokens",
+   "median_ms": 0.4759585135616362,
+   "p10_ms": 0.3060868853935972,
+   "p90_ms": 0.6076496996684001,
+   "repeat": 60,
+   "peak_memory_mb": 11.50490951538086
+  },
+  {
+   "checkpoint": "f_trunk.npz",
+   "mode": "trunk",
+   "n_params": 787712,
+   "tokens": 256,
+   "note": "standalone head forward, 256 tokens",
+   "median_ms": 0.33747899578884244,
+   "p10_ms": 0.24882500292733312,
+   "p90_ms": 0.3928958874894306,
+   "repeat": 60,
+   "peak_memory_mb": 8.50490951538086
+  }
+ ],
+ "references": {
+  "teacher_group_3_10": {
+   "blocks": [
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+   ],
+   "n_blocks": 8,
+   "tokens": 256,
+   "note": "the raw teacher group this stage replaces; same input h",
+   "median_ms": 19.30529200762976,
+   "p10_ms": 18.762770510511473,
+   "p90_ms": 19.92649638268631,
+   "repeat": 60,
+   "peak_memory_mb": 1834.9463806152344,
+   "n_params": 125847552
+  },
+  "teacher_block_3": {
+   "blocks": [
+    3
+   ],
+   "n_blocks": 1,
+   "tokens": 256,
+   "note": "one raw teacher block, same input h",
+   "median_ms": 2.6701669994508848,
+   "p10_ms": 2.5695702177472413,
+   "p90_ms": 2.8817044949391857,
+   "repeat": 60,
+   "peak_memory_mb": 1224.88383102417,
+   "n_params": 15730944
+  },
+  "stage17_serial_b3_r64": {
+   "checkpoint": "serial_b3_r64.npz",
+   "kind": "serial",
+   "sites": "4,5",
+   "hidden": 64,
+   "rank": 64,
+   "n_params": 278752,
+   "tokens": 256,
+   "n_sites": 2,
+   "note": "Stage 1.7 serial unit: 2 site(s), 64-d state, flops come from the Stage 1.7 bench",
+   "median_ms": 0.6021870067343116,
+   "p10_ms": 0.5493249947903678,
+   "p90_ms": 0.7958044967381284,
+   "repeat": 60,
+   "peak_memory_mb": 1145.5829849243164
+  }
+ }
+}

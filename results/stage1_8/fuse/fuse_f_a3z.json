@@ -1,0 +1,19 @@
+{
+  "tag": "f_a3z",
+  "mode": "zero_trunk",
+  "n_params": 1049856,
+  "n_train_windows": 576,
+  "epochs": 30,
+  "train": {
+    "rel_err": 0.747668981552124,
+    "mse": 0.6669158935546875,
+    "target_rms": 1.0922603607177734
+  },
+  "val": {
+    "rel_err": 0.7552812695503235,
+    "mse": 0.6791706085205078,
+    "target_rms": 1.091140627861023
+  },
+  "final_train_mse": 0.6658985242247581,
+  "git_commit": "50dac94de29ca68174d60453abbc557cde425664"
+}

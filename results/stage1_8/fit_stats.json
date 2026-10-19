@@ -1,0 +1,530 @@
+{
+ "stage": "1.8",
+ "splits": [
+  "cl_val",
+  "cl_test"
+ ],
+ "definition": "d = metric(A) - metric(B)，逐窗口配对 bootstrap；rel_err 的 d>0 表示 B 误差更小",
+ "n_boot": 20000,
+ "results": {
+  "cl_val": {
+   "n_windows": 64,
+   "per_model": {
+    "a1_serial": {
+     "rel_err_mean": 0.609,
+     "rel_err_median": 0.6079,
+     "cosine_mean": 0.7931,
+     "pred_rms_mean": 0.7934,
+     "target_rms_mean": 0.9871
+    },
+    "a1_short": {
+     "rel_err_mean": 0.6562,
+     "rel_err_median": 0.6542,
+     "cosine_mean": 0.7544,
+     "pred_rms_mean": 0.748,
+     "target_rms_mean": 0.9871
+    },
+    "a2_random": {
+     "rel_err_mean": 0.6044,
+     "rel_err_median": 0.6021,
+     "cosine_mean": 0.7966,
+     "pred_rms_mean": 0.7912,
+     "target_rms_mean": 0.9871
+    },
+    "a2_short": {
+     "rel_err_mean": 0.6859,
+     "rel_err_median": 0.6847,
+     "cosine_mean": 0.7275,
+     "pred_rms_mean": 0.7184,
+     "target_rms_mean": 0.9871
+    },
+    "a3_inherited": {
+     "rel_err_mean": 0.6066,
+     "rel_err_median": 0.6049,
+     "cosine_mean": 0.7949,
+     "pred_rms_mean": 0.7811,
+     "target_rms_mean": 0.9871
+    },
+    "a3_short": {
+     "rel_err_mean": 0.6666,
+     "rel_err_median": 0.665,
+     "cosine_mean": 0.7452,
+     "pred_rms_mean": 0.7429,
+     "target_rms_mean": 0.9871
+    }
+   },
+   "paired": [
+    {
+     "n": 64,
+     "mean_diff": 0.002239648928748105,
+     "ci95": [
+      0.0016212386766089571,
+      0.002886752886897425
+     ],
+     "frac_positive": 0.828125,
+     "significant_95": true,
+     "contrast": "A3(inherited) vs A2(random) full",
+     "a": "a3_inherited",
+     "b": "a2_random",
+     "metric": "rel_err",
+     "split": "cl_val"
+    },
+    {
+     "n": 64,
+     "mean_diff": -0.001715024933218956,
+     "ci95": [
+      -0.002218216354958713,
+      -0.0012200740398839124
+     ],
+     "frac_positive": 0.171875,
+     "significant_95": true,
+     "contrast": "A3(inherited) vs A2(random) full",
+     "a": "a3_inherited",
+     "b": "a2_random",
+     "metric": "cosine",
+     "split": "cl_val"
+    },
+    {
+     "n": 64,
+     "mean_diff": -0.01930045352383443,
+     "ci95": [
+      -0.02014155123573718,
+      -0.01836449136763645
+     ],
+     "frac_positive": 0.0,
+     "significant_95": true,
+     "contrast": "A3(inherited) vs A2(random) short",
+     "a": "a3_short",
+     "b": "a2_short",
+     "metric": "rel_err",
+     "split": "cl_val"
+    },
+    {
+     "n": 64,
+     "mean_diff": 0.01773488149046898,
+     "ci95": [
+      0.0169092828175053,
+      0.018502116249874235
+     ],
+     "frac_positive": 1.0,
+     "significant_95": true,
+     "contrast": "A3(inherited) vs A2(random) short",
+     "a": "a3_short",
+     "b": "a2_short",
+     "metric": "cosine",
+     "split": "cl_val"
+    },
+    {
+     "n": 64,
+     "mean_diff": -0.002335535152743533,
+     "ci95": [
+      -0.003265259262364235,
+      -0.0014186886193289982
+     ],
+     "frac_positive": 0.21875,
+     "significant_95": true,
+     "contrast": "A3(inherited) vs A1(serial MLP) full",
+     "a": "a3_inherited",
+     "b": "a1_serial",
+     "metric": "rel_err",
+     "split": "cl_val"
+    },
+    {
+     "n": 64,
+     "mean_diff": 0.001738118939101696,
+     "ci95": [
+      0.0010323157534003259,
+      0.002432293514721095
+     ],
+     "frac_positive": 0.78125,
+     "significant_95": true,
+     "contrast": "A3(inherited) vs A1(serial MLP) full",
+     "a": "a3_inherited",
+     "b": "a1_serial",
+     "metric": "cosine",
+     "split": "cl_val"
+    },
+    {
+     "n": 64,
+     "mean_diff": 0.004575184081491638,
+     "ci95": [
+      0.0035603153270207253,
+      0.005636395935032285
+     ],
+     "frac_positive": 0.890625,
+     "significant_95": true,
+     "contrast": "A1(serial MLP) vs A2(random) full",
+     "a": "a1_serial",
+     "b": "a2_random",
+     "metric": "rel_err",
+     "split": "cl_val"
+    },
+    {
+     "n": 64,
+     "mean_diff": -0.003453143872320652,
+     "ci95": [
+      -0.004264842486009002,
+      -0.0026714660692960033
+     ],
+     "frac_positive": 0.109375,
+     "significant_95": true,
+     "contrast": "A1(serial MLP) vs A2(random) full",
+     "a": "a1_serial",
+     "b": "a2_random",
+     "metric": "cosine",
+     "split": "cl_val"
+    },
+    {
+     "n": 64,
+     "mean_diff": -0.010426245430318878,
+     "ci95": [
+      -0.011403934245538863,
+      -0.009506479435172724
+     ],
+     "frac_positive": 0.0,
+     "significant_95": true,
+     "contrast": "A1(serial MLP) vs A3(inherited) short",
+     "a": "a1_short",
+     "b": "a3_short",
+     "metric": "rel_err",
+     "split": "cl_val"
+    },
+    {
+     "n": 64,
+     "mean_diff": 0.009198042564094067,
+     "ci95": [
+      0.00834650353062898,
+      0.010117705306038257
+     ],
+     "frac_positive": 1.0,
+     "significant_95": true,
+     "contrast": "A1(serial MLP) vs A3(inherited) short",
+     "a": "a1_short",
+     "b": "a3_short",
+     "metric": "cosine",
+     "split": "cl_val"
+    },
+    {
+     "n": 64,
+     "mean_diff": 0.08155641364956781,
+     "ci95": [
+      0.07941185326432965,
+      0.08387827742504472
+     ],
+     "frac_positive": 1.0,
+     "significant_95": true,
+     "contrast": "A2 short vs A2 full",
+     "a": "a2_short",
+     "b": "a2_random",
+     "metric": "rel_err",
+     "split": "cl_val"
+    },
+    {
+     "n": 64,
+     "mean_diff": -0.06908272951841354,
+     "ci95": [
+      -0.07120515573769808,
+      -0.06719436151906848
+     ],
+     "frac_positive": 0.0,
+     "significant_95": true,
+     "contrast": "A2 short vs A2 full",
+     "a": "a2_short",
+     "b": "a2_random",
+     "metric": "cosine",
+     "split": "cl_val"
+    },
+    {
+     "n": 64,
+     "mean_diff": 0.06001631119698528,
+     "ci95": [
+      0.058031595715199544,
+      0.062320160987690096
+     ],
+     "frac_positive": 1.0,
+     "significant_95": true,
+     "contrast": "A3 short vs A3 full",
+     "a": "a3_short",
+     "b": "a3_inherited",
+     "metric": "rel_err",
+     "split": "cl_val"
+    },
+    {
+     "n": 64,
+     "mean_diff": -0.04963282309472561,
+     "ci95": [
+      -0.051702842605300246,
+      -0.047893060045316814
+     ],
+     "frac_positive": 0.0,
+     "significant_95": true,
+     "contrast": "A3 short vs A3 full",
+     "a": "a3_short",
+     "b": "a3_inherited",
+     "metric": "cosine",
+     "split": "cl_val"
+    }
+   ]
+  },
+  "cl_test": {
+   "n_windows": 64,
+   "per_model": {
+    "a1_serial": {
+     "rel_err_mean": 0.6107,
+     "rel_err_median": 0.6097,
+     "cosine_mean": 0.7918,
+     "pred_rms_mean": 0.7945,
+     "target_rms_mean": 0.991
+    },
+    "a1_short": {
+     "rel_err_mean": 0.657,
+     "rel_err_median": 0.6567,
+     "cosine_mean": 0.7538,
+     "pred_rms_mean": 0.7508,
+     "target_rms_mean": 0.991
+    },
+    "a2_random": {
+     "rel_err_mean": 0.605,
+     "rel_err_median": 0.605,
+     "cosine_mean": 0.7961,
+     "pred_rms_mean": 0.7937,
+     "target_rms_mean": 0.991
+    },
+    "a2_short": {
+     "rel_err_mean": 0.6867,
+     "rel_err_median": 0.6859,
+     "cosine_mean": 0.7268,
+     "pred_rms_mean": 0.7197,
+     "target_rms_mean": 0.991
+    },
+    "a3_inherited": {
+     "rel_err_mean": 0.6077,
+     "rel_err_median": 0.607,
+     "cosine_mean": 0.794,
+     "pred_rms_mean": 0.7841,
+     "target_rms_mean": 0.991
+    },
+    "a3_short": {
+     "rel_err_mean": 0.6676,
+     "rel_err_median": 0.6668,
+     "cosine_mean": 0.7444,
+     "pred_rms_mean": 0.7446,
+     "target_rms_mean": 0.991
+    }
+   },
+   "paired": [
+    {
+     "n": 64,
+     "mean_diff": 0.0027427972239218914,
+     "ci95": [
+      0.002022455517604158,
+      0.0034922780632865155
+     ],
+     "frac_positive": 0.84375,
+     "significant_95": true,
+     "contrast": "A3(inherited) vs A2(random) full",
+     "a": "a3_inherited",
+     "b": "a2_random",
+     "metric": "rel_err",
+     "split": "cl_test"
+    },
+    {
+     "n": 64,
+     "mean_diff": -0.0021019326522946358,
+     "ci95": [
+      -0.0026565557811409233,
+      -0.0015632074326276783
+     ],
+     "frac_positive": 0.15625,
+     "significant_95": true,
+     "contrast": "A3(inherited) vs A2(random) full",
+     "a": "a3_inherited",
+     "b": "a2_random",
+     "metric": "cosine",
+     "split": "cl_test"
+    },
+    {
+     "n": 64,
+     "mean_diff": -0.019073422329598237,
+     "ci95": [
+      -0.019765529622653873,
+      -0.01840397464619603
+     ],
+     "frac_positive": 0.0,
+     "significant_95": true,
+     "contrast": "A3(inherited) vs A2(random) short",
+     "a": "a3_short",
+     "b": "a2_short",
+     "metric": "rel_err",
+     "split": "cl_test"
+    },
+    {
+     "n": 64,
+     "mean_diff": 0.01758639235049486,
+     "ci95": [
+      0.016938056633807718,
+      0.018231413746252655
+     ],
+     "frac_positive": 1.0,
+     "significant_95": true,
+     "contrast": "A3(inherited) vs A2(random) short",
+     "a": "a3_short",
+     "b": "a2_short",
+     "metric": "cosine",
+     "split": "cl_test"
+    },
+    {
+     "n": 64,
+     "mean_diff": -0.002937696958346135,
+     "ci95": [
+      -0.003968295843509289,
+      -0.0019419532151765265
+     ],
+     "frac_positive": 0.21875,
+     "significant_95": true,
+     "contrast": "A3(inherited) vs A1(serial MLP) full",
+     "a": "a3_inherited",
+     "b": "a1_serial",
+     "metric": "rel_err",
+     "split": "cl_test"
+    },
+    {
+     "n": 64,
+     "mean_diff": 0.0021914001554250717,
+     "ci95": [
+      0.0014264351688325406,
+      0.002981336880475282
+     ],
+     "frac_positive": 0.765625,
+     "significant_95": true,
+     "contrast": "A3(inherited) vs A1(serial MLP) full",
+     "a": "a3_inherited",
+     "b": "a1_serial",
+     "metric": "cosine",
+     "split": "cl_test"
+    },
+    {
+     "n": 64,
+     "mean_diff": 0.0056804941822680265,
+     "ci95": [
+      0.004779850715855135,
+      0.006642806082183413
+     ],
+     "frac_positive": 0.953125,
+     "significant_95": true,
+     "contrast": "A1(serial MLP) vs A2(random) full",
+     "a": "a1_serial",
+     "b": "a2_random",
+     "metric": "rel_err",
+     "split": "cl_test"
+    },
+    {
+     "n": 64,
+     "mean_diff": -0.0042933328077197075,
+     "ci95": [
+      -0.005014885473065079,
+      -0.0036071057431399825
+     ],
+     "frac_positive": 0.046875,
+     "significant_95": true,
+     "contrast": "A1(serial MLP) vs A2(random) full",
+     "a": "a1_serial",
+     "b": "a2_random",
+     "metric": "cosine",
+     "split": "cl_test"
+    },
+    {
+     "n": 64,
+     "mean_diff": -0.010597493668170255,
+     "ci95": [
+      -0.01153575327724036,
+      -0.009699343420332537
+     ],
+     "frac_positive": 0.0,
+     "significant_95": true,
+     "contrast": "A1(serial MLP) vs A3(inherited) short",
+     "a": "a1_short",
+     "b": "a3_short",
+     "metric": "rel_err",
+     "split": "cl_test"
+    },
+    {
+     "n": 64,
+     "mean_diff": 0.009356334805488586,
+     "ci95": [
+      0.008532974659465254,
+      0.010194172686897216
+     ],
+     "frac_positive": 1.0,
+     "significant_95": true,
+     "contrast": "A1(serial MLP) vs A3(inherited) short",
+     "a": "a1_short",
+     "b": "a3_short",
+     "metric": "cosine",
+     "split": "cl_test"
+    },
+    {
+     "n": 64,
+     "mean_diff": 0.08164963811720595,
+     "ci95": [
+      0.07933840592060905,
+      0.08402353103796344
+     ],
+     "frac_positive": 1.0,
+     "significant_95": true,
+     "contrast": "A2 short vs A2 full",
+     "a": "a2_short",
+     "b": "a2_random",
+     "metric": "rel_err",
+     "split": "cl_test"
+    },
+    {
+     "n": 64,
+     "mean_diff": -0.06925779115408659,
+     "ci95": [
+      -0.071412089234218,
+      -0.06724085069727152
+     ],
+     "frac_positive": 0.0,
+     "significant_95": true,
+     "contrast": "A2 short vs A2 full",
+     "a": "a2_short",
+     "b": "a2_random",
+     "metric": "cosine",
+     "split": "cl_test"
+    },
+    {
+     "n": 64,
+     "mean_diff": 0.05983341856368582,
+     "ci95": [
+      0.057750404362339365,
+      0.062081234069734745
+     ],
+     "frac_positive": 1.0,
+     "significant_95": true,
+     "contrast": "A3 short vs A3 full",
+     "a": "a3_short",
+     "b": "a3_inherited",
+     "metric": "rel_err",
+     "split": "cl_test"
+    },
+    {
+     "n": 64,
+     "mean_diff": -0.04956946615129709,
+     "ci95": [
+      -0.05150609326083213,
+      -0.04774430864490569
+     ],
+     "frac_positive": 0.0,
+     "significant_95": true,
+     "contrast": "A3 short vs A3 full",
+     "a": "a3_short",
+     "b": "a3_inherited",
+     "metric": "cosine",
+     "split": "cl_test"
+    }
+   ]
+  }
+ },
+ "note": "窗口级配对：同一个窗口喂给两个模型，衡量蒸馏目标的拟合质量，不是最终语言模型质量"
+}

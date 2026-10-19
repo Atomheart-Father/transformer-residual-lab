@@ -194,6 +194,9 @@ python -m unittest discover -s tests -v
 - 自由运行绝不注入教师状态；教师 anchor 只用于 `local_rms_diff` 与 `layer` 诊断。
 - 每个变体都记录 `executed_blocks` 与 `effective_depth`，不得把 depth 当时延。
 - 结果目录包含 `manifest.json`、`samples.jsonl`、`groups.jsonl`、`layers.jsonl`、`gram_*.npy`、`summary.csv`。
+- Stage 1.8 追加：缓存目录必须同时含 `h3.npy` / `h11T.npy` / `h11P.npy` / `collect_manifest.json`；
+  `eval_summary.json` 必须含 `warning`；`table.json` 的 `missing` 必须为空数组。
+- Stage 1.8 追加：任何"绕过重型分支"的说法都必须区分"计算了但不读"与"没有计算"，本轮只做过前者。
 
 ## 已知事项
 
@@ -313,3 +316,79 @@ python scripts/make_figures.py --stage17 results/stage1_7 --figdir results/stage
 - **`test_v2` 在 Experiment A 里当过诊断集。** B 部分的结构/轮次/站点全在 validation 上定，但严格说它不算"从未见过"。`ood_imdb` 是唯一完全干净的集。
 - **本轮没有任何并发执行。** 所有时延都是顺序测的，`eval_summary.json` 里的 `warning` 字段写着这一点。不宣称加速。
 
+## Stage 1.8：从原模型提取的轻量串行路径
+
+引擎是 `scripts/tiny_serial.py`，六个阶段：`collect / extract / fit / fuse / eval / bench`。
+站点固定 `SITE = 3`（`irr-a` 的 group `[3..10]`），`H11 = 11`。
+
+```bash
+# 1) 采集教师切片：只跑到 GROUP[-1]，缓存 h3 / h11T / h11P（fp16，各约 1 GB / 640 窗口）
+python scripts/tiny_serial.py --stage collect \
+  --input data257/train_8.jsonl --input data257/train_8_imdb.jsonl \
+  --output results/stage1_8 --data results/stage1_8/cl_train --max-samples 700
+
+# 2) 从原模型提取 A3 的初始权重（PCA 旋转 + 头/神经元选择 + norm 重标定）
+python scripts/tiny_serial.py --stage extract --output results/stage1_8 \
+  --data results/stage1_8/cl_train
+
+# 3) 蒸馏三个架构；A3 用 --init-from 指向第 2 步产物
+python scripts/tiny_serial.py --stage fit --kind mlp   --intermediate 640 \
+  --data results/stage1_8/cl_train --output results/stage1_8/fit --tag a1_serial --epochs 20
+python scripts/tiny_serial.py --stage fit --kind tiny  --intermediate 512 \
+  --data results/stage1_8/cl_train --output results/stage1_8/fit --tag a2_random --epochs 20
+python scripts/tiny_serial.py --stage fit --kind tiny  --intermediate 512 \
+  --init-from results/stage1_8/ex/a3_init.npz \
+  --data results/stage1_8/cl_train --output results/stage1_8/fit --tag a3_inherited --epochs 20
+
+# 4) 融合头：trunk = [a,p]；tiny = [a,p,z]；zero_trunk = [a,a,z]
+python scripts/tiny_serial.py --stage fuse \
+  --compensator results/stage1_8/fit/a3_inherited.npz \
+  --data results/stage1_8/cl_train --output results/stage1_8/fuse \
+  --tag f_a3z --fusion-mode zero_trunk --epochs 30
+
+# 5) 自由运行评估：--compensator 可重复，一次携带多个 tiny
+python scripts/tiny_serial.py --stage eval \
+  --input data257/test_v3.jsonl --output results/stage1_8/eval/E_test \
+  --compensator results/stage1_8/fit/a1_serial.npz \
+  --compensator results/stage1_8/fit/a2_random.npz \
+  --compensator results/stage1_8/fit/a3_inherited.npz \
+  --fusion results/stage1_8/fuse/f_a3z.npz [其他 head...] \
+  --with-tiny-sub --max-samples 64
+
+# 6) 成本与统计
+python scripts/stage18_bench.py --root results/stage1_8 --with-group \
+  --stage17-units results/stage1_7/B_r2_45/serial_b3_r64.npz
+python scripts/stage18_fit_stats.py --root results/stage1_8 --splits cl_val cl_test
+python scripts/stage18_stats.py --root results/stage1_8
+python scripts/make_stage18_table.py --root results/stage1_8
+python scripts/make_figures.py --stage18 results/stage1_8 --figdir results/stage1_8/figures
+```
+
+### 必须注意的坑
+
+- **`--stage collect` 写入 `--data` 而不是 `--output`。** 一开始 `cmd_collect` 忽略 `--data` 直接写
+  `--output`，导致缓存落在 `results/stage1_8/` 顶层，`fit` 找不到文件。已修。
+- **`build_from_checkpoint` 以 checkpoint meta 为架构唯一来源。** `fuse` / `eval` / `bench`
+  不能信 CLI 的 `--kind` / `--intermediate`：A1 是 mlp / inter 640，A2、A3 是 tiny / inter 512，
+  写错会静默形状不匹配。
+- **zsh 不对未加引号的变量分词。** `cmd $FLAGS` 会把整个字符串当一个参数，argparse 报错还会被
+  `| head` 吞掉。多值 flag 必须显式重复写。
+- **梯度下降只在 `fit` 阶段发生。** `fuse` 里 tiny 是冻结的，只训融合头。
+- **`stage18_stats.py` 的 run 发现在 `eval/` 子目录下**，不是根目录。
+- **`fuse` / `eval` 的 `--data` / `--input` 都要显式给出**，否则 main() 会拒绝运行。
+
+## Stage 1.8 的已知事项
+
+- **继承的收益很小且分指标方向不一致。** 3 epoch 时 A3 比 A2 好 0.0193（64/64 窗口同号）；20 epoch
+  时 A2 反超 0.0027；接入后 ΔNLL 上 A3 又比 A2 好 0.0307–0.0371（三个 split 全部显著）。只报一个
+  指标会得出相反结论。
+- **教师状态相似度与最终 ΔNLL 方向会相反。** A2 的 rel.err 最好但 ΔNLL 最差。能力判定只能看
+  ΔNLL / KL / top1。
+- **不同 head 模式之间不可比。** A1 / A2 只有 trunk+tiny 头，A3 额外有 zero_trunk 头。跨架构比
+  ΔNLL 必须先对齐模式。
+- **A.npy / C.npy 与 4 站点的 r64 采集必须 mmap 读**（Stage 1.7 的 exit 137 教训）。Stage 1.8 的
+  `cl_*` 已全部 mmap。
+- **本轮没有任何端到端加速。** `eval_summary.json` 的 `warning` 字段每轮都写着
+  "Sequential execution. No end-to-end speedup is claimed."
+- **cl_ood 上最佳变体是 f_trunk 而非 f_a3z**（3.1018 vs 3.1055），配对 CI 不含方向的显著结论。
+  不要只引用对自己有利的那个 split。

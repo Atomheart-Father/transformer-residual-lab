@@ -1,0 +1,91 @@
+{
+  "stage": "extract",
+  "method": "PCA rotation of h3 + structured slicing + norm rescale",
+  "teacher_layers": [
+    3,
+    5,
+    7,
+    9
+  ],
+  "hidden_keep": 128,
+  "intermediate_keep": 512,
+  "rotation": {
+    "n_tokens_used": 40000,
+    "energy_share_top_keep": 0.999749181467492,
+    "top_evals": [
+      176473.54835589253,
+      5.135489583422046,
+      3.7369155869515756,
+      2.661073110113478,
+      2.200860661961927,
+      1.9122435768788497
+    ]
+  },
+  "head_choice": {
+    "3": {
+      "q_head": 9,
+      "kv_head": 4,
+      "score": 138.6511688232422,
+      "n_q_heads": 16,
+      "n_kv_heads": 8
+    },
+    "5": {
+      "q_head": 0,
+      "kv_head": 0,
+      "score": 153.39697265625,
+      "n_q_heads": 16,
+      "n_kv_heads": 8
+    },
+    "7": {
+      "q_head": 8,
+      "kv_head": 4,
+      "score": 115.07182312011719,
+      "n_q_heads": 16,
+      "n_kv_heads": 8
+    },
+    "9": {
+      "q_head": 14,
+      "kv_head": 7,
+      "score": 126.83716583251953,
+      "n_q_heads": 16,
+      "n_kv_heads": 8
+    }
+  },
+  "norm_rescale": {
+    "3": {
+      "rms_full": 13.444765777978057,
+      "rms_kept": 38.020773823754574,
+      "factor": 2.827923851676981
+    },
+    "5": {
+      "rms_full": 13.451518876598012,
+      "rms_kept": 38.030379139657285,
+      "factor": 2.8272182114556457
+    },
+    "7": {
+      "rms_full": 13.460010841817793,
+      "rms_kept": 38.0427886655967,
+      "factor": 2.8263564652863957
+    },
+    "9": {
+      "rms_full": 13.46716088838624,
+      "rms_kept": 38.05116266668283,
+      "factor": 2.825477692146475
+    }
+  },
+  "n_params": 1312768,
+  "inherited": [
+    "input_layernorm / post_attention_layernorm weights (rotated, sliced, rescaled)",
+    "q/k/v/o projections (rotated, sliced to one head)",
+    "q_norm / k_norm (unchanged, head_dim is already 128)",
+    "gate/up/down projections (rotated, sliced to 512 neurons)",
+    "proj_in / proj_out (the kept rows/columns of the rotation)"
+  ],
+  "reinitialised": [],
+  "recalibrated": [
+    "RMSNorm weights: x1 scalar per norm, measured, not fitted"
+  ],
+  "not_faithful": "This is not a function-preserving compression: 1024 -> 128 channels loses 87.5% of the residual coordinates, and one attention head replaces 16. Fidelity must be measured, not assumed.",
+  "flops_per_token": 3147776,
+  "git_commit": "50dac94de29ca68174d60453abbc557cde425664"
+}

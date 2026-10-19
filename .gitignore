@@ -37,3 +37,17 @@ results/scratch/
 **/A.npy
 **/C.npy
 **/*_activations.npz
+
+# Stage 1.8 teacher-slice caches: ~1 GB per split on disk. Regenerate with
+# `scripts/tiny_serial.py --stage collect`. manifests are text and are kept.
+# `cl` (no suffix) is the smoke-test dir name, so both patterns are needed.
+**/cl_*/
+**/cl/
+!**/cl_*/collect_manifest.json
+!**/cl/collect_manifest.json
+
+# scratch runs, not part of the reported evidence
+results/smoke_18/
+
+# short-budget probes: the fit_*.json summary is the record, the weights are scratch
+**/fit/*_short.npz

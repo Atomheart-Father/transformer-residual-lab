@@ -154,3 +154,62 @@
 
 `A.npy` / `C.npy`（`[n,S,T,D]`，float32，每个约 250 MB）与 `seq_pairs.npz` 只留在本地，`.gitignore` 已排除。提交的是 `serial_*.npz`（每个 270 KB–2 MB）与所有 JSON。
 
+## Stage 1.8 的产物字段
+
+### `results/stage1_8/cl_*/collect_manifest.json`
+
+教师切片缓存的清单。`input`（jsonl 路径列表，多输入会拼接）、`n_samples`、`n_predicted_tokens`、
+`rms_full`（每个 layer 的实测 RMS，提取 norm 重标定时用）、`group = [3..10]`。
+缓存本体 `h3.npy` / `h11T.npy` / `h11P.npy` 为 fp16，`h3` 是组入口，`h11T` 是教师 exit，
+`h11P` 是并行组输出。`.gitignore` 已排除整个 `cl_*/`，只保留 manifest。
+
+### `results/stage1_8/ex/extract_manifest.json`
+
+A3 参数提取的来源清单，用来把"直接权重继承"和"仅教师监督训练"分开。关键字段：
+`rotation.energy_share_top_keep`（0.99975，注意被 massive activation 主导，不等于任务信息保留）、
+`head_choice`（每层选了哪个 q 头及其 GQA 配对 kv 头）、`norm_rescale.factor`（约 2.828，实测非拟合）、
+`inherited[]` / `reinitialised[]`（后者必须为空）、`not_faithful`（明确写出这不是函数保持压缩）。
+
+### `results/stage1_8/fit/fit_*.json`
+
+`before_training` / `after_training` 各带 val 与 train 两套 `rel_err` / `cosine` / `target_rms` /
+`pred_rms`。**`before_training` 是"提取是否构成功能性初值"的唯一证据**，不能只看 `after`。
+`init_source` 区分 `random` 与具体 checkpoint。
+
+### `results/stage1_8/fit/fit_stats.json`
+
+逐窗口配对 bootstrap 的"是否继承"判定。`per_model` 是每个 checkpoint 在某个 split 上的聚合，
+`paired[]` 是 `d = metric(A) − metric(B)`（rel_err 的 d > 0 表示 B 更接近教师），字段同 Stage 1.7。
+**三个指标方向会不一致**：短预算 rel.err、满预算 rel.err、接入后 ΔNLL，必须分别报告。
+
+### `results/stage1_8/fuse/fuse_*.json`
+
+融合头自己的拟合质量。`mode` ∈ `trunk`（特征 `[a,p]`）/ `tiny`（`[a,p,z]`）/ `zero_trunk`（`[a,a,z]`），
+`n_params`，`train` / `val` 各自的 `rel_err`。注意 A1 / A2 只有 `tiny` 头，A3 额外有 `zero_trunk` 头，
+**跨架构比 ΔNLL 必须先对齐 mode**。
+
+### `results/stage1_8/eval/E_*/eval_summary.json`
+
+`aggregate[variant]` 含 `delta_nll_mean` / `delta_nll_std` / `kl_mean` / `top1_mean` /
+`gap_closure` / `ppl_ratio`。变体命名：`irr-a`（不补偿）、`irr-a+oracle`（诊断）、
+`tiny_sub_<tag>`（tiny 原始输出直接当修正）、`fuse_<head>`（各融合头）。
+`gap_closure = (base − variant) / base`，分母是 base ΔNLL，**不是 Oracle gap**；报告 Oracle gap
+回收比例要用 `(base − variant) / (base − oracle)`，两个数不要混用。
+`compensator_meta` 记录每个 tiny 的来源，`fusion` 记录每个 head 用了哪个 tiny。
+`warning` 字段固定为 "Sequential execution. No end-to-end speedup is claimed."
+
+### `results/stage1_8/bench/bench_s18.json`
+
+`units[]`（三个轻量单元）、`fuse_heads[]`、`references{}`（教师组 / 单 block / Stage 1.7 串行单元）。
+每个都带 `median_ms` / `p10_ms` / `p90_ms` / `peak_memory_mb`。**成本只用实测时间**，
+`flops_per_token` 只作量级参照，不能折算成毫秒。
+
+### `results/stage1_8/table.json`
+
+`make_stage18_table.py` 的统一汇总，只汇总不重算。顶层 `missing[]` **非空就必须查**。
+`eval` 部分的 key 是 eval run 名（`E_val` / `E_test` / `E_ood`），`E_val` 是选型集，另两个是盲测。
+
+### `results/stage1_8/paired_stats.json`
+
+`stage18_stats.py` 生成，run 发现走 `eval/` 子目录。`named` 对比是点名的，`all-pairs` 是自动全配对；
+`kind` 字段区分两者，报告里引用 `named` 的即可。
