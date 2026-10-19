@@ -1,0 +1,20 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.hf_cache/
+.cache/
+
+# dataset token windows stay local; only hashes and rules are committed
+data/
+
+# scratch runs, not part of the reported evidence
+results/devcheck/
+results/probe_win/
+results/scratch/
+
+# model weights and large binaries are never committed
+*.safetensors
+*.gguf
+*.mlx
+*.log

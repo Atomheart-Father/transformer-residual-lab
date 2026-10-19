@@ -1,0 +1,5 @@
+# Pin exact versions in a lockfile after the first working Apple Silicon run.
+mlx-lm>=0.29.1
+numpy>=1.26
+transformers>=4.51
+datasets>=3.0
