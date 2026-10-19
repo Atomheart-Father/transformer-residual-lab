@@ -1,0 +1,56 @@
+{
+  "prefix0-g2": {
+    "choice": "layer_ls",
+    "val_dnll": {
+      "sum": 8.9187,
+      "group_ls": 11.6899,
+      "layer_ls": 6.8868
+    },
+    "depth": null
+  },
+  "prefix3-g8": {
+    "choice": "sum",
+    "val_dnll": {
+      "sum": 4.5114,
+      "group_ls": 5.7421,
+      "layer_ls": 7.6561
+    },
+    "depth": null
+  },
+  "prefix3-g4": {
+    "choice": "layer_ls",
+    "val_dnll": {
+      "sum": 3.8654,
+      "group_ls": 3.1854,
+      "layer_ls": 2.8979
+    },
+    "depth": null
+  },
+  "prefix6-g4": {
+    "choice": "layer_ls",
+    "val_dnll": {
+      "sum": 2.6416,
+      "group_ls": 2.215,
+      "layer_ls": 2.0659
+    },
+    "depth": null
+  },
+  "prefix10-g4": {
+    "choice": "layer_ls",
+    "val_dnll": {
+      "sum": 1.816,
+      "group_ls": 1.7944,
+      "layer_ls": 1.6979
+    },
+    "depth": null
+  },
+  "prefix3-g2": {
+    "choice": "layer_ls",
+    "val_dnll": {
+      "sum": 1.1715,
+      "group_ls": 1.0217,
+      "layer_ls": 1.0044
+    },
+    "depth": null
+  }
+}

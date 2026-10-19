@@ -12,6 +12,20 @@
 - `summary.csv` / `group_summary.csv` / `layer_summary.csv` / `summary.md` / `summary.json`。
 - `figures/*.png`。
 
+### Stage 1.5 追加的产物
+
+| 路径 | 内容 |
+|---|---|
+| `coeffs/<plan>__<scheme>__lam<λ>.json` | 拟合的 α、每组 `rel_reconstruction_rms`、`cond`、`n_clipped`、`fit` 元数据 |
+| `selection.json` | validation 上按规则做出的选择（计划 → 方案 → 各方案 val ΔNLL），冻结后不得改动 |
+| `b3/samples.jsonl` | 每个 `plan::mode` 变体一条；`boundary` 字段含 `rho`、`cosine`、`magnitude_share`、`direction_share` |
+| `b3_scan/g<k>/` | 只在第 k 组出口做 oracle 干预的单独运行 |
+| `matched_depth.csv` | 每个实际深度上并行与删层的逐项对齐（不是插值） |
+| `threshold_depth.csv` | 每个 ΔNLL 预算下最优方案；达不到的预算写 `NOT REACHED` + NaN |
+| `pareto_frontier.csv` | 按 (depth, ΔNLL) 的非支配集 |
+
+`rel_reconstruction_rms` 的含义：用最优 α 线性组合重构真实组输出后剩下的相对 RMS。**它是 B2 类方法的上限，不是拟合误差的噪声。** 组越大，这个值越大（g2 0.41 → g8 0.70）。
+
 ## 三类误差（不可混用）
 
 | 字段 | 定义 | 能否部署 |

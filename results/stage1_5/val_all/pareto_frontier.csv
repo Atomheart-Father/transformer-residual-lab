@@ -1,0 +1,6 @@
+variant,kind,executed_blocks,effective_depth,delta_nll_mean,kl_mean,top1_mean,ppl_ratio
+prefix3-g8@fp32,parallel,28,7,4.51144,4.47086,0.125977,91.0532
+prefix3-g4+layer_ls_lam0@fp32,parallel,28,10,2.89323,2.8777,0.260254,18.0516
+prefix6-g4+layer_ls_lam0.1@fp32,parallel,28,12,2.05555,2.03194,0.300659,7.81111
+prefix10-g4+layer_ls_lam0.1@fp32,parallel,28,15,1.69526,1.65845,0.359131,5.44806
+prefix3-g2+layer_ls_lam0.1@fp32,parallel,28,16,1.00369,0.989031,0.512817,2.72834

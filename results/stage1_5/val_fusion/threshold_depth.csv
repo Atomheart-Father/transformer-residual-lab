@@ -1,0 +1,7 @@
+delta_nll_threshold,variant,effective_depth,executed_blocks,delta_nll_mean
+0.1,NOT REACHED,,,
+0.25,NOT REACHED,,,
+0.5,NOT REACHED,,,
+1,NOT REACHED,,,
+2,prefix10-g4@fp32,15,28,1.81602
+3,prefix6-g4+sqrt@fp32,12,28,2.42053

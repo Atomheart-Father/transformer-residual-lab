@@ -6,7 +6,13 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from measure import decompose_error, default_plans, even_keep, make_plan  # noqa: E402
+from measure import (  # noqa: E402
+    decompose_error,
+    even_keep,
+    make_plan,
+    stage15_plans,
+    stage1_plans,
+)
 
 
 def block_factory(factor):
@@ -86,12 +92,25 @@ class Plans(unittest.TestCase):
             self.assertEqual(kept[0], 0)
             self.assertEqual(kept[-1], self.n - 1)
 
-    def test_default_plans_include_required_controls(self):
-        names = default_plans(self.n)
+    def test_stage1_plans_include_required_controls(self):
+        names = stage1_plans(self.n)
         for required in ("serial", "group2", "group4", "group8", "group28",
                          "delete-keep7", "delete-keep14", "delete-keep21",
                          "window-early-g4", "window-mid-g4", "window-late-g4"):
             self.assertIn(required, names)
+
+    def test_stage15_has_a_deletion_baseline_per_depth(self):
+        plans = stage15_plans(self.n)
+        depths = {p.effective_depth for p in plans if p.kind == "parallel"}
+        delete_depths = {p.effective_depth for p in plans if p.kind == "delete"}
+        self.assertTrue(depths)
+        self.assertTrue(depths <= delete_depths,
+                        f"missing deletion baselines at {sorted(depths - delete_depths)}")
+
+    def test_first_parallel_group_skips_serial_prefix(self):
+        plan = make_plan(self.n, "prefix3-g8")
+        first = next(i for i, g in enumerate(plan.groups) if len(g) > 1)
+        self.assertEqual(plan.groups[first][0], 3)
 
 
 class Decomposition(unittest.TestCase):

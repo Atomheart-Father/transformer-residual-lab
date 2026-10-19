@@ -1,0 +1,358 @@
+{
+  "status": "MEASURED",
+  "model": "mlx-community/Qwen3-0.6B-Base-bf16",
+  "model_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
+  "model_config": {
+    "architectures": [
+      "Qwen3ForCausalLM"
+    ],
+    "attention_bias": false,
+    "attention_dropout": 0.0,
+    "bos_token_id": 151643,
+    "eos_token_id": 151643,
+    "head_dim": 128,
+    "hidden_act": "silu",
+    "hidden_size": 1024,
+    "initializer_range": 0.02,
+    "intermediate_size": 3072,
+    "max_position_embeddings": 32768,
+    "max_window_layers": 28,
+    "model_type": "qwen3",
+    "num_attention_heads": 16,
+    "num_hidden_layers": 28,
+    "num_key_value_heads": 8,
+    "rms_norm_eps": 1e-06,
+    "rope_scaling": null,
+    "rope_theta": 1000000,
+    "sliding_window": null,
+    "tie_word_embeddings": true,
+    "torch_dtype": "bfloat16",
+    "transformers_version": "4.51.0",
+    "use_cache": true,
+    "use_sliding_window": false,
+    "vocab_size": 151936
+  },
+  "n_layers": 28,
+  "mlx_version": "0.31.2",
+  "mlx_lm_version": "0.31.3",
+  "python": "3.12.12 (main, Oct  9 2025, 11:07:00) [Clang 17.0.0 (clang-1700.4.4.1)]",
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "input": "data257/test.jsonl",
+  "max_samples": 64,
+  "preset": "stage1",
+  "fusion": "sum",
+  "coeffs_files": [
+    "results/stage1_5/coeffs/prefix3-g2__layer_ls__lam0.01.json"
+  ],
+  "coeffs_meta": [
+    {
+      "plan": "prefix3-g2",
+      "scheme": "layer_ls",
+      "lambda_rel": 0.01,
+      "alpha": {
+        "3": 0.7466083717925392,
+        "4": 0.7793527549572168,
+        "5": 0.8093225603631344,
+        "6": 0.6330086151181041,
+        "7": 0.7596526101271354,
+        "8": 0.7453478466010449,
+        "9": 0.8525859969552098,
+        "10": 0.8298834045292018,
+        "11": 0.8742915168460889,
+        "12": 0.5940453274180584,
+        "13": 0.7617528795936519,
+        "14": 0.846743744219163,
+        "15": 0.8558242116361165,
+        "16": 0.9017001195012235,
+        "17": 0.9590518450222524,
+        "18": 0.884742695926037,
+        "19": 0.9887696153154854,
+        "20": 0.8980016629832557,
+        "21": 0.9932183682454904,
+        "22": 0.850146430250799,
+        "23": 1.0224212229489424,
+        "24": 0.8850953886258321,
+        "25": 0.9677612162430725,
+        "26": 0.8224222774425839
+      },
+      "clip": [
+        0.0,
+        2.0
+      ],
+      "n_clipped": 0,
+      "groups": [
+        {
+          "group_index": 3,
+          "start": 3,
+          "end": 5,
+          "layers": [
+            3,
+            4
+          ],
+          "alpha": [
+            0.7466083717925392,
+            0.7793527549572168
+          ],
+          "rel_reconstruction_rms": 0.5642546665519091,
+          "cond": 1.4302298422050908
+        },
+        {
+          "group_index": 4,
+          "start": 5,
+          "end": 7,
+          "layers": [
+            5,
+            6
+          ],
+          "alpha": [
+            0.8093225603631344,
+            0.6330086151181041
+          ],
+          "rel_reconstruction_rms": 0.5475709993911486,
+          "cond": 1.3647414115186705
+        },
+        {
+          "group_index": 5,
+          "start": 7,
+          "end": 9,
+          "layers": [
+            7,
+            8
+          ],
+          "alpha": [
+            0.7596526101271354,
+            0.7453478466010449
+          ],
+          "rel_reconstruction_rms": 0.5377642902541695,
+          "cond": 1.2095666079316683
+        },
+        {
+          "group_index": 6,
+          "start": 9,
+          "end": 11,
+          "layers": [
+            9,
+            10
+          ],
+          "alpha": [
+            0.8525859969552098,
+            0.8298834045292018
+          ],
+          "rel_reconstruction_rms": 0.4814365420042909,
+          "cond": 1.5780716858711323
+        },
+        {
+          "group_index": 7,
+          "start": 11,
+          "end": 13,
+          "layers": [
+            11,
+            12
+          ],
+          "alpha": [
+            0.8742915168460889,
+            0.5940453274180584
+          ],
+          "rel_reconstruction_rms": 0.4680257278445116,
+          "cond": 1.393708405597499
+        },
+        {
+          "group_index": 8,
+          "start": 13,
+          "end": 15,
+          "layers": [
+            13,
+            14
+          ],
+          "alpha": [
+            0.7617528795936519,
+            0.846743744219163
+          ],
+          "rel_reconstruction_rms": 0.4474271709007431,
+          "cond": 1.3738614168553787
+        },
+        {
+          "group_index": 9,
+          "start": 15,
+          "end": 17,
+          "layers": [
+            15,
+            16
+          ],
+          "alpha": [
+            0.8558242116361165,
+            0.9017001195012235
+          ],
+          "rel_reconstruction_rms": 0.42890271363051874,
+          "cond": 2.4354212194420515
+        },
+        {
+          "group_index": 10,
+          "start": 17,
+          "end": 19,
+          "layers": [
+            17,
+            18
+          ],
+          "alpha": [
+            0.9590518450222524,
+            0.884742695926037
+          ],
+          "rel_reconstruction_rms": 0.3703914556722586,
+          "cond": 1.8116244223225906
+        },
+        {
+          "group_index": 11,
+          "start": 19,
+          "end": 21,
+          "layers": [
+            19,
+            20
+          ],
+          "alpha": [
+            0.9887696153154854,
+            0.8980016629832557
+          ],
+          "rel_reconstruction_rms": 0.3306324458623767,
+          "cond": 1.9804251103018926
+        },
+        {
+          "group_index": 12,
+          "start": 21,
+          "end": 23,
+          "layers": [
+            21,
+            22
+          ],
+          "alpha": [
+            0.9932183682454904,
+            0.850146430250799
+          ],
+          "rel_reconstruction_rms": 0.27044021068034313,
+          "cond": 2.38270816458389
+        },
+        {
+          "group_index": 13,
+          "start": 23,
+          "end": 25,
+          "layers": [
+            23,
+            24
+          ],
+          "alpha": [
+            1.0224212229489424,
+            0.8850953886258321
+          ],
+          "rel_reconstruction_rms": 0.2302453066084156,
+          "cond": 2.672395925294862
+        },
+        {
+          "group_index": 14,
+          "start": 25,
+          "end": 27,
+          "layers": [
+            25,
+            26
+          ],
+          "alpha": [
+            0.9677612162430725,
+            0.8224222774425839
+          ],
+          "rel_reconstruction_rms": 0.2680895309185494,
+          "cond": 2.5884939583720077
+        }
+      ],
+      "fit": {
+        "n_samples": 64,
+        "n_elements": 202113024,
+        "seconds": 32.91,
+        "model_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
+        "note": "alpha fitted on teacher group-entry states, then frozen; teacher states are never used during free running"
+      }
+    }
+  ],
+  "variants_evaluated": [
+    "layer_ls_lam0.01"
+  ],
+  "plans": [
+    {
+      "name": "prefix3-g2",
+      "kind": "parallel",
+      "executed_blocks": 28,
+      "effective_depth": 16,
+      "prefix": 3,
+      "group_size": 2,
+      "groups": [
+        [
+          0
+        ],
+        [
+          1
+        ],
+        [
+          2
+        ],
+        [
+          3,
+          4
+        ],
+        [
+          5,
+          6
+        ],
+        [
+          7,
+          8
+        ],
+        [
+          9,
+          10
+        ],
+        [
+          11,
+          12
+        ],
+        [
+          13,
+          14
+        ],
+        [
+          15,
+          16
+        ],
+        [
+          17,
+          18
+        ],
+        [
+          19,
+          20
+        ],
+        [
+          21,
+          22
+        ],
+        [
+          23,
+          24
+        ],
+        [
+          25,
+          26
+        ],
+        [
+          27
+        ]
+      ],
+      "deleted_layers": [],
+      "note": "3 serial layers, rest in groups of 2"
+    }
+  ],
+  "accum": [
+    "fp32"
+  ],
+  "diagnose_plans": [],
+  "git_commit": "afd9d9f2feb541f8c6fa54bde760f25496b02d0d",
+  "warning": "Graph semantics only. No real GPU concurrency and no speedup claim.",
+  "n_measured": 64
+}

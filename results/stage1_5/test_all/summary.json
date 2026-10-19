@@ -1,0 +1,1531 @@
+{
+  "meta": {
+    "status": "MEASURED",
+    "model": "mlx-community/Qwen3-0.6B-Base-bf16",
+    "model_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
+    "model_config": {
+      "architectures": [
+        "Qwen3ForCausalLM"
+      ],
+      "attention_bias": false,
+      "attention_dropout": 0.0,
+      "bos_token_id": 151643,
+      "eos_token_id": 151643,
+      "head_dim": 128,
+      "hidden_act": "silu",
+      "hidden_size": 1024,
+      "initializer_range": 0.02,
+      "intermediate_size": 3072,
+      "max_position_embeddings": 32768,
+      "max_window_layers": 28,
+      "model_type": "qwen3",
+      "num_attention_heads": 16,
+      "num_hidden_layers": 28,
+      "num_key_value_heads": 8,
+      "rms_norm_eps": 1e-06,
+      "rope_scaling": null,
+      "rope_theta": 1000000,
+      "sliding_window": null,
+      "tie_word_embeddings": true,
+      "torch_dtype": "bfloat16",
+      "transformers_version": "4.51.0",
+      "use_cache": true,
+      "use_sliding_window": false,
+      "vocab_size": 151936
+    },
+    "n_layers": 28,
+    "mlx_version": "0.31.2",
+    "mlx_lm_version": "0.31.3",
+    "python": "3.12.12 (main, Oct  9 2025, 11:07:00) [Clang 17.0.0 (clang-1700.4.4.1)]",
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "input": "data257/test.jsonl",
+    "max_samples": 64,
+    "preset": "stage1",
+    "fusion": "sum",
+    "coeffs_files": [],
+    "coeffs_meta": null,
+    "variants_evaluated": [
+      ""
+    ],
+    "plans": [
+      {
+        "name": "prefix0-g2",
+        "kind": "parallel",
+        "executed_blocks": 28,
+        "effective_depth": 14,
+        "prefix": 0,
+        "group_size": 2,
+        "groups": [
+          [
+            0,
+            1
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            6,
+            7
+          ],
+          [
+            8,
+            9
+          ],
+          [
+            10,
+            11
+          ],
+          [
+            12,
+            13
+          ],
+          [
+            14,
+            15
+          ],
+          [
+            16,
+            17
+          ],
+          [
+            18,
+            19
+          ],
+          [
+            20,
+            21
+          ],
+          [
+            22,
+            23
+          ],
+          [
+            24,
+            25
+          ],
+          [
+            26,
+            27
+          ]
+        ],
+        "deleted_layers": [],
+        "note": "0 serial layers, rest in groups of 2"
+      },
+      {
+        "name": "prefix3-g8",
+        "kind": "parallel",
+        "executed_blocks": 28,
+        "effective_depth": 7,
+        "prefix": 3,
+        "group_size": 8,
+        "groups": [
+          [
+            0
+          ],
+          [
+            1
+          ],
+          [
+            2
+          ],
+          [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10
+          ],
+          [
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18
+          ],
+          [
+            19,
+            20,
+            21,
+            22,
+            23,
+            24,
+            25,
+            26
+          ],
+          [
+            27
+          ]
+        ],
+        "deleted_layers": [],
+        "note": "3 serial layers, rest in groups of 8"
+      },
+      {
+        "name": "prefix3-g4",
+        "kind": "parallel",
+        "executed_blocks": 28,
+        "effective_depth": 10,
+        "prefix": 3,
+        "group_size": 4,
+        "groups": [
+          [
+            0
+          ],
+          [
+            1
+          ],
+          [
+            2
+          ],
+          [
+            3,
+            4,
+            5,
+            6
+          ],
+          [
+            7,
+            8,
+            9,
+            10
+          ],
+          [
+            11,
+            12,
+            13,
+            14
+          ],
+          [
+            15,
+            16,
+            17,
+            18
+          ],
+          [
+            19,
+            20,
+            21,
+            22
+          ],
+          [
+            23,
+            24,
+            25,
+            26
+          ],
+          [
+            27
+          ]
+        ],
+        "deleted_layers": [],
+        "note": "3 serial layers, rest in groups of 4"
+      },
+      {
+        "name": "prefix6-g4",
+        "kind": "parallel",
+        "executed_blocks": 28,
+        "effective_depth": 12,
+        "prefix": 6,
+        "group_size": 4,
+        "groups": [
+          [
+            0
+          ],
+          [
+            1
+          ],
+          [
+            2
+          ],
+          [
+            3
+          ],
+          [
+            4
+          ],
+          [
+            5
+          ],
+          [
+            6,
+            7,
+            8,
+            9
+          ],
+          [
+            10,
+            11,
+            12,
+            13
+          ],
+          [
+            14,
+            15,
+            16,
+            17
+          ],
+          [
+            18,
+            19,
+            20,
+            21
+          ],
+          [
+            22,
+            23,
+            24,
+            25
+          ],
+          [
+            26,
+            27
+          ]
+        ],
+        "deleted_layers": [],
+        "note": "6 serial layers, rest in groups of 4"
+      },
+      {
+        "name": "prefix10-g4",
+        "kind": "parallel",
+        "executed_blocks": 28,
+        "effective_depth": 15,
+        "prefix": 10,
+        "group_size": 4,
+        "groups": [
+          [
+            0
+          ],
+          [
+            1
+          ],
+          [
+            2
+          ],
+          [
+            3
+          ],
+          [
+            4
+          ],
+          [
+            5
+          ],
+          [
+            6
+          ],
+          [
+            7
+          ],
+          [
+            8
+          ],
+          [
+            9
+          ],
+          [
+            10,
+            11,
+            12,
+            13
+          ],
+          [
+            14,
+            15,
+            16,
+            17
+          ],
+          [
+            18,
+            19,
+            20,
+            21
+          ],
+          [
+            22,
+            23,
+            24,
+            25
+          ],
+          [
+            26,
+            27
+          ]
+        ],
+        "deleted_layers": [],
+        "note": "10 serial layers, rest in groups of 4"
+      },
+      {
+        "name": "prefix3-g2",
+        "kind": "parallel",
+        "executed_blocks": 28,
+        "effective_depth": 16,
+        "prefix": 3,
+        "group_size": 2,
+        "groups": [
+          [
+            0
+          ],
+          [
+            1
+          ],
+          [
+            2
+          ],
+          [
+            3,
+            4
+          ],
+          [
+            5,
+            6
+          ],
+          [
+            7,
+            8
+          ],
+          [
+            9,
+            10
+          ],
+          [
+            11,
+            12
+          ],
+          [
+            13,
+            14
+          ],
+          [
+            15,
+            16
+          ],
+          [
+            17,
+            18
+          ],
+          [
+            19,
+            20
+          ],
+          [
+            21,
+            22
+          ],
+          [
+            23,
+            24
+          ],
+          [
+            25,
+            26
+          ],
+          [
+            27
+          ]
+        ],
+        "deleted_layers": [],
+        "note": "3 serial layers, rest in groups of 2"
+      },
+      {
+        "name": "delete-keep7",
+        "kind": "delete",
+        "executed_blocks": 7,
+        "effective_depth": 7,
+        "prefix": 0,
+        "group_size": 0,
+        "groups": [
+          [
+            0
+          ],
+          [
+            5
+          ],
+          [
+            9
+          ],
+          [
+            14
+          ],
+          [
+            18
+          ],
+          [
+            23
+          ],
+          [
+            27
+          ]
+        ],
+        "deleted_layers": [
+          1,
+          2,
+          3,
+          4,
+          6,
+          7,
+          8,
+          10,
+          11,
+          12,
+          13,
+          15,
+          16,
+          17,
+          19,
+          20,
+          21,
+          22,
+          24,
+          25,
+          26
+        ],
+        "note": "keep 7/28 evenly spaced layers"
+      },
+      {
+        "name": "delete-keep10",
+        "kind": "delete",
+        "executed_blocks": 10,
+        "effective_depth": 10,
+        "prefix": 0,
+        "group_size": 0,
+        "groups": [
+          [
+            0
+          ],
+          [
+            3
+          ],
+          [
+            6
+          ],
+          [
+            9
+          ],
+          [
+            12
+          ],
+          [
+            15
+          ],
+          [
+            18
+          ],
+          [
+            21
+          ],
+          [
+            24
+          ],
+          [
+            27
+          ]
+        ],
+        "deleted_layers": [
+          1,
+          2,
+          4,
+          5,
+          7,
+          8,
+          10,
+          11,
+          13,
+          14,
+          16,
+          17,
+          19,
+          20,
+          22,
+          23,
+          25,
+          26
+        ],
+        "note": "keep 10/28 evenly spaced layers"
+      },
+      {
+        "name": "delete-keep12",
+        "kind": "delete",
+        "executed_blocks": 12,
+        "effective_depth": 12,
+        "prefix": 0,
+        "group_size": 0,
+        "groups": [
+          [
+            0
+          ],
+          [
+            2
+          ],
+          [
+            5
+          ],
+          [
+            7
+          ],
+          [
+            10
+          ],
+          [
+            12
+          ],
+          [
+            15
+          ],
+          [
+            17
+          ],
+          [
+            20
+          ],
+          [
+            22
+          ],
+          [
+            25
+          ],
+          [
+            27
+          ]
+        ],
+        "deleted_layers": [
+          1,
+          3,
+          4,
+          6,
+          8,
+          9,
+          11,
+          13,
+          14,
+          16,
+          18,
+          19,
+          21,
+          23,
+          24,
+          26
+        ],
+        "note": "keep 12/28 evenly spaced layers"
+      },
+      {
+        "name": "delete-keep14",
+        "kind": "delete",
+        "executed_blocks": 14,
+        "effective_depth": 14,
+        "prefix": 0,
+        "group_size": 0,
+        "groups": [
+          [
+            0
+          ],
+          [
+            2
+          ],
+          [
+            4
+          ],
+          [
+            6
+          ],
+          [
+            8
+          ],
+          [
+            10
+          ],
+          [
+            12
+          ],
+          [
+            15
+          ],
+          [
+            17
+          ],
+          [
+            19
+          ],
+          [
+            21
+          ],
+          [
+            23
+          ],
+          [
+            25
+          ],
+          [
+            27
+          ]
+        ],
+        "deleted_layers": [
+          1,
+          3,
+          5,
+          7,
+          9,
+          11,
+          13,
+          14,
+          16,
+          18,
+          20,
+          22,
+          24,
+          26
+        ],
+        "note": "keep 14/28 evenly spaced layers"
+      },
+      {
+        "name": "delete-keep15",
+        "kind": "delete",
+        "executed_blocks": 15,
+        "effective_depth": 15,
+        "prefix": 0,
+        "group_size": 0,
+        "groups": [
+          [
+            0
+          ],
+          [
+            2
+          ],
+          [
+            4
+          ],
+          [
+            6
+          ],
+          [
+            8
+          ],
+          [
+            10
+          ],
+          [
+            12
+          ],
+          [
+            14
+          ],
+          [
+            15
+          ],
+          [
+            17
+          ],
+          [
+            19
+          ],
+          [
+            21
+          ],
+          [
+            23
+          ],
+          [
+            25
+          ],
+          [
+            27
+          ]
+        ],
+        "deleted_layers": [
+          1,
+          3,
+          5,
+          7,
+          9,
+          11,
+          13,
+          16,
+          18,
+          20,
+          22,
+          24,
+          26
+        ],
+        "note": "keep 15/28 evenly spaced layers"
+      },
+      {
+        "name": "delete-keep16",
+        "kind": "delete",
+        "executed_blocks": 16,
+        "effective_depth": 16,
+        "prefix": 0,
+        "group_size": 0,
+        "groups": [
+          [
+            0
+          ],
+          [
+            2
+          ],
+          [
+            4
+          ],
+          [
+            5
+          ],
+          [
+            7
+          ],
+          [
+            9
+          ],
+          [
+            11
+          ],
+          [
+            13
+          ],
+          [
+            14
+          ],
+          [
+            16
+          ],
+          [
+            18
+          ],
+          [
+            20
+          ],
+          [
+            22
+          ],
+          [
+            23
+          ],
+          [
+            25
+          ],
+          [
+            27
+          ]
+        ],
+        "deleted_layers": [
+          1,
+          3,
+          6,
+          8,
+          10,
+          12,
+          15,
+          17,
+          19,
+          21,
+          24,
+          26
+        ],
+        "note": "keep 16/28 evenly spaced layers"
+      },
+      {
+        "name": "serial",
+        "kind": "serial",
+        "executed_blocks": 28,
+        "effective_depth": 28,
+        "prefix": 0,
+        "group_size": 0,
+        "groups": [
+          [
+            0
+          ],
+          [
+            1
+          ],
+          [
+            2
+          ],
+          [
+            3
+          ],
+          [
+            4
+          ],
+          [
+            5
+          ],
+          [
+            6
+          ],
+          [
+            7
+          ],
+          [
+            8
+          ],
+          [
+            9
+          ],
+          [
+            10
+          ],
+          [
+            11
+          ],
+          [
+            12
+          ],
+          [
+            13
+          ],
+          [
+            14
+          ],
+          [
+            15
+          ],
+          [
+            16
+          ],
+          [
+            17
+          ],
+          [
+            18
+          ],
+          [
+            19
+          ],
+          [
+            20
+          ],
+          [
+            21
+          ],
+          [
+            22
+          ],
+          [
+            23
+          ],
+          [
+            24
+          ],
+          [
+            25
+          ],
+          [
+            26
+          ],
+          [
+            27
+          ]
+        ],
+        "deleted_layers": [],
+        "note": "reference chain"
+      }
+    ],
+    "accum": [
+      "fp32"
+    ],
+    "diagnose_plans": [],
+    "git_commit": "afd9d9f2feb541f8c6fa54bde760f25496b02d0d",
+    "warning": "Graph semantics only. No real GPU concurrency and no speedup claim.",
+    "n_measured": 64,
+    "merged_from": [
+      "results/stage1_5/test/prefix0-g2/samples.jsonl",
+      "results/stage1_5/test/prefix10-g4/samples.jsonl",
+      "results/stage1_5/test/prefix3-g2/samples.jsonl",
+      "results/stage1_5/test/prefix3-g4/samples.jsonl",
+      "results/stage1_5/test/prefix6-g4/samples.jsonl",
+      "results/stage1_5/test/sum/samples.jsonl"
+    ],
+    "n_variants": 1152,
+    "n_predicted_tokens": 256,
+    "data_revision": "b08601e04326c79dfdd32d625aee71d232d685c3"
+  },
+  "quality": [
+    {
+      "variant": "delete-keep7@fp32",
+      "plan": "delete-keep7",
+      "accum": "fp32",
+      "kind": "delete",
+      "n_samples": 64,
+      "executed_blocks": 7,
+      "effective_depth": 7,
+      "delta_nll_mean": 15.97289951518178,
+      "delta_nll_std": 2.329402870190294,
+      "delta_nll_ci95_lo": 15.454354823287577,
+      "delta_nll_ci95_hi": 16.55591907147318,
+      "kl_mean": 16.100374713540077,
+      "top1_mean": 0.0001220703125,
+      "ppl_ratio": 8648526.479288463,
+      "teacher_nll_mean": 3.0539446137845516,
+      "state_rel_rms_mean": 3.9396316880404765,
+      "state_cos_mean": -0.15137980139115825,
+      "state_max_abs_mean": 4022.2109375
+    },
+    {
+      "variant": "prefix3-g8@fp32",
+      "plan": "prefix3-g8",
+      "accum": "fp32",
+      "kind": "parallel",
+      "n_samples": 64,
+      "executed_blocks": 28,
+      "effective_depth": 7,
+      "delta_nll_mean": 4.566133562475443,
+      "delta_nll_std": 0.489465563576803,
+      "delta_nll_ci95_lo": 4.448226480279118,
+      "delta_nll_ci95_hi": 4.688509914278984,
+      "kl_mean": 4.553015124052763,
+      "top1_mean": 0.1317138671875,
+      "ppl_ratio": 96.17154871020871,
+      "teacher_nll_mean": 3.0539446137845516,
+      "state_rel_rms_mean": 1.0705544650929748,
+      "state_cos_mean": 0.6759327566251159,
+      "state_max_abs_mean": 922.2265625
+    },
+    {
+      "variant": "delete-keep10@fp32",
+      "plan": "delete-keep10",
+      "accum": "fp32",
+      "kind": "delete",
+      "n_samples": 64,
+      "executed_blocks": 10,
+      "effective_depth": 10,
+      "delta_nll_mean": 15.483989153057337,
+      "delta_nll_std": 2.7442030962175994,
+      "delta_nll_ci95_lo": 14.809179067425429,
+      "delta_nll_ci95_hi": 16.175379766430705,
+      "kl_mean": 15.574825167655945,
+      "top1_mean": 0.0,
+      "ppl_ratio": 5304091.983876795,
+      "teacher_nll_mean": 3.0539446137845516,
+      "state_rel_rms_mean": 3.063875622885088,
+      "state_cos_mean": -0.2058427708398085,
+      "state_max_abs_mean": 2639.265625
+    },
+    {
+      "variant": "prefix3-g4@fp32",
+      "plan": "prefix3-g4",
+      "accum": "fp32",
+      "kind": "parallel",
+      "n_samples": 64,
+      "executed_blocks": 28,
+      "effective_depth": 10,
+      "delta_nll_mean": 3.9938989393413067,
+      "delta_nll_std": 0.4694170711459636,
+      "delta_nll_ci95_lo": 3.8824942825362085,
+      "delta_nll_ci95_hi": 4.113771710265428,
+      "kl_mean": 3.992619637399912,
+      "top1_mean": 0.17010498046875,
+      "ppl_ratio": 54.26605749641613,
+      "teacher_nll_mean": 3.0539446137845516,
+      "state_rel_rms_mean": 1.2035401577985283,
+      "state_cos_mean": 0.6455363044515252,
+      "state_max_abs_mean": 805.88671875
+    },
+    {
+      "variant": "prefix3-g4+layer_ls_lam0.01@fp32",
+      "plan": "prefix3-g4+layer_ls_lam0.01",
+      "accum": "fp32",
+      "kind": "parallel",
+      "n_samples": 64,
+      "executed_blocks": 28,
+      "effective_depth": 10,
+      "delta_nll_mean": 3.019722606986761,
+      "delta_nll_std": 0.3408540018774817,
+      "delta_nll_ci95_lo": 2.938123346492648,
+      "delta_nll_ci95_hi": 3.102965187001973,
+      "kl_mean": 3.0342311710119247,
+      "top1_mean": 0.2474365234375,
+      "ppl_ratio": 20.485608331345134,
+      "teacher_nll_mean": 3.0539446137845516,
+      "state_rel_rms_mean": 0.7931162522131463,
+      "state_cos_mean": 0.7672836473211646,
+      "state_max_abs_mean": 373.52734375
+    },
+    {
+      "variant": "delete-keep12@fp32",
+      "plan": "delete-keep12",
+      "accum": "fp32",
+      "kind": "delete",
+      "n_samples": 64,
+      "executed_blocks": 12,
+      "effective_depth": 12,
+      "delta_nll_mean": 9.907023314386606,
+      "delta_nll_std": 1.1770341765550163,
+      "delta_nll_ci95_lo": 9.628286007419229,
+      "delta_nll_ci95_hi": 10.198594873491675,
+      "kl_mean": 10.000677779316902,
+      "top1_mean": 0.0098876953125,
+      "ppl_ratio": 20070.840400600937,
+      "teacher_nll_mean": 3.0539446137845516,
+      "state_rel_rms_mean": 2.466489034749602,
+      "state_cos_mean": -0.053812636968359584,
+      "state_max_abs_mean": 3015.890625
+    },
+    {
+      "variant": "prefix6-g4@fp32",
+      "plan": "prefix6-g4",
+      "accum": "fp32",
+      "kind": "parallel",
+      "n_samples": 64,
+      "executed_blocks": 28,
+      "effective_depth": 12,
+      "delta_nll_mean": 2.581232700496912,
+      "delta_nll_std": 0.2810584910388509,
+      "delta_nll_ci95_lo": 2.513184167351574,
+      "delta_nll_ci95_hi": 2.651537450402975,
+      "kl_mean": 2.5629073083400726,
+      "top1_mean": 0.2777099609375,
+      "ppl_ratio": 13.213416309405936,
+      "teacher_nll_mean": 3.0539446137845516,
+      "state_rel_rms_mean": 0.7527526269632365,
+      "state_cos_mean": 0.7640023715794086,
+      "state_max_abs_mean": 425.24609375
+    },
+    {
+      "variant": "prefix6-g4+layer_ls_lam0.01@fp32",
+      "plan": "prefix6-g4+layer_ls_lam0.01",
+      "accum": "fp32",
+      "kind": "parallel",
+      "n_samples": 64,
+      "executed_blocks": 28,
+      "effective_depth": 12,
+      "delta_nll_mean": 2.094411265105009,
+      "delta_nll_std": 0.22891670364445596,
+      "delta_nll_ci95_lo": 2.0385016488842664,
+      "delta_nll_ci95_hi": 2.1512673274613916,
+      "kl_mean": 2.1022288873791695,
+      "top1_mean": 0.30743408203125,
+      "ppl_ratio": 8.120658647474544,
+      "teacher_nll_mean": 3.0539446137845516,
+      "state_rel_rms_mean": 0.6811126688006903,
+      "state_cos_mean": 0.839180895127356,
+      "state_max_abs_mean": 478.046875
+    },
+    {
+      "variant": "delete-keep14@fp32",
+      "plan": "delete-keep14",
+      "accum": "fp32",
+      "kind": "delete",
+      "n_samples": 64,
+      "executed_blocks": 14,
+      "effective_depth": 14,
+      "delta_nll_mean": 12.57229084149003,
+      "delta_nll_std": 0.7142057548333981,
+      "delta_nll_ci95_lo": 12.403142684791238,
+      "delta_nll_ci95_hi": 12.738934502284973,
+      "kl_mean": 12.724342256784439,
+      "top1_mean": 0.000244140625,
+      "ppl_ratio": 288453.9811581243,
+      "teacher_nll_mean": 3.0539446137845516,
+      "state_rel_rms_mean": 2.1445490747543468,
+      "state_cos_mean": 0.20696537382900715,
+      "state_max_abs_mean": 2579.5859375
+    },
+    {
+      "variant": "prefix0-g2@fp32",
+      "plan": "prefix0-g2",
+      "accum": "fp32",
+      "kind": "parallel",
+      "n_samples": 64,
+      "executed_blocks": 28,
+      "effective_depth": 14,
+      "delta_nll_mean": 9.148412931710482,
+      "delta_nll_std": 1.160698519812456,
+      "delta_nll_ci95_lo": 8.87372511383146,
+      "delta_nll_ci95_hi": 9.451106472685932,
+      "kl_mean": 9.208464950323105,
+      "top1_mean": 0.01910400390625,
+      "ppl_ratio": 9399.510869178883,
+      "teacher_nll_mean": 3.0539446137845516,
+      "state_rel_rms_mean": 1.14499940898,
+      "state_cos_mean": 0.2764764020903385,
+      "state_max_abs_mean": 1161.375
+    },
+    {
+      "variant": "prefix0-g2+layer_ls_lam0.01@fp32",
+      "plan": "prefix0-g2+layer_ls_lam0.01",
+      "accum": "fp32",
+      "kind": "parallel",
+      "n_samples": 64,
+      "executed_blocks": 28,
+      "effective_depth": 14,
+      "delta_nll_mean": 6.861824739724398,
+      "delta_nll_std": 0.8054063460820302,
+      "delta_nll_ci95_lo": 6.678342651668936,
+      "delta_nll_ci95_hi": 7.066986791230738,
+      "kl_mean": 6.982507087290287,
+      "top1_mean": 0.0426025390625,
+      "ppl_ratio": 955.1083024182925,
+      "teacher_nll_mean": 3.0539446137845516,
+      "state_rel_rms_mean": 1.1588800384492262,
+      "state_cos_mean": 0.413350235670805,
+      "state_max_abs_mean": 2480.640625
+    },
+    {
+      "variant": "delete-keep15@fp32",
+      "plan": "delete-keep15",
+      "accum": "fp32",
+      "kind": "delete",
+      "n_samples": 64,
+      "executed_blocks": 15,
+      "effective_depth": 15,
+      "delta_nll_mean": 12.317497108131647,
+      "delta_nll_std": 0.7418637022940248,
+      "delta_nll_ci95_lo": 12.136354000493885,
+      "delta_nll_ci95_hi": 12.490969830099493,
+      "kl_mean": 12.480868607759476,
+      "top1_mean": 0.0001220703125,
+      "ppl_ratio": 223573.8599754841,
+      "teacher_nll_mean": 3.0539446137845516,
+      "state_rel_rms_mean": 2.2231312201724966,
+      "state_cos_mean": 0.2201990921748802,
+      "state_max_abs_mean": 2911.1953125
+    },
+    {
+      "variant": "prefix10-g4@fp32",
+      "plan": "prefix10-g4",
+      "accum": "fp32",
+      "kind": "parallel",
+      "n_samples": 64,
+      "executed_blocks": 28,
+      "effective_depth": 15,
+      "delta_nll_mean": 1.8272438123822212,
+      "delta_nll_std": 0.2432347072452177,
+      "delta_nll_ci95_lo": 1.7663786276243627,
+      "delta_nll_ci95_hi": 1.8861504536122082,
+      "kl_mean": 1.7962624821811914,
+      "top1_mean": 0.36212158203125,
+      "ppl_ratio": 6.216728553645855,
+      "teacher_nll_mean": 3.0539446137845516,
+      "state_rel_rms_mean": 0.65261546383811,
+      "state_cos_mean": 0.8252485496923327,
+      "state_max_abs_mean": 416.4921875
+    },
+    {
+      "variant": "prefix10-g4+layer_ls_lam0.01@fp32",
+      "plan": "prefix10-g4+layer_ls_lam0.01",
+      "accum": "fp32",
+      "kind": "parallel",
+      "n_samples": 64,
+      "executed_blocks": 28,
+      "effective_depth": 15,
+      "delta_nll_mean": 1.7241100668907166,
+      "delta_nll_std": 0.23160504240099364,
+      "delta_nll_ci95_lo": 1.6659553752280771,
+      "delta_nll_ci95_hi": 1.7832732886075973,
+      "kl_mean": 1.7035714033991098,
+      "top1_mean": 0.3585205078125,
+      "ppl_ratio": 5.6075284832479735,
+      "teacher_nll_mean": 3.0539446137845516,
+      "state_rel_rms_mean": 0.5622983653660658,
+      "state_cos_mean": 0.8693718165159225,
+      "state_max_abs_mean": 440.56640625
+    },
+    {
+      "variant": "delete-keep16@fp32",
+      "plan": "delete-keep16",
+      "accum": "fp32",
+      "kind": "delete",
+      "n_samples": 64,
+      "executed_blocks": 16,
+      "effective_depth": 16,
+      "delta_nll_mean": 9.336149353533983,
+      "delta_nll_std": 1.2981802047223683,
+      "delta_nll_ci95_lo": 9.029882883187383,
+      "delta_nll_ci95_hi": 9.675213033240288,
+      "kl_mean": 9.418464116752148,
+      "top1_mean": 0.00604248046875,
+      "ppl_ratio": 11340.65520162777,
+      "teacher_nll_mean": 3.0539446137845516,
+      "state_rel_rms_mean": 1.7977547582367543,
+      "state_cos_mean": 0.02771753797424026,
+      "state_max_abs_mean": 2787.859375
+    },
+    {
+      "variant": "prefix3-g2@fp32",
+      "plan": "prefix3-g2",
+      "accum": "fp32",
+      "kind": "parallel",
+      "n_samples": 64,
+      "executed_blocks": 28,
+      "effective_depth": 16,
+      "delta_nll_mean": 1.117963645607233,
+      "delta_nll_std": 0.17434285143757206,
+      "delta_nll_ci95_lo": 1.0772802636027337,
+      "delta_nll_ci95_hi": 1.1608050006441772,
+      "kl_mean": 1.1382905431091785,
+      "top1_mean": 0.50433349609375,
+      "ppl_ratio": 3.0586194242372953,
+      "teacher_nll_mean": 3.0539446137845516,
+      "state_rel_rms_mean": 0.5294668476478359,
+      "state_cos_mean": 0.8917842544615269,
+      "state_max_abs_mean": 280.5751953125
+    },
+    {
+      "variant": "prefix3-g2+layer_ls_lam0.01@fp32",
+      "plan": "prefix3-g2+layer_ls_lam0.01",
+      "accum": "fp32",
+      "kind": "parallel",
+      "n_samples": 64,
+      "executed_blocks": 28,
+      "effective_depth": 16,
+      "delta_nll_mean": 0.9611625857651234,
+      "delta_nll_std": 0.14855852332593097,
+      "delta_nll_ci95_lo": 0.9243692292831838,
+      "delta_nll_ci95_hi": 0.9981157335452735,
+      "kl_mean": 0.9880253132432699,
+      "top1_mean": 0.5281982421875,
+      "ppl_ratio": 2.6147345602419954,
+      "teacher_nll_mean": 3.0539446137845516,
+      "state_rel_rms_mean": 0.4688036390137255,
+      "state_cos_mean": 0.9050974724814296,
+      "state_max_abs_mean": 252.9853515625
+    },
+    {
+      "variant": "serial@fp32",
+      "plan": "serial",
+      "accum": "fp32",
+      "kind": "serial",
+      "n_samples": 64,
+      "executed_blocks": 28,
+      "effective_depth": 28,
+      "delta_nll_mean": 0.0,
+      "delta_nll_std": 0.0,
+      "delta_nll_ci95_lo": 0.0,
+      "delta_nll_ci95_hi": 0.0,
+      "kl_mean": 0.0,
+      "top1_mean": 1.0,
+      "ppl_ratio": 1.0,
+      "teacher_nll_mean": 3.0539446137845516,
+      "state_rel_rms_mean": 0.0,
+      "state_cos_mean": 1.0,
+      "state_max_abs_mean": 0.0
+    }
+  ],
+  "groups": [],
+  "layers": [],
+  "frontier": [
+    {
+      "variant": "prefix3-g8@fp32",
+      "kind": "parallel",
+      "executed_blocks": 28,
+      "effective_depth": 7,
+      "delta_nll_mean": 4.566133562475443,
+      "kl_mean": 4.553015124052763,
+      "top1_mean": 0.1317138671875,
+      "ppl_ratio": 96.17154871020871
+    },
+    {
+      "variant": "prefix3-g4+layer_ls_lam0.01@fp32",
+      "kind": "parallel",
+      "executed_blocks": 28,
+      "effective_depth": 10,
+      "delta_nll_mean": 3.019722606986761,
+      "kl_mean": 3.0342311710119247,
+      "top1_mean": 0.2474365234375,
+      "ppl_ratio": 20.485608331345134
+    },
+    {
+      "variant": "prefix6-g4+layer_ls_lam0.01@fp32",
+      "kind": "parallel",
+      "executed_blocks": 28,
+      "effective_depth": 12,
+      "delta_nll_mean": 2.094411265105009,
+      "kl_mean": 2.1022288873791695,
+      "top1_mean": 0.30743408203125,
+      "ppl_ratio": 8.120658647474544
+    },
+    {
+      "variant": "prefix10-g4+layer_ls_lam0.01@fp32",
+      "kind": "parallel",
+      "executed_blocks": 28,
+      "effective_depth": 15,
+      "delta_nll_mean": 1.7241100668907166,
+      "kl_mean": 1.7035714033991098,
+      "top1_mean": 0.3585205078125,
+      "ppl_ratio": 5.6075284832479735
+    },
+    {
+      "variant": "prefix3-g2+layer_ls_lam0.01@fp32",
+      "kind": "parallel",
+      "executed_blocks": 28,
+      "effective_depth": 16,
+      "delta_nll_mean": 0.9611625857651234,
+      "kl_mean": 0.9880253132432699,
+      "top1_mean": 0.5281982421875,
+      "ppl_ratio": 2.6147345602419954
+    },
+    {
+      "variant": "serial@fp32",
+      "kind": "serial",
+      "executed_blocks": 28,
+      "effective_depth": 28,
+      "delta_nll_mean": 0.0,
+      "kl_mean": 0.0,
+      "top1_mean": 1.0,
+      "ppl_ratio": 1.0
+    }
+  ],
+  "thresholds": [
+    {
+      "delta_nll_threshold": 0.1,
+      "variant": "serial@fp32",
+      "effective_depth": 28,
+      "executed_blocks": 28,
+      "delta_nll_mean": 0.0
+    },
+    {
+      "delta_nll_threshold": 0.25,
+      "variant": "serial@fp32",
+      "effective_depth": 28,
+      "executed_blocks": 28,
+      "delta_nll_mean": 0.0
+    },
+    {
+      "delta_nll_threshold": 0.5,
+      "variant": "serial@fp32",
+      "effective_depth": 28,
+      "executed_blocks": 28,
+      "delta_nll_mean": 0.0
+    },
+    {
+      "delta_nll_threshold": 1.0,
+      "variant": "prefix3-g2+layer_ls_lam0.01@fp32",
+      "effective_depth": 16,
+      "executed_blocks": 28,
+      "delta_nll_mean": 0.9611625857651234
+    },
+    {
+      "delta_nll_threshold": 2.0,
+      "variant": "prefix10-g4+layer_ls_lam0.01@fp32",
+      "effective_depth": 15,
+      "executed_blocks": 28,
+      "delta_nll_mean": 1.7241100668907166
+    },
+    {
+      "delta_nll_threshold": 3.0,
+      "variant": "prefix6-g4+layer_ls_lam0.01@fp32",
+      "effective_depth": 12,
+      "executed_blocks": 28,
+      "delta_nll_mean": 2.094411265105009
+    }
+  ],
+  "matched_depth": [
+    {
+      "effective_depth": 7,
+      "variant": "prefix3-g8@fp32",
+      "blocks_parallel": 28,
+      "delta_nll_parallel": 4.566133562475443,
+      "delete_variant": "delete-keep7@fp32",
+      "blocks_delete": 7,
+      "delta_nll_delete": 15.97289951518178,
+      "advantage_nats": 11.406765952706337
+    },
+    {
+      "effective_depth": 10,
+      "variant": "prefix3-g4+layer_ls_lam0.01@fp32",
+      "blocks_parallel": 28,
+      "delta_nll_parallel": 3.019722606986761,
+      "delete_variant": "delete-keep10@fp32",
+      "blocks_delete": 10,
+      "delta_nll_delete": 15.483989153057337,
+      "advantage_nats": 12.464266546070576
+    },
+    {
+      "effective_depth": 10,
+      "variant": "prefix3-g4@fp32",
+      "blocks_parallel": 28,
+      "delta_nll_parallel": 3.9938989393413067,
+      "delete_variant": "delete-keep10@fp32",
+      "blocks_delete": 10,
+      "delta_nll_delete": 15.483989153057337,
+      "advantage_nats": 11.49009021371603
+    },
+    {
+      "effective_depth": 12,
+      "variant": "prefix6-g4+layer_ls_lam0.01@fp32",
+      "blocks_parallel": 28,
+      "delta_nll_parallel": 2.094411265105009,
+      "delete_variant": "delete-keep12@fp32",
+      "blocks_delete": 12,
+      "delta_nll_delete": 9.907023314386606,
+      "advantage_nats": 7.812612049281597
+    },
+    {
+      "effective_depth": 12,
+      "variant": "prefix6-g4@fp32",
+      "blocks_parallel": 28,
+      "delta_nll_parallel": 2.581232700496912,
+      "delete_variant": "delete-keep12@fp32",
+      "blocks_delete": 12,
+      "delta_nll_delete": 9.907023314386606,
+      "advantage_nats": 7.325790613889694
+    },
+    {
+      "effective_depth": 14,
+      "variant": "prefix0-g2+layer_ls_lam0.01@fp32",
+      "blocks_parallel": 28,
+      "delta_nll_parallel": 6.861824739724398,
+      "delete_variant": "delete-keep14@fp32",
+      "blocks_delete": 14,
+      "delta_nll_delete": 12.57229084149003,
+      "advantage_nats": 5.710466101765633
+    },
+    {
+      "effective_depth": 14,
+      "variant": "prefix0-g2@fp32",
+      "blocks_parallel": 28,
+      "delta_nll_parallel": 9.148412931710482,
+      "delete_variant": "delete-keep14@fp32",
+      "blocks_delete": 14,
+      "delta_nll_delete": 12.57229084149003,
+      "advantage_nats": 3.4238779097795486
+    },
+    {
+      "effective_depth": 15,
+      "variant": "prefix10-g4+layer_ls_lam0.01@fp32",
+      "blocks_parallel": 28,
+      "delta_nll_parallel": 1.7241100668907166,
+      "delete_variant": "delete-keep15@fp32",
+      "blocks_delete": 15,
+      "delta_nll_delete": 12.317497108131647,
+      "advantage_nats": 10.59338704124093
+    },
+    {
+      "effective_depth": 15,
+      "variant": "prefix10-g4@fp32",
+      "blocks_parallel": 28,
+      "delta_nll_parallel": 1.8272438123822212,
+      "delete_variant": "delete-keep15@fp32",
+      "blocks_delete": 15,
+      "delta_nll_delete": 12.317497108131647,
+      "advantage_nats": 10.490253295749426
+    },
+    {
+      "effective_depth": 16,
+      "variant": "prefix3-g2+layer_ls_lam0.01@fp32",
+      "blocks_parallel": 28,
+      "delta_nll_parallel": 0.9611625857651234,
+      "delete_variant": "delete-keep16@fp32",
+      "blocks_delete": 16,
+      "delta_nll_delete": 9.336149353533983,
+      "advantage_nats": 8.37498676776886
+    },
+    {
+      "effective_depth": 16,
+      "variant": "prefix3-g2@fp32",
+      "blocks_parallel": 28,
+      "delta_nll_parallel": 1.117963645607233,
+      "delete_variant": "delete-keep16@fp32",
+      "blocks_delete": 16,
+      "delta_nll_delete": 9.336149353533983,
+      "advantage_nats": 8.21818570792675
+    }
+  ]
+}

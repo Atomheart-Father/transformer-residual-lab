@@ -45,6 +45,10 @@ def quality_table(samples: list[dict]) -> pd.DataFrame:
                 "kind": v["kind"],
                 "executed_blocks": v["executed_blocks"],
                 "effective_depth": v["effective_depth"],
+                "label": v.get("label", ""),
+                "fusion": v.get("fusion", ""),
+                "prefix": v.get("prefix", 0),
+                "group_size": v.get("group_size", 0),
                 "sample_id": row["sample_id"],
                 "teacher_nll": v["teacher_nll"],
                 "candidate_nll": v["candidate_nll"],
@@ -126,7 +130,9 @@ def layer_table(layers: list[dict]) -> pd.DataFrame:
     return agg
 
 
-def markdown(quality: pd.DataFrame, meta: dict) -> str:
+def markdown(quality: pd.DataFrame, meta: dict,
+             thresholds: pd.DataFrame | None = None,
+             matched: pd.DataFrame | None = None) -> str:
     lines = ["# Stage-1 measured summary", "",
              f"- model: `{meta.get('model')}` revision `{meta.get('model_revision')}`",
              f"- samples: {meta.get('n_measured')} x {meta.get('n_predicted_tokens')} predicted tokens",
@@ -143,6 +149,26 @@ def markdown(quality: pd.DataFrame, meta: dict) -> str:
     lines += ["", "`blocks` = executed decoder blocks (real compute); "
                   "`depth` = sequential stages (critical path). "
                   "Neither is a latency measurement."]
+    if thresholds is not None and not thresholds.empty:
+        lines += ["", "## minimum effective depth at a ΔNLL budget", "",
+                  "| ΔNLL budget | variant | depth | blocks | ΔNLL |",
+                  "|---:|---|---:|---:|---:|"]
+        for _, r in thresholds.iterrows():
+            if r.variant == "NOT REACHED":
+                lines.append(f"| {r.delta_nll_threshold:g} | not reached | — | — | — |")
+                continue
+            lines.append(f"| {r.delta_nll_threshold:g} | `{r.variant}` | "
+                         f"{int(r.effective_depth)} | {int(r.executed_blocks)} | "
+                         f"{r.delta_nll_mean:.3f} |")
+    if matched is not None and not matched.empty:
+        lines += ["", "## depth-matched comparison against deletion", "",
+                  "| depth | parallel | blocks | ΔNLL | delete | blocks | ΔNLL | advantage |",
+                  "|---:|---|---:|---:|---|---:|---:|---:|"]
+        for _, r in matched.iterrows():
+            lines.append(f"| {int(r.effective_depth)} | `{r.variant}` | "
+                         f"{int(r.blocks_parallel)} | {r.delta_nll_parallel:.3f} | "
+                         f"`{r.delete_variant}` | {int(r.blocks_delete)} | "
+                         f"{r.delta_nll_delete:.3f} | {r.advantage_nats:+.3f} |")
     return "\n".join(lines) + "\n"
 
 
@@ -190,10 +216,65 @@ def analyze_gram(run: Path) -> None:
         (run / f"{f.stem}.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
 
 
+def pareto_tables(q: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Frontier, threshold-minimum-depth, and depth-matched deletion comparison."""
+    df = q[q.accum == "fp32"].copy()
+    if df.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    df = df.sort_values(["effective_depth", "delta_nll_mean"])
+    rows, best = [], np.inf
+    for _, r in df.iterrows():
+        if r.delta_nll_mean < best - 1e-12:
+            best = r.delta_nll_mean
+            rows.append(r)
+    frontier = pd.DataFrame(rows)[
+        ["variant", "kind", "executed_blocks", "effective_depth",
+         "delta_nll_mean", "kl_mean", "top1_mean", "ppl_ratio"]].reset_index(drop=True)
+
+    thr_rows = []
+    for t in (0.1, 0.25, 0.5, 1.0, 2.0, 3.0):
+        ok = df[df.delta_nll_mean <= t]
+        if ok.empty:
+            thr_rows.append({"delta_nll_threshold": t, "variant": "NOT REACHED",
+                             "effective_depth": np.nan, "executed_blocks": np.nan,
+                             "delta_nll_mean": np.nan})
+            continue
+        b = ok.sort_values(["effective_depth", "delta_nll_mean"]).iloc[0]
+        thr_rows.append({"delta_nll_threshold": t, "variant": b.variant,
+                         "effective_depth": int(b.effective_depth),
+                         "executed_blocks": int(b.executed_blocks),
+                         "delta_nll_mean": float(b.delta_nll_mean)})
+    thresholds = pd.DataFrame(thr_rows)
+
+    dele = df[df.kind == "delete"].drop_duplicates("effective_depth")
+    dele = dele.set_index("effective_depth")
+    match_rows = []
+    for _, r in df[df.kind == "parallel"].iterrows():
+        d = int(r.effective_depth)
+        if d not in dele.index:
+            continue
+        dr = dele.loc[d]
+        match_rows.append({
+            "effective_depth": d,
+            "variant": r.variant,
+            "blocks_parallel": int(r.executed_blocks),
+            "delta_nll_parallel": float(r.delta_nll_mean),
+            "delete_variant": dr.variant,
+            "blocks_delete": int(dr.executed_blocks),
+            "delta_nll_delete": float(dr.delta_nll_mean),
+            "advantage_nats": float(dr.delta_nll_mean - r.delta_nll_mean),
+        })
+    matched = pd.DataFrame(match_rows).sort_values(
+        ["effective_depth", "delta_nll_parallel"]) if match_rows else pd.DataFrame()
+    return frontier, thresholds, matched
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", type=Path, default=Path("results/stage1"))
     ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--data-manifest", type=Path, default=Path("data/data_manifest.json"))
     args = ap.parse_args()
     out = args.out or args.input
     out.mkdir(parents=True, exist_ok=True)
@@ -203,7 +284,7 @@ def main() -> None:
     layers = read_jsonl(args.input / "layers.jsonl")
     manifest = json.loads((args.input / "manifest.json").read_text(encoding="utf-8"))
     data_manifest = None
-    dm_path = Path("data/data_manifest.json")
+    dm_path = args.data_manifest
     if dm_path.exists():
         data_manifest = json.loads(dm_path.read_text(encoding="utf-8"))
 
@@ -211,22 +292,30 @@ def main() -> None:
     gdf = group_table(groups)
     ldf = layer_table(layers)
     analyze_gram(out)
+    frontier, thresholds, matched = pareto_tables(quality)
 
     quality.to_csv(out / "summary.csv", index=False, float_format="%.6g")
     gdf.to_csv(out / "group_summary.csv", index=False, float_format="%.6g")
     ldf.to_csv(out / "layer_summary.csv", index=False, float_format="%.6g")
+    frontier.to_csv(out / "pareto_frontier.csv", index=False, float_format="%.6g")
+    thresholds.to_csv(out / "threshold_depth.csv", index=False, float_format="%.6g")
+    matched.to_csv(out / "matched_depth.csv", index=False, float_format="%.6g")
 
     meta = {**manifest, "n_predicted_tokens": (data_manifest or {}).get("n_predicted_tokens")}
     if data_manifest:
         meta["data_revision"] = data_manifest.get("dataset_revision")
         meta["model_revision"] = data_manifest.get("model_revision")
-    (out / "summary.md").write_text(markdown(quality, meta), encoding="utf-8")
+    (out / "summary.md").write_text(markdown(quality, meta, thresholds, matched),
+                                    encoding="utf-8")
 
     (out / "summary.json").write_text(json.dumps({
         "meta": meta,
         "quality": quality.to_dict(orient="records"),
         "groups": gdf.to_dict(orient="records"),
         "layers": ldf.to_dict(orient="records"),
+        "frontier": frontier.to_dict(orient="records"),
+        "thresholds": thresholds.to_dict(orient="records"),
+        "matched_depth": matched.to_dict(orient="records"),
     }, indent=2, default=str), encoding="utf-8")
     print(f"wrote {out}/summary.{{csv,md,json}}, group_summary.csv, layer_summary.csv")
     print(quality[["variant", "executed_blocks", "effective_depth",

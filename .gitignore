@@ -7,6 +7,10 @@ __pycache__/
 
 # dataset token windows stay local; only hashes and rules are committed
 data/
+data257/
+
+# local agent workspace (notes, memory) stays local
+.workbuddy-ai/
 
 # scratch runs, not part of the reported evidence
 results/devcheck/

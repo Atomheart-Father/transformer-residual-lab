@@ -1,0 +1,6 @@
+variant,kind,executed_blocks,effective_depth,delta_nll_mean,kl_mean,top1_mean,ppl_ratio
+prefix3-g8@fp32,parallel,28,7,4.51144,4.47086,0.125977,91.0532
+prefix3-g4+sqrt@fp32,parallel,28,10,3.37488,3.38317,0.234497,29.2208
+prefix6-g4+sqrt@fp32,parallel,28,12,2.42053,2.40085,0.295654,11.2518
+prefix10-g4@fp32,parallel,28,15,1.81602,1.75937,0.364502,6.14733
+prefix3-g2@fp32,parallel,28,16,1.17153,1.14184,0.488525,3.22693

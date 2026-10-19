@@ -1,0 +1,4 @@
+delta_nll_threshold,variant,effective_depth,executed_blocks,delta_nll_mean
+0.1,serial@fp32,28,28,0
+0.25,serial@fp32,28,28,0
+0.5,serial@fp32,28,28,0

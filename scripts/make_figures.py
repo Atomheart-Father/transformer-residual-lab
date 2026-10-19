@@ -107,6 +107,8 @@ def fig_group_growth(g: pd.DataFrame, out: Path) -> None:
 
 
 def fig_decomposition(g: pd.DataFrame, out: Path, plan: str = "group4") -> None:
+    if g.empty or "plan" not in g.columns:
+        return
     sub = g[(g.plan == plan) & (g.accum == "fp32")].sort_values("group_index")
     if sub.empty:
         return
@@ -228,25 +230,227 @@ def fig_windows(q: pd.DataFrame, out: Path) -> None:
     plt.close(fig)
 
 
+def fig_prefix_scan(q: pd.DataFrame, out: Path) -> None:
+    sub = q[(q.accum == "fp32") & q.plan.str.startswith("prefix")].copy()
+    if sub.empty:
+        return
+    if "group_size" not in sub.columns:
+        sub["group_size"] = sub.plan.str.extract(r"-g(\d+)$")[0].astype(float)
+    sub["prefix"] = sub.plan.str.extract(r"^prefix(\d+)")[0].astype(float)
+    dele = q[(q.accum == "fp32") & (q.kind == "delete")].copy()
+
+    fig, axes = plt.subplots(1, 2, figsize=(10.5, 3.5))
+    for i, g in enumerate((2, 4, 8)):
+        s = sub[sub.group_size == g].sort_values("prefix")
+        axes[0].plot(s.prefix, s.delta_nll_mean, "o-", ms=4, lw=1.3,
+                     color=C_ACC[i], label=f"groups of {g}")
+    axes[0].set_xlabel("number of protected serial prefix layers")
+    axes[0].set_ylabel("$\\Delta$NLL (nats/token)")
+    axes[0].set_title("does more serial prefix always help?")
+    axes[0].legend(fontsize=7)
+
+    axes[1].scatter(sub.effective_depth, sub.delta_nll_mean, s=14, color=C_PAR,
+                    alpha=0.65, label="prefix protection")
+    axes[1].scatter(dele.effective_depth, dele.delta_nll_mean, s=18, marker="s",
+                    color=C_DEL, label="layer deletion", zorder=3)
+    axes[1].set_xlabel("effective serial depth")
+    axes[1].set_ylabel("$\\Delta$NLL (nats/token)")
+    axes[1].set_title("quality vs depth (each dot = one plan)")
+    axes[1].legend(fontsize=7)
+    fig.tight_layout()
+    fig.savefig(out / "fig_prefix_scan.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def fig_calibration(q: pd.DataFrame, out: Path) -> None:
+    """Grouped bars: uncalibrated sum / mean / sqrt / fitted per plan."""
+    sub = q[q.accum == "fp32"].copy()
+    if sub.empty:
+        return
+    if "label" not in sub.columns:
+        parts = sub.plan.str.split("+", n=1, expand=True)
+        sub["base_plan"] = parts[0]
+        sub["label"] = parts[1].fillna("") if parts.shape[1] > 1 else ""
+    else:
+        sub["base_plan"] = sub.plan
+    sub = sub[sub.base_plan.str.startswith("prefix")]
+    if sub.empty:
+        return
+    rows = []
+    for plan in sorted(sub.base_plan.unique()):
+        p = sub[sub.base_plan == plan]
+        base = p[p.label == ""]
+        if base.empty:
+            continue
+        pick = lambda pref: (float(p[p.label.str.startswith(pref)].delta_nll_mean.min())
+                             if p.label.str.startswith(pref).any() else np.nan)
+        rows.append({
+            "plan": plan,
+            "depth": int(base.effective_depth.iloc[0]),
+            "sum": float(base.delta_nll_mean.iloc[0]),
+            "mean": pick("mean"), "sqrt": pick("sqrt"),
+            "group_ls": pick("group_ls"), "layer_ls": pick("layer_ls"),
+        })
+    if not rows:
+        return
+    df = pd.DataFrame(rows).sort_values("depth")
+    fig, ax = plt.subplots(figsize=(10, 3.6))
+    x = np.arange(len(df))
+    w = 0.17
+    series = [("sum", "uncalibrated sum", "#B8B8B8"),
+              ("mean", "fixed mean (1/k)", "#9CC3E5"),
+              ("sqrt", "fixed sqrt (1/$\\sqrt{k}$)", "#7FB3D5"),
+              ("group_ls", "fitted, one per group", C_PAR),
+              ("layer_ls", "fitted, one per layer", "#8C5AA8")]
+    for i, (col, label, color) in enumerate(series):
+        ax.bar(x + (i - 2) * w, df[col], w, label=label, color=color)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{p}\nd={d}" for p, d in zip(df.plan, df.depth)], fontsize=7)
+    ax.set_ylabel("$\\Delta$NLL (nats/token)")
+    ax.set_title("residual fusion calibration on held-out validation")
+    ax.legend(fontsize=7, ncol=2)
+    fig.tight_layout()
+    fig.savefig(out / "fig_calibration.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def fig_alpha(coeffs_dir: Path, out: Path) -> None:
+    files = sorted(coeffs_dir.glob("*.json")) if coeffs_dir and coeffs_dir.exists() else []
+    if not files:
+        return
+    fig, ax = plt.subplots(figsize=(7.6, 3.4))
+    picked = {}
+    for f in files:
+        d = json.loads(f.read_text(encoding="utf-8"))
+        if d["scheme"] != "layer_ls" or d["lambda_rel"] != 0.01:
+            continue
+        picked[d["plan"]] = d
+    if not picked:
+        for f in files:
+            d = json.loads(f.read_text(encoding="utf-8"))
+            if d["scheme"] == "layer_ls":
+                picked.setdefault(d["plan"], d)
+    for i, (plan, d) in enumerate(sorted(picked.items())):
+        layers = sorted(int(k) for k in d["alpha"])
+        ax.plot(layers, [d["alpha"][str(k)] for k in layers], "o-", ms=3, lw=1.3,
+                color=C_ACC[i % len(C_ACC)], label=plan)
+    ax.axhline(1.0, color="#999999", ls="--", lw=0.8)
+    ax.set_xlabel("layer index")
+    ax.set_ylabel("fitted $\\alpha_i$")
+    ax.set_title("per-layer residual coefficient (layer_ls, $\\lambda$=1e-2)")
+    ax.legend(fontsize=7)
+    fig.tight_layout()
+    fig.savefig(out / "fig_alpha.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def fig_b3(b3_dir: Path, scan_dir: Path, out: Path) -> None:
+    """B3: magnitude vs direction, plus per-group attribution of the residual."""
+    src = b3_dir / "samples.jsonl"
+    if not src.exists():
+        return
+    acc: dict[str, dict[str, list[float]]] = {}
+    for line in src.read_text(encoding="utf-8").splitlines():
+        r = json.loads(line)
+        for k, v in r["variants"].items():
+            plan, mode = k.split("::")
+            acc.setdefault(plan, {}).setdefault(mode, []).append(v["delta_nll"])
+    plans = [p for p in acc if "oracle-dir" in acc[p]]
+    if not plans:
+        return
+    modes = ["none", "oracle-norm", "oracle-dir", "oracle-both"]
+    labels = ["no intervention", "oracle: fix magnitude", "oracle: fix direction",
+              "oracle: fix both"]
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 3.5),
+                             gridspec_kw={"width_ratios": [1.35, 1]})
+    ax = axes[0]
+    x = np.arange(len(plans))
+    w = 0.2
+    for i, (m, lab) in enumerate(zip(modes, labels)):
+        vals = [float(np.mean(acc[p][m])) if m in acc[p] else np.nan for p in plans]
+        ax.bar(x + (i - 1.5) * w, vals, w, label=lab,
+               color=["#B8B8B8", "#9CC3E5", "#8C5AA8", "#2F6FB2"][i])
+    ax.set_xticks(x)
+    ax.set_xticklabels(plans, fontsize=7)
+    ax.set_ylabel("$\\Delta$NLL (nats/token)")
+    ax.set_title("B3: one oracle intervention at the first parallel group exit")
+    ax.legend(fontsize=7)
+
+    ax = axes[1]
+    if scan_dir and scan_dir.exists():
+        gs, vals = [], []
+        for d in sorted(scan_dir.iterdir(), key=lambda p: p.name):
+            f = d / "samples.jsonl"
+            if not f.is_file():
+                continue
+            ds = []
+            for line in f.read_text(encoding="utf-8").splitlines():
+                r = json.loads(line)
+                for k, v in r["variants"].items():
+                    if k.endswith("::oracle-both"):
+                        ds.append(v["delta_nll"])
+            if ds:
+                gs.append(int(d.name.lstrip("g")))
+                vals.append(float(np.mean(ds)))
+        if gs:
+            ax.plot(gs, vals, "o-", ms=4, lw=1.3, color=C_PAR)
+            base = float(np.mean(acc["prefix3-g8"]["none"])) \
+                if "prefix3-g8" in acc and "none" in acc["prefix3-g8"] else np.nan
+            if not np.isnan(base):
+                ax.axhline(base, color="#999999", ls="--", lw=0.8,
+                           label="no intervention")
+                ax.legend(fontsize=7)
+            ax.set_xlabel("group index given the teacher state at its exit")
+            ax.set_ylabel("$\\Delta$NLL (nats/token)")
+            ax.set_title("prefix3-g8: where the residual actually comes from")
+    fig.tight_layout()
+    fig.savefig(out / "fig_b3.png", bbox_inches="tight")
+    plt.close(fig)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", type=Path, default=Path("results/stage1"))
+    ap.add_argument("--runs", default=None, help="comma separated run dirs to merge")
+    ap.add_argument("--coeffs", type=Path, default=None)
     ap.add_argument("--figdir", type=Path, default=None)
+    ap.add_argument("--b3", type=Path, default=None)
+    ap.add_argument("--b3-scan", type=Path, default=None)
     args = ap.parse_args()
-    out = args.figdir or (args.run / "figures")
+
+    runs = [Path(x.strip()) for x in args.runs.split(",")] if args.runs else [args.run]
+    out = args.figdir or (runs[0] / "figures")
     out.mkdir(parents=True, exist_ok=True)
 
-    q, g, _ = load(args.run)
-    layers_path = args.run / "layer_summary.csv"
-    layers = pd.read_csv(layers_path) if layers_path.exists() else pd.DataFrame()
+    parts, g = [], pd.DataFrame()
+    for r in runs:
+        qq, gg, _ = load(r)
+        parts.append(qq)
+        if g.empty:
+            g = gg
+    q = pd.concat(parts, ignore_index=True)
+
+    layers_path = runs[0] / "layer_summary.csv"
+    layers = pd.DataFrame()
+    if layers_path.exists() and layers_path.stat().st_size > 2:
+        try:
+            layers = pd.read_csv(layers_path)
+        except pd.errors.EmptyDataError:
+            layers = pd.DataFrame()
 
     fig_quality_vs_depth(q, out)
     fig_group_growth(g, out)
     fig_decomposition(g, out, "group4")
     fig_layer_correction(layers, out)
-    fig_gram(args.run, out)
+    fig_gram(runs[0], out)
     fig_accum(q, out)
     fig_windows(q, out)
+    fig_prefix_scan(q, out)
+    fig_calibration(q, out)
+    fig_alpha(args.coeffs, out)
+    if args.b3:
+        fig_b3(args.b3, args.b3_scan, out)
     print(f"figures -> {out}")
     for p in sorted(out.glob("*.png")):
         print(" ", p.name)

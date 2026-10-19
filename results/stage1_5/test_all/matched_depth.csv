@@ -1,0 +1,12 @@
+effective_depth,variant,blocks_parallel,delta_nll_parallel,delete_variant,blocks_delete,delta_nll_delete,advantage_nats
+7,prefix3-g8@fp32,28,4.56613,delete-keep7@fp32,7,15.9729,11.4068
+10,prefix3-g4+layer_ls_lam0.01@fp32,28,3.01972,delete-keep10@fp32,10,15.484,12.4643
+10,prefix3-g4@fp32,28,3.9939,delete-keep10@fp32,10,15.484,11.4901
+12,prefix6-g4+layer_ls_lam0.01@fp32,28,2.09441,delete-keep12@fp32,12,9.90702,7.81261
+12,prefix6-g4@fp32,28,2.58123,delete-keep12@fp32,12,9.90702,7.32579
+14,prefix0-g2+layer_ls_lam0.01@fp32,28,6.86182,delete-keep14@fp32,14,12.5723,5.71047
+14,prefix0-g2@fp32,28,9.14841,delete-keep14@fp32,14,12.5723,3.42388
+15,prefix10-g4+layer_ls_lam0.01@fp32,28,1.72411,delete-keep15@fp32,15,12.3175,10.5934
+15,prefix10-g4@fp32,28,1.82724,delete-keep15@fp32,15,12.3175,10.4903
+16,prefix3-g2+layer_ls_lam0.01@fp32,28,0.961163,delete-keep16@fp32,16,9.33615,8.37499
+16,prefix3-g2@fp32,28,1.11796,delete-keep16@fp32,16,9.33615,8.21819
