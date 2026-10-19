@@ -1,0 +1,44 @@
+{
+  "model_repo": "mlx-community/Qwen3-0.6B-Base-bf16",
+  "model_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
+  "tokenizer_repo": "mlx-community/Qwen3-0.6B-Base-bf16",
+  "tokenizer_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
+  "tokenizer_class": "Qwen2Tokenizer",
+  "vocab_size": 151643,
+  "dataset": "Salesforce/wikitext",
+  "dataset_config": "wikitext-2-raw-v1",
+  "dataset_revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+  "seq_len": 257,
+  "n_predicted_tokens": 256,
+  "seed": 20261019,
+  "split_targets": {
+    "train": "calibration",
+    "validation": "validation",
+    "test": "test"
+  },
+  "requested_windows": {
+    "train": 64,
+    "validation": 32,
+    "test": 64
+  },
+  "corpus": {
+    "train": {
+      "n_tokens": 2517232,
+      "corpus_sha256": "fb23ad9643a34514eec5cb85ec2a6f49d1a33e6a3d5077dff5a403e1d18f5047",
+      "n_documents": 36718
+    },
+    "validation": {
+      "n_tokens": 262210,
+      "corpus_sha256": "f3714de012180492efbcf4f0380322389a27f735ddb63e8c016a6a6285f50408",
+      "n_documents": 3760
+    },
+    "test": {
+      "n_tokens": 298938,
+      "corpus_sha256": "c5b5caea5bd655cb221545a484f2f0f59d35092a17a66840d7b9513d0b99687d",
+      "n_documents": 4358
+    }
+  },
+  "concat_rule": "join non-empty rows with '\\n\\n', then tokenize without special tokens",
+  "window_rule": "non-overlapping windows of seq_len tokens; offsets shuffled by seed; sorted by start",
+  "note": "Token ids stay local. Do not commit the sampled corpus to a public repo."
+}

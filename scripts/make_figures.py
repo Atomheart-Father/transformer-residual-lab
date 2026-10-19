@@ -409,6 +409,134 @@ def fig_b3(b3_dir: Path, scan_dir: Path, out: Path) -> None:
     plt.close(fig)
 
 
+def fig_stage16(root: Path, out: Path) -> None:
+    """Boundary scan and compensation, from the Stage 1.6 run directories."""
+    def dmap(path):
+        if not path.exists():
+            return {}
+        s = json.loads(path.read_text(encoding="utf-8"))
+        return {r["plan"]: r["delta_nll_mean"] for r in s["quality"]
+                if r["accum"] == "fp32"}
+
+    cal = {}
+    for p in ("screen", "screen_d10extra", "irregular_cal"):
+        cal.update(dmap(root / p / "summary.json"))
+    val = {}
+    for p in ("val", "irregular_val"):
+        val.update(dmap(root / p / "summary.json"))
+
+    # --- tail scan: quality vs last-group size, plus the amplification factor
+    tail = [("tail-b27", 1), ("tail-b26", 2), ("tail-b25", 3),
+            ("tail-b24", 4), ("tail-b23", 5)]
+    sizes, cvals, vvals = [], [], []
+    for name, size in tail:
+        if name in cal:
+            sizes.append(size)
+            cvals.append(cal[name])
+            vvals.append(val.get(name, np.nan))
+    if sizes:
+        amp = {}
+        gpath = root / "screen" / "groups.jsonl"
+        if gpath.exists():
+            acc: dict[str, dict[int, list[float]]] = {}
+            for line in gpath.read_text(encoding="utf-8").splitlines():
+                r = json.loads(line)
+                if r["plan"] not in {n for n, _ in tail}:
+                    continue
+                gi = r["group_index"]
+                d = acc.setdefault(r["plan"], {}).setdefault(gi, [0.0, 0.0])
+                d[0] += r["decomp_inherited_rms"]
+                d[1] += r["decomp_amplified_rms"]
+            for name, _ in tail:
+                if name in acc:
+                    last = acc[name][max(acc[name])]
+                    amp[name] = last[1] / max(last[0], 1e-9)
+
+        fig, ax = plt.subplots(figsize=(8.2, 3.6))
+        ax.plot(sizes, cvals, "o-", ms=5, lw=1.4, color=C_PAR, label="calibration")
+        ax.plot(sizes, vvals, "s--", ms=5, lw=1.2, color=C_DEL, label="validation")
+        ax.set_xlabel("size of the last parallel group  ([19,b) + [b,28), depth 7)")
+        ax.set_ylabel("$\\Delta$NLL (nats/token)")
+        ax.set_title("tail boundary: the last group must stay small")
+        ax.legend(fontsize=7, loc="upper left")
+        if amp:
+            ax2 = ax.twinx()
+            ax2.plot([size for name, size in tail if name in amp],
+                     [amp[name] for name, _ in tail if name in amp],
+                     "^:", ms=5, lw=1.1, color="#8C5AA8")
+            ax2.set_ylabel("amplification of inherited error (x)",
+                           color="#8C5AA8", fontsize=8)
+            ax2.tick_params(axis="y", colors="#8C5AA8")
+            ax2.grid(False)
+        fig.tight_layout()
+        fig.savefig(out / "fig16_tail_scan.png", bbox_inches="tight")
+        plt.close(fig)
+
+    # --- group-by-group exit error for the tail family
+    gpath = root / "screen" / "groups.jsonl"
+    if gpath.exists():
+        sel = ["tail-b27", "tail-b26", "tail-b25", "tail-b24"]
+        data: dict[str, dict[int, float]] = {}
+        for line in gpath.read_text(encoding="utf-8").splitlines():
+            r = json.loads(line)
+            if r["plan"] not in sel:
+                continue
+            d = data.setdefault(r["plan"], {})
+            d[r["group_index"]] = d.get(r["group_index"], 0.0) + r["exit_rms_diff"]
+        if data:
+            n = max(len(v) for v in data.values())
+            fig, ax = plt.subplots(figsize=(7.6, 3.4))
+            for i, plan in enumerate(sel):
+                if plan not in data:
+                    continue
+                xs = sorted(data[plan])
+                ys = [data[plan][g] / 64.0 for g in xs]
+                ax.plot(xs, ys, "o-", ms=4, lw=1.3, color=C_ACC[i % len(C_ACC)],
+                        label=plan)
+            ax.set_yscale("log")
+            ax.set_xlabel("group index")
+            ax.set_ylabel("||$\\hat h_e - h_e^T$|| RMS at group exit")
+            ax.set_title("shrinking the last group shrinks its exit error")
+            ax.legend(fontsize=7)
+            fig.tight_layout()
+            fig.savefig(out / "fig16_group_exit.png", bbox_inches="tight")
+            plt.close(fig)
+
+    # --- compensation comparison
+    runs = [("validation", root / "comp" / "eval_val" / "eval_summary.json"),
+            ("fresh test", root / "comp" / "eval_fresh" / "eval_summary.json")]
+    runs = [(n, p) for n, p in runs if p.exists()]
+    if runs:
+        order = ["", "+oracle", "+linear_r8", "+mlp_r16", "+mlp_r32"]
+        labels = ["no comp", "oracle (upper bound)", "rank-8 linear",
+                  "rank-16 MLP", "rank-32 MLP"]
+        fig, axes = plt.subplots(1, len(runs), figsize=(5.2 * len(runs), 3.5),
+                                 squeeze=False)
+        for j, (name, path) in enumerate(runs):
+            m = json.loads(path.read_text(encoding="utf-8"))
+            agg = m["aggregate"]
+            plan = m.get("plan", "")
+            vals, labs = [], []
+            for suf, lab in zip(order, labels):
+                k = f"{plan}{suf}"
+                if k in agg:
+                    vals.append(agg[k]["delta_nll_mean"])
+                    labs.append(lab)
+            ax = axes[0][j]
+            bars = ax.bar(range(len(vals)), vals,
+                          color=["#B8B8B8", "#4C9A52", "#9CC3E5", "#8C5AA8", "#2F6FB2"][:len(vals)])
+            for b, v in zip(bars, vals):
+                ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.2f}",
+                        ha="center", va="bottom", fontsize=7)
+            ax.set_xticks(range(len(labs)))
+            ax.set_xticklabels(labs, rotation=20, ha="right", fontsize=7)
+            ax.set_ylabel("$\\Delta$NLL (nats/token)")
+            ax.set_title(f"one compensator at group 5 ({name})")
+        fig.tight_layout()
+        fig.savefig(out / "fig16_compensation.png", bbox_inches="tight")
+        plt.close(fig)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", type=Path, default=Path("results/stage1"))
@@ -417,6 +545,8 @@ def main() -> None:
     ap.add_argument("--figdir", type=Path, default=None)
     ap.add_argument("--b3", type=Path, default=None)
     ap.add_argument("--b3-scan", type=Path, default=None)
+    ap.add_argument("--stage16", type=Path, default=None,
+                    help="results/stage1_6 root; also renders boundary + compensation")
     args = ap.parse_args()
 
     runs = [Path(x.strip()) for x in args.runs.split(",")] if args.runs else [args.run]
@@ -451,6 +581,8 @@ def main() -> None:
     fig_alpha(args.coeffs, out)
     if args.b3:
         fig_b3(args.b3, args.b3_scan, out)
+    if args.stage16:
+        fig_stage16(args.stage16, out)
     print(f"figures -> {out}")
     for p in sorted(out.glob("*.png")):
         print(" ", p.name)

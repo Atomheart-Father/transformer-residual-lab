@@ -26,6 +26,37 @@
 
 `rel_reconstruction_rms` 的含义：用最优 α 线性组合重构真实组输出后剩下的相对 RMS。**它是 B2 类方法的上限，不是拟合误差的噪声。** 组越大，这个值越大（g2 0.41 → g8 0.70）。
 
+### Stage 1.6 追加的产物
+
+| 路径 | 内容 | 是否提交 |
+|---|---|---|
+| `data257/fresh_test.jsonl` | 全新独立测试集（seed 771013，与旧 test 逐 token 不相交） | 否（`data257/` 已 ignore） |
+| `data257/fresh_test_manifest.json` | 抽取参数、seed、旧 offset 剔除记录、不相交断言结果 | 是 |
+| `comp/<site>/pairs.npz` | 特征 `a` 与标签 `c*`，每 token 一行 | **否（约 129 MB）** |
+| `comp/<site>/linear_r{8,16}.npz` | 线性补偿器权重 `A[D,r]`、`B[r,D]`、`x_mean`、`y_mean` | 是 |
+| `comp/<site>/mlp_r{16,32,64}.npz` | MLP 补偿器权重 `W1`、`b1`、`W2`、`b2` | 是 |
+| `comp/<site>/fit_report.json` | 每个 rank 的 train/val 相对误差、余弦、解释方差、epoch 曲线 | 是 |
+| `comp/eval_*/eval_summary.json` | 每变体的 ΔNLL / KL / top1 / `recovery_vs_oracle` / `comp` 块 / 成本 | 是 |
+| `comp/benchmark.json` | 各 rank 的实测延迟与峰值显存（50 次平均） | 是 |
+| `comp/block_reference.json` | 单 block 前向参考耗时，作为成本分母 | 是 |
+| `selection.json` | 冻结记录：候选结构的 cal/val ΔNLL、选定结构与补偿器、`fresh_test_used_for_selection: false` | 是 |
+
+`eval_summary.json` 的 `comp` 块（每个补偿器一项）：
+
+| 字段 | 含义 |
+|---|---|
+| `target_rms` | `c*` 的 RMS，补偿器要追的目标尺度 |
+| `pred_rms` | `ĉ` 的 RMS。远小于 `target_rms` 说明在收缩，远大于说明发散 |
+| `err_rms` | `||ĉ − c*||` 的 RMS |
+| `rel_err` | `err_rms / target_rms`。**注意这是向量误差，不是 NLL** |
+| `cosine` | `ĉ` 与 `c*` 的平均余弦 |
+| `recovery_vs_oracle` | `(ΔNLL_none − ΔNLL_comp) / (ΔNLL_none − ΔNLL_oracle)`，相对 oracle 空间，不是相对串行 |
+| `flops_per_token` | `4 × n_params`（两个矩阵乘各算 2 次），仅作量级参考 |
+| `predict_ms_per_token` | 实测预测耗时。**引用成本时用这个，不要用 FLOPs** |
+
+`recovery_vs_oracle` 可以 > 1（串行参考那行是 1.11），因为 oracle 本身受 bf16 舍入限制、不等于 0。不要把它当「超过上界」。
+
+
 ## 三类误差（不可混用）
 
 | 字段 | 定义 | 能否部署 |

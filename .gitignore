@@ -6,8 +6,12 @@ __pycache__/
 .cache/
 
 # dataset token windows stay local; only hashes and rules are committed
-data/
-data257/
+data/*
+data257/*
+# manifests are small, text-free, and are the provenance record
+!data/data_manifest.json
+!data257/data_manifest.json
+!data257/fresh_test_manifest.json
 
 # local agent workspace (notes, memory) stays local
 .workbuddy-ai/
@@ -22,3 +26,6 @@ results/scratch/
 *.gguf
 *.mlx
 *.log
+
+# large derived tensors stay local; regenerate with scripts/compensate.py
+**/pairs.npz

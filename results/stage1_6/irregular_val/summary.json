@@ -1,0 +1,345 @@
+{
+  "meta": {
+    "status": "MEASURED",
+    "model": "mlx-community/Qwen3-0.6B-Base-bf16",
+    "model_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
+    "model_config": {
+      "architectures": [
+        "Qwen3ForCausalLM"
+      ],
+      "attention_bias": false,
+      "attention_dropout": 0.0,
+      "bos_token_id": 151643,
+      "eos_token_id": 151643,
+      "head_dim": 128,
+      "hidden_act": "silu",
+      "hidden_size": 1024,
+      "initializer_range": 0.02,
+      "intermediate_size": 3072,
+      "max_position_embeddings": 32768,
+      "max_window_layers": 28,
+      "model_type": "qwen3",
+      "num_attention_heads": 16,
+      "num_hidden_layers": 28,
+      "num_key_value_heads": 8,
+      "rms_norm_eps": 1e-06,
+      "rope_scaling": null,
+      "rope_theta": 1000000,
+      "sliding_window": null,
+      "tie_word_embeddings": true,
+      "torch_dtype": "bfloat16",
+      "transformers_version": "4.51.0",
+      "use_cache": true,
+      "use_sliding_window": false,
+      "vocab_size": 151936
+    },
+    "n_layers": 28,
+    "mlx_version": "0.31.2",
+    "mlx_lm_version": "0.31.3",
+    "python": "3.12.12 (main, Oct  9 2025, 11:07:00) [Clang 17.0.0 (clang-1700.4.4.1)]",
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "input": "data257/validation.jsonl",
+    "max_samples": 32,
+    "preset": "stage1",
+    "fusion": "sum",
+    "coeffs_files": [],
+    "coeffs_meta": null,
+    "variants_evaluated": [
+      ""
+    ],
+    "plans": [
+      {
+        "name": "irr-a",
+        "kind": "custom",
+        "executed_blocks": 28,
+        "effective_depth": 7,
+        "prefix": 0,
+        "group_size": 0,
+        "groups": [
+          [
+            0
+          ],
+          [
+            1
+          ],
+          [
+            2
+          ],
+          [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10
+          ],
+          [
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19
+          ],
+          [
+            20,
+            21,
+            22,
+            23,
+            24,
+            25
+          ],
+          [
+            26,
+            27
+          ]
+        ],
+        "deleted_layers": [],
+        "note": "0|1|2|3-10|11-19|20-25|26-27"
+      },
+      {
+        "name": "irr-b",
+        "kind": "custom",
+        "executed_blocks": 28,
+        "effective_depth": 7,
+        "prefix": 0,
+        "group_size": 0,
+        "groups": [
+          [
+            0
+          ],
+          [
+            1
+          ],
+          [
+            2
+          ],
+          [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11
+          ],
+          [
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19
+          ],
+          [
+            20,
+            21,
+            22,
+            23,
+            24,
+            25
+          ],
+          [
+            26,
+            27
+          ]
+        ],
+        "deleted_layers": [],
+        "note": "0|1|2|3-11|12-19|20-25|26-27"
+      },
+      {
+        "name": "irr-c",
+        "kind": "custom",
+        "executed_blocks": 28,
+        "effective_depth": 7,
+        "prefix": 0,
+        "group_size": 0,
+        "groups": [
+          [
+            0
+          ],
+          [
+            1
+          ],
+          [
+            2
+          ],
+          [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9
+          ],
+          [
+            10,
+            11,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18
+          ],
+          [
+            19,
+            20,
+            21,
+            22,
+            23,
+            24,
+            25
+          ],
+          [
+            26,
+            27
+          ]
+        ],
+        "deleted_layers": [],
+        "note": "0|1|2|3-9|10-18|19-25|26-27"
+      }
+    ],
+    "accum": [
+      "fp32"
+    ],
+    "diagnose_plans": [],
+    "git_commit": "3c47001db9cd1011d5faf93fd02d2263dbd45906",
+    "warning": "Graph semantics only. No real GPU concurrency and no speedup claim.",
+    "n_measured": 32,
+    "n_predicted_tokens": 128,
+    "data_revision": "b08601e04326c79dfdd32d625aee71d232d685c3"
+  },
+  "quality": [
+    {
+      "variant": "irr-a@fp32",
+      "plan": "irr-a",
+      "accum": "fp32",
+      "kind": "custom",
+      "n_samples": 32,
+      "executed_blocks": 28,
+      "effective_depth": 7,
+      "delta_nll_mean": 4.039358451962471,
+      "delta_nll_std": 0.3994926221989166,
+      "delta_nll_ci95_lo": 3.9031692812219263,
+      "delta_nll_ci95_hi": 4.178277437388897,
+      "kl_mean": 3.988415375351906,
+      "top1_mean": 0.165771484375,
+      "ppl_ratio": 56.78989766866524,
+      "teacher_nll_mean": 3.0930482745170593,
+      "state_rel_rms_mean": 0.9389662726961747,
+      "state_cos_mean": 0.7153207417577505,
+      "state_max_abs_mean": 462.890625
+    },
+    {
+      "variant": "irr-b@fp32",
+      "plan": "irr-b",
+      "accum": "fp32",
+      "kind": "custom",
+      "n_samples": 32,
+      "executed_blocks": 28,
+      "effective_depth": 7,
+      "delta_nll_mean": 4.084001436829567,
+      "delta_nll_std": 0.38495398797799,
+      "delta_nll_ci95_lo": 3.957915679551661,
+      "delta_nll_ci95_hi": 4.222340688295662,
+      "kl_mean": 4.033850349485874,
+      "top1_mean": 0.1607666015625,
+      "ppl_ratio": 59.382610847186726,
+      "teacher_nll_mean": 3.0930482745170593,
+      "state_rel_rms_mean": 0.9073375797392023,
+      "state_cos_mean": 0.6991754211485386,
+      "state_max_abs_mean": 454.953125
+    },
+    {
+      "variant": "irr-c@fp32",
+      "plan": "irr-c",
+      "accum": "fp32",
+      "kind": "custom",
+      "n_samples": 32,
+      "executed_blocks": 28,
+      "effective_depth": 7,
+      "delta_nll_mean": 4.52501417696476,
+      "delta_nll_std": 0.5030084551769689,
+      "delta_nll_ci95_lo": 4.357056450471282,
+      "delta_nll_ci95_hi": 4.6992815149948,
+      "kl_mean": 4.461674980819225,
+      "top1_mean": 0.1552734375,
+      "ppl_ratio": 92.29723431402095,
+      "teacher_nll_mean": 3.0930482745170593,
+      "state_rel_rms_mean": 1.1166573066624104,
+      "state_cos_mean": 0.6361572816967964,
+      "state_max_abs_mean": 2015.53125
+    }
+  ],
+  "groups": [],
+  "layers": [],
+  "frontier": [
+    {
+      "variant": "irr-a@fp32",
+      "kind": "custom",
+      "executed_blocks": 28,
+      "effective_depth": 7,
+      "delta_nll_mean": 4.039358451962471,
+      "kl_mean": 3.988415375351906,
+      "top1_mean": 0.165771484375,
+      "ppl_ratio": 56.78989766866524
+    }
+  ],
+  "thresholds": [
+    {
+      "delta_nll_threshold": 0.1,
+      "variant": "NOT REACHED",
+      "effective_depth": NaN,
+      "executed_blocks": NaN,
+      "delta_nll_mean": NaN
+    },
+    {
+      "delta_nll_threshold": 0.25,
+      "variant": "NOT REACHED",
+      "effective_depth": NaN,
+      "executed_blocks": NaN,
+      "delta_nll_mean": NaN
+    },
+    {
+      "delta_nll_threshold": 0.5,
+      "variant": "NOT REACHED",
+      "effective_depth": NaN,
+      "executed_blocks": NaN,
+      "delta_nll_mean": NaN
+    },
+    {
+      "delta_nll_threshold": 1.0,
+      "variant": "NOT REACHED",
+      "effective_depth": NaN,
+      "executed_blocks": NaN,
+      "delta_nll_mean": NaN
+    },
+    {
+      "delta_nll_threshold": 2.0,
+      "variant": "NOT REACHED",
+      "effective_depth": NaN,
+      "executed_blocks": NaN,
+      "delta_nll_mean": NaN
+    },
+    {
+      "delta_nll_threshold": 3.0,
+      "variant": "NOT REACHED",
+      "effective_depth": NaN,
+      "executed_blocks": NaN,
+      "delta_nll_mean": NaN
+    }
+  ],
+  "matched_depth": []
+}

@@ -1,9 +1,10 @@
-# Transformer Residual Lab · Stage 1 / 1.5
+# Transformer Residual Lab · Stage 1 / 1.5 / 1.6
 
-**状态：Stage 1 smoke 与 Stage 1.5（64/32/64 × 257 token）已完成；权重冻结，未训练任何补偿网络，未进入 Plan B。**
+**状态：Stage 1、Stage 1.5、Stage 1.6 已完成；主模型权重全程冻结，Stage 1.6 只训练了一个补偿器（66,592 参数）。未做 DAG 搜索，未宣称推理加速。**
 
-对同一个冻结的 `Qwen3-0.6B-Base` BF16 模型，比较逐层串行的真实残差与共享输入的并行近似残差，测量三类误差（层级修正、局部组误差、自由运行累积误差）的分布、累积与结构，判断 Plan B 的轻量补偿网络是否值得训练。**本阶段不训练任何参数、不搜索 DAG、不宣传实际加速。**
+对同一个冻结的 `Qwen3-0.6B-Base` BF16 模型，比较逐层串行的真实残差与共享输入的并行近似残差，测量三类误差（层级修正、局部组误差、自由运行累积误差）的分布、累积与结构，并验证 Plan B 的轻量补偿网络能否在独立数据上回收质量。
 
+- [Stage 1.6 报告：受控分组边界 + 单点补偿](results/stage1_6/REPORT.md)
 - [Stage 1.5 报告：前缀保护、深度扫描、融合标定](results/stage1_5/REPORT.md)
 - [Stage 1 报告](results/REPORT.md)
 - [详细实验设计](docs/STAGE1_EXPERIMENT.md)
@@ -12,6 +13,17 @@
 - [开源复用与核查](docs/PRIOR_WORK.md)
 - [结果字段](docs/OUTPUT_SCHEMA.md)
 - [结果报告模板](results/REPORT_TEMPLATE.md)
+
+## Stage 1.6 结论（详见报告）
+
+1. **「保护最后一层」被推翻。** 深度 7 下末组 1/2/3/4/5 层对应验证集 ΔNLL 4.511/4.194/6.587/—/—。`[26,27]` 成组比 `[27]` 单独串行**好** 0.32 nats。
+2. **机制是末组放大误差**，不是末组自己算错。放大项 RMS 随末组大小 13.5→95.9（0.86×→12.8×），新产生项只从 0→15.2。末组必须小。
+3. **位置价值极不均匀**：只动中间边界，全区间 0.35–0.40 nats；动末边界能造成 5.2 nats。
+4. **不规则连续分组确实更好，但收益温和**：`3-10 / 11-19 / 20-25 / 26-27`（`irr-a`）在 28 blocks、depth 7、零训练下比 Stage 1.5 基线省 0.41（cal）/ 0.47（val）nats，约 10%，不是数量级。
+5. **单点补偿在全新独立测试集上有效**：`irr-a` 3.981 → 3.410（−0.57 nats，−14.3%），回收 oracle 空间的 16.0%。rank 8/16/32/64 单调改善（5%/11%/16%/20%），未饱和。
+6. **泛化不打折**：验证 18.3% → 全新测试 16.0%。训练特征取自自由运行，不用教师态做输入。
+7. **隐藏态 MSE 高估能力**：rank-32 把最终隐藏态 rel_rms 改善 25%，ΔNLL 只改善 16%。能力结论以 ΔNLL / KL / top1 为准。
+8. **成本必须实测**：rank-32 的 FLOPs 是单 block 的 0.61%，实测耗时是 13.5%（0.350 ms / 256 token）。补偿器读组入口 `a`，与该组 block 并行，**没有额外串行等待**。
 
 ## Stage 1.5 结论（详见报告）
 
@@ -41,12 +53,17 @@ scripts/prepare_data.py   固定 revision 的 token 窗口 + manifest
 scripts/measure.py        三类误差、plan 定义、bf16/fp32 对照、融合规则、Gram
 scripts/calibrate.py      离线 ridge 拟合 per-group / per-layer α（只用 calibration）
 scripts/diagnose_b3.py    B3：幅度 vs 方向的 oracle 干预 + 逐组归因
+scripts/make_fresh_split.py  与已用样本逐 token 不相交的新测试集（seed 771013）
+scripts/compensate.py     Plan B 单点补偿：collect / fit / eval 三阶段
 scripts/summarize.py      聚合、bootstrap CI、Gram 谱、Pareto / 同深度 / 阈值表
 scripts/make_figures.py   PNG 图表
 tests/                    纯代数与 plan 构造测试（不需要 MLX）
 results/smoke/            Stage 1 首轮 smoke 的原始记录与图表
 results/stage1_5/         Stage 1.5 全部记录、系数、图表与报告
+results/stage1_6/         Stage 1.6 边界扫描、补偿器、成本与报告
 ```
+
+`--plans` 支持显式分区语法 `名字:0|1|2|3-10|11-19|20-25|26-27`，构造时断言 `flatten(groups) == range(28)`，所以 **block 数不可能漂移**，depth 由组数直接给出。做边界实验必须用这个语法，不要用 `prefix{k}-g{g}`（它会同时改变深度）。
 
 ## 复现
 
@@ -59,6 +76,7 @@ python scripts/make_figures.py --run results/smoke
 ```
 
 Stage 1.5 用 257 token 窗口与 64/32/64 划分，完整命令见 `docs/RUNBOOK.md` 的「Stage 1.5」一节。
+Stage 1.6 的边界扫描与补偿器流程见 `docs/RUNBOOK.md` 的「Stage 1.6」一节。
 
 ## 研究边界
 
@@ -70,6 +88,10 @@ Stage 1.5 用 257 token 窗口与 64/32/64 划分，完整命令见 `docs/RUNBOO
 6. **并行与删层必须在两个轴上分别比较**：相同有效深度、相同 block 数。把 `group2`（28 blocks / depth 14）与 `keep21`（21 blocks / depth 21）直接对比是错的。
 7. **「保护了 k 层」不是充分描述**，必须同时给出具体分组区间。同深度不同边界的方案质量可以差 2 nats。
 8. B3 的 `oracle-*` 干预使用教师态，**只是诊断**，其成绩不能作为可实现方案引用。
+9. **反复查看过的 test 集不再是独立测试集。** Stage 1.6 起，结构选择与补偿器训练只看 calibration / validation；最终数字来自 `fresh_test.jsonl`（seed 771013，与旧 test 逐 token 不相交），并记录抽取参数与断言结果。
+10. **补偿器只能使用推理时真实可得的输入。** 训练特征取自自由运行的组入口 `a`，教师态只用于生成标签和计算 oracle 上界，绝不进入 `C_θ` 的输入。
+11. **成本一律用实测时间，不用 FLOPs 折算。** 小矩阵乘在 GPU 上打不满：rank-32 的 FLOPs 是单 block 的 0.61%，实测耗时是 13.5%。
+12. **隐藏态误差不等于模型能力。** 状态 rel_rms 改善 25% 时 ΔNLL 只改善 16%。能力结论只以 ΔNLL / KL / top1 为准。
 
 ## 研究协作
 

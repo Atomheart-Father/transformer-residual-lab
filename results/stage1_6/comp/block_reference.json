@@ -1,0 +1,6 @@
+{
+  "block_ms_256tok": 2.6,
+  "block_us_per_token": 10.16,
+  "block_params": 15730944,
+  "layer_index": 12
+}

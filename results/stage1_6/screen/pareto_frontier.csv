@@ -1,0 +1,5 @@
+variant,kind,executed_blocks,effective_depth,delta_nll_mean,kl_mean,top1_mean,ppl_ratio
+tail-b26@fp32,custom,28,7,4.13133,4.13142,0.155212,62.2608
+tail-2serial@fp32,custom,28,8,3.94939,3.94616,0.158447,51.9035
+d10-b24@fp32,custom,28,10,3.68861,3.68379,0.179749,39.9891
+serial@fp32,serial,28,28,0,0,1,1

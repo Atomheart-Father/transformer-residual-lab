@@ -1,0 +1,105 @@
+{
+  "stage": "1.6",
+  "frozen": true,
+  "rule": "structure chosen on calibration screen, confirmed on validation; compensator chosen on validation. fresh_test was executed only after this file was fixed.",
+  "data": {
+    "calibration": "data257/calibration.jsonl (64 windows, seed 20261019)",
+    "validation": "data257/validation.jsonl (32 windows)",
+    "fresh_test": "data257/fresh_test.jsonl (64 windows, seed 771013, disjoint from data257/test.jsonl)"
+  },
+  "structure_selection": {
+    "depth_7_family": {
+      "fixed": "28 executed blocks, effective depth 7, only the last boundary moves",
+      "calibration": {
+        "tail-b27": 4.37101,
+        "tail-b26": 4.13133,
+        "tail-b25": 6.58081,
+        "tail-b24": 8.48551,
+        "tail-b23": 9.37399
+      },
+      "validation": {
+        "tail-b27": 4.51144,
+        "tail-b26": 4.19376,
+        "tail-b25": 6.5868
+      }
+    },
+    "middle_boundary": {
+      "fixed": "28 executed blocks, effective depth 7, one internal boundary moves",
+      "calibration": {
+        "mid-b20": 4.33705,
+        "mid-b18": 4.73497,
+        "mid-b10": 4.53588,
+        "mid-b12": 4.6492
+      },
+      "validation": {
+        "mid-b20": 4.48564,
+        "mid-b18": 4.83826
+      },
+      "note": "full spread 0.35-0.40 nats, smaller than the last-boundary effect by an order of magnitude"
+    },
+    "irregular": {
+      "fixed": "28 executed blocks, effective depth 7, four parallel groups over layers 3..27, last group pinned to 2 layers",
+      "calibration": {
+        "irr-a": 3.9607,
+        "irr-b": 4.03951,
+        "irr-c": 4.43042
+      },
+      "validation": {
+        "irr-a": 4.03936,
+        "irr-b": 4.084,
+        "irr-c": 4.52501
+      }
+    },
+    "other_depths_not_comparable": {
+      "tail-2serial": {"effective_depth": 8, "calibration": 3.94939, "validation": 4.04584},
+      "d10-b22": {"effective_depth": 10, "calibration": 3.95767},
+      "d10-b23": {"effective_depth": 10, "calibration": 3.84494},
+      "d10-b24": {"effective_depth": 10, "calibration": 3.68861, "validation": 3.70669},
+      "d10-b25": {"effective_depth": 10, "calibration": 3.48385, "validation": null},
+      "d10-b26": {"effective_depth": 10, "calibration": 3.64974, "validation": 3.64785},
+      "note": "depth 8 and depth 10 rows are listed for completeness only; they must not be compared against depth 7 rows"
+    },
+    "chosen": {
+      "plan": "irr-a",
+      "groups": [[0], [1], [2], [3, 4, 5, 6, 7, 8, 9, 10], [11, 12, 13, 14, 15, 16, 17, 18, 19], [20, 21, 22, 23, 24, 25], [26, 27]],
+      "executed_blocks": 28,
+      "effective_depth": 7,
+      "reason": "best validation delta_nll among all depth-7 structures, and best on calibration too, so the choice is not a validation-only artifact",
+      "gain_vs_stage1_5_baseline": {"calibration": 0.41031, "validation": 0.47208, "baseline": "tail-b27 == prefix3-g8"}
+    }
+  },
+  "compensation_selection": {
+    "site": {
+      "plan": "irr-a",
+      "group_index": 5,
+      "group_layers": [20, 21, 22, 23, 24, 25],
+      "reason": "oracle injection at this single group recovers 89.4% of the total error, so it is the dominant site",
+      "features": "free-running group entry state a",
+      "labels": "h_teacher(26) - h_parallel(26)"
+    },
+    "validation_delta_nll": {
+      "irr-a": 4.03936,
+      "irr-a+oracle": 0.42817,
+      "irr-a+linear_r8": 3.78989,
+      "irr-a+mlp_r16": 3.6045,
+      "irr-a+mlp_r32": 3.37993
+    },
+    "chosen": {
+      "compensator": "mlp_r32",
+      "rank": 32,
+      "n_params": 66592,
+      "reason": "monotone improvement with rank, no saturation at rank 32, and rank-32 stays far below one block in cost; rank 64 was only evaluated on 32 fresh-test samples after the fact and is reported as an exploratory point, not as the selection",
+      "validation_recovery_vs_oracle": 0.1826
+    }
+  },
+  "post_freeze_checks": {
+    "fresh_test_runs": [
+      "no compensation, oracle, linear_r8, mlp_r16, mlp_r32 (64 samples, single run)",
+      "mlp_r64 (32 samples, exploratory, run after the above)"
+    ],
+    "fresh_test_used_for_selection": false,
+    "note": "no hyperparameter, boundary, or rank decision was revised after seeing fresh_test"
+  },
+  "git_commit_recorded_in_runs": "3c47001db9cd1011d5faf93fd02d2263dbd45906",
+  "commit_note": "runs were executed from a working tree whose last commit was still 3c47001 (Stage 1.5); the Stage 1.6 code that produced them is committed together with this file, so the run manifests' git_commit points at the parent commit, not at this one"
+}

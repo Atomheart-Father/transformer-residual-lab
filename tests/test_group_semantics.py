@@ -10,7 +10,9 @@ from measure import (  # noqa: E402
     decompose_error,
     even_keep,
     make_plan,
+    resolve_plan,
     stage15_plans,
+    stage16_plans,
     stage1_plans,
 )
 
@@ -111,6 +113,48 @@ class Plans(unittest.TestCase):
         plan = make_plan(self.n, "prefix3-g8")
         first = next(i for i, g in enumerate(plan.groups) if len(g) > 1)
         self.assertEqual(plan.groups[first][0], 3)
+
+
+class IrregularGrouping(unittest.TestCase):
+    """Stage 1.6: the plan must be a partition, so block count can never drift."""
+
+    n = 28
+
+    def test_custom_spec_is_a_partition(self):
+        plan = make_plan(self.n, "x:0|1|2|3-10|11-18|19-25|26-27")
+        self.assertEqual(plan.groups,
+                         [[0], [1], [2], list(range(3, 11)), list(range(11, 19)),
+                          list(range(19, 26)), [26, 27]])
+        self.assertEqual(plan.executed_blocks, self.n)
+        self.assertEqual(plan.effective_depth, 7)
+
+    def test_gaps_and_repeats_are_rejected(self):
+        with self.assertRaises(ValueError):
+            make_plan(self.n, "x:0|1|2|4-27")          # layer 3 missing
+        with self.assertRaises(ValueError):
+            make_plan(self.n, "x:0|1|2|3-27|27")       # 27 twice
+        with self.assertRaises(ValueError):
+            make_plan(self.n, "x:0|1|2|3-20")          # stops early
+
+    def test_stage16_tail_family_is_depth_matched(self):
+        plans = {p.name: p for p in stage16_plans(self.n)}
+        for name in ("tail-b27", "tail-b26", "tail-b25", "tail-b24", "tail-b23"):
+            self.assertEqual(plans[name].effective_depth, 7, name)
+            self.assertEqual(plans[name].executed_blocks, self.n, name)
+        # only the last two stages differ inside the family
+        base = plans["tail-b27"].groups
+        for name in ("tail-b26", "tail-b25", "tail-b24", "tail-b23"):
+            self.assertEqual(plans[name].groups[:-2], base[:-2], name)
+
+    def test_stage16_serial_marker_is_explicit(self):
+        plans = {p.name: p for p in stage16_plans(self.n)}
+        self.assertEqual(plans["tail-2serial"].effective_depth, 8)
+        self.assertEqual(plans["d10-b23"].effective_depth, 10)
+
+    def test_resolve_plan_accepts_shorthand_and_spec(self):
+        self.assertEqual(resolve_plan(self.n, "tail-b26").effective_depth, 7)
+        self.assertEqual(resolve_plan(self.n, "prefix3-g8").groups,
+                         resolve_plan(self.n, "tail-b27").groups)
 
 
 class Decomposition(unittest.TestCase):

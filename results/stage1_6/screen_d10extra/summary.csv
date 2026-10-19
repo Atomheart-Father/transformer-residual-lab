@@ -1,0 +1,3 @@
+variant,plan,accum,kind,n_samples,executed_blocks,effective_depth,delta_nll_mean,delta_nll_std,delta_nll_ci95_lo,delta_nll_ci95_hi,kl_mean,top1_mean,ppl_ratio,teacher_nll_mean,state_rel_rms_mean,state_cos_mean,state_max_abs_mean
+d10-b25@fp32,d10-b25,fp32,custom,64,28,10,3.48385,0.389104,3.39054,3.58246,3.46737,0.18988,32.585,3.05377,0.783395,0.739812,336.804
+d10-b26@fp32,d10-b26,fp32,custom,64,28,10,3.64974,0.469017,3.54062,3.76601,3.61254,0.19812,38.4646,3.05377,0.862753,0.715316,418.278

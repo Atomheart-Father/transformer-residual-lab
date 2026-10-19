@@ -1,0 +1,4 @@
+variant,plan,accum,kind,n_samples,executed_blocks,effective_depth,delta_nll_mean,delta_nll_std,delta_nll_ci95_lo,delta_nll_ci95_hi,kl_mean,top1_mean,ppl_ratio,teacher_nll_mean,state_rel_rms_mean,state_cos_mean,state_max_abs_mean
+irr-a@fp32,irr-a,fp32,custom,64,28,7,3.9607,0.460885,3.84696,4.06966,3.9546,0.164978,52.4941,3.05377,0.925657,0.722397,506.092
+irr-b@fp32,irr-b,fp32,custom,64,28,7,4.03951,0.459618,3.92522,4.15061,4.03511,0.158508,56.7983,3.05377,0.893205,0.704862,538.643
+irr-c@fp32,irr-c,fp32,custom,64,28,7,4.43042,0.530706,4.30502,4.55984,4.43529,0.153564,83.9664,3.05377,1.07594,0.650143,1813.91

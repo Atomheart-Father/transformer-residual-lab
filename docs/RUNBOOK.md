@@ -98,6 +98,77 @@ python scripts/diagnose_b3.py --input data257/validation.jsonl --max-samples 32 
 
 `--at-group first-parallel`（默认）会跳过串行前缀，落在第一个真正多层的组上。这一条很重要：`prefix3-g8` 的 group 0 是串行 layer 0，在那里干预没有任何效果，会得出「干预无效」的错误结论。
 
+## Stage 1.6：受控分组边界 + 单点补偿
+
+两件事：**只动组边界**的受控实验（block 数与深度都锁死），以及**一个**补偿器的最小验证。
+
+### 1) 全新独立测试集（必须先做，之后不许再看）
+
+`data257/test.jsonl` 在 Stage 1.5 已被反复查看，不能再当独立测试集。用新 seed 重抽，并显式剔除旧 offset：
+
+```bash
+python scripts/make_fresh_split.py --out data257 --split test --count 64 \
+    --seq-len 257 --seed 771013 --exclude data257/test.jsonl
+```
+
+脚本会断言 offset 集合与旧集合**交集为空**，且每条窗口的 `tokens_sha256` 不重复，写出 `data257/fresh_test.jsonl` 与 `data257/fresh_test_manifest.json`。offset 都是 `seq_len` 整数倍，所以这是逐 token 不相交。
+
+### 2) 自定义分区（保证 block 数不漂移）
+
+`--plans` 支持 `名字:0|1|2|3-10|11-19|20-25|26-27` 语法。构造时断言 `flatten(groups) == list(range(28))`，所以 **blocks 由定义固定为 28**，depth 由 `len(groups)` 直接得出，不会出现「以为在比边界、其实改了深度」。
+
+```bash
+# 只动末边界：[19,b) + [b,28)，b ∈ {27,26,25,24,23}
+python scripts/measure.py --preset stage1_6 --input data257/calibration.jsonl \
+    --max-samples 64 --group-records parallel --output results/stage1_6/screen
+
+# 验证集确认（含 depth 8 的 tail-2serial 与 depth 10 族，比较时必须标明深度）
+python scripts/measure.py --input data257/validation.jsonl --max-samples 32 \
+    --plans tail-b27,tail-b26,tail-b25,mid-b20,mid-b18,tail-2serial,d10-b24,d10-b26 \
+    --group-records parallel --output results/stage1_6/val
+```
+
+`--preset stage1_6` 生成的族：`tail-b{27,26,25,24,23}`、`mid-b{10,12,18,20}`、`tail-2serial`（depth 8）、`d10-b{22..26}`（depth 10）、`serial`。
+
+### 3) 补偿器：collect → fit → eval
+
+只训练补偿器，主模型全部冻结。`collect` 用**自由运行**的组入口 `a` 作特征、`h_teacher − h_parallel` 作标签。
+
+```bash
+PLAN='irr-a:0|1|2|3-10|11-19|20-25|26-27'
+
+python scripts/compensate.py --stage collect --input data257/calibration.jsonl \
+    --max-samples 64 --plan "$PLAN" --group-index 5 \
+    --output results/stage1_6/comp/irr-a-g5
+
+python scripts/compensate.py --stage fit --pairs results/stage1_6/comp/irr-a-g5/pairs.npz \
+    --output results/stage1_6/comp/irr-a-g5 --rank-linear 8 --rank-mlp 32 --epochs 16
+
+python scripts/compensate.py --stage eval --input data257/fresh_test.jsonl \
+    --max-samples 64 --plan "$PLAN" --group-index 5 \
+    --compensator results/stage1_6/comp/irr-a-g5/linear_r8.npz \
+    --compensator results/stage1_6/comp/irr-a-g5/mlp_r32.npz \
+    --output results/stage1_6/comp/eval_fresh
+```
+
+**注意**：多个 `--compensator` 必须**显式重复参数**。`C="--compensator a --compensator b"; cmd $C` 在 zsh 下不会被分词，argparse 报错，而管道到 `head` 会把退出码变成 0，错误会被静默吞掉。
+
+线性版是**降秩回归**：先白化 `X`，再截断白化后交叉协方差的 SVD。用「ridge 解 + 截断解矩阵」会发散（近奇异设计下解的最大奇异方向正好是噪声被放大的方向）。
+
+`pairs.npz` 约 129 MB，`.gitignore` 已排除，只提交 `*_r{8,16,32,64}.npz`、`fit_report.json` 与 `eval_summary.json`。
+
+### 4) 冻结选择，然后才允许跑 fresh test
+
+在跑 `eval --input data257/fresh_test.jsonl` **之前**，把候选结构与补偿器的 cal/val 数字写进 `results/stage1_6/selection.json`（含 `fresh_test_used_for_selection: false`）。这个文件一旦写了就不再改；fresh test 只跑一次。Stage 1.5 的 `selection.json` 是同一个约定。
+
+### 5) 出图
+
+```bash
+python scripts/make_figures.py --stage16 results/stage1_6
+```
+
+生成 `fig16_tail_scan.png`（质量 + 放大倍数 vs 末组大小）、`fig16_group_exit.png`、`fig16_compensation.png`。
+
 ## 聚合与出图
 
 ```bash
@@ -138,3 +209,15 @@ python -m unittest discover -s tests -v
 - **B3 的 `oracle-*` 干预使用教师态，是诊断不是方法。** 任何 `oracle-dir` 的成绩都不能当作可实现结果引用。
 - `layer_ls` 在 `prefix3-g8` 上过拟合（validation 4.51 → 7.66，条件数 40，1 个 α 被裁到边界）。组越大、共享 anchor 的 block 越多，修正越共线，线性标定越不可靠。
 - `--group-records none` 会跳过组级/层级的教师态对比，快很多，但 `groups.jsonl` 与 `layers.jsonl` 为空，`summarize.py` 的组表/层表也随之空。只在不需要诊断记录时用。
+
+## Stage 1.6 的已知事项
+
+- **「末组必须小」比「27 必须串行」重要。** 深度 7 下末组 1/2/3/4/5 层对应验证集 4.511/4.194/6.587/—/—。27 单独成组反而更差。别把「保护最后一层」当结论。
+- **末组的破坏力来自放大，不是来自它自己产生误差。** 放大项 RMS 随末组大小 13.5→95.9，新产生项只从 0→15.2。看到「末组误差大」不要直接归因于「末组算错了」。
+- **中间边界几乎不重要**（全区间 0.35–0.40 nats），尾部边界能造成 5.2 nats。位置价值极不均匀，做扫描时不要把样本量平均分配。
+- **1 参数族无法解耦「前一组的层数」与「末组大小」。** `[19,b)` + `[b,28)` 里 b 一动两个都动，所以「末组 2 层最优」是平衡点，不是 2 这个数字有特殊性。
+- **隐藏态 MSE 会高估补偿能力。** rank-32 把最终隐藏态 rel_rms 从 0.939 降到 0.707（25%），ΔNLL 只改善 16%。能力结论一律以 ΔNLL / KL / top1 为准。
+- **FLOPs 不能折算成本。** rank-32 的 FLOPs 是单 block 的 0.61%，实测耗时是 13.5%。小矩阵乘打不满 GPU，必须实测。
+- **`oracle` 用教师态，不可部署**，只能当上界。`recovery_vs_oracle` 是相对 oracle 空间的百分比，不是相对串行参考。
+- 补偿器只在**一个**组上验证过，多点补偿的相互干扰完全没测。
+- rank-64 已出现轻微过拟合（train 0.789 vs val 0.812）。扩容量前先扩 calibration 集，当前只有 64 个窗口 / 14,803 行。

@@ -1,0 +1,2 @@
+variant,kind,executed_blocks,effective_depth,delta_nll_mean,kl_mean,top1_mean,ppl_ratio
+irr-a@fp32,custom,28,7,4.03936,3.98842,0.165771,56.7899

@@ -1,0 +1,20 @@
+{
+  "name": "fresh_test",
+  "purpose": "untouched evaluation split for Stage 1.6; never used for plan selection, alpha fitting, or compensator training",
+  "model_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
+  "dataset": "Salesforce/wikitext",
+  "dataset_config": "wikitext-2-raw-v1",
+  "dataset_revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+  "split": "test",
+  "seq_len": 257,
+  "n_windows": 64,
+  "seed": 771013,
+  "excluded_files": [
+    "data257/test.jsonl"
+  ],
+  "n_excluded_offsets": 64,
+  "n_candidate_offsets": 1163,
+  "disjointness": "offsets are multiples of seq_len, so distinct offsets imply distinct token ranges; also checked by sha256",
+  "window_rule": "non-overlapping windows of seq_len tokens; offsets shuffled by seed; sorted by start",
+  "note": "Token ids stay local. Do not commit the sampled corpus."
+}

@@ -1,0 +1,26 @@
+{
+  "rank-8 linear": {
+    "params": 16384,
+    "ms_per_256tok": 0.261,
+    "us_per_token": 1.02,
+    "peak_mb": 4.49
+  },
+  "rank-16 MLP": {
+    "params": 33808,
+    "ms_per_256tok": 0.324,
+    "us_per_token": 1.27,
+    "peak_mb": 3.57
+  },
+  "rank-32 MLP": {
+    "params": 66592,
+    "ms_per_256tok": 0.35,
+    "us_per_token": 1.37,
+    "peak_mb": 3.85
+  },
+  "rank-64 MLP": {
+    "params": 132160,
+    "ms_per_256tok": 0.418,
+    "us_per_token": 1.63,
+    "peak_mb": 4.01
+  }
+}

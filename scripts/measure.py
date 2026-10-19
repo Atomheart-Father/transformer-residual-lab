@@ -116,6 +116,28 @@ def make_plan(n: int, spec: str) -> Plan:
         return Plan(spec, [[i] for i in keep], "delete", k, k, deleted,
                     note=f"keep {k}/{n} evenly spaced layers")
 
+    # Irregular contiguous grouping: "<name>:0|1|2|3-10|11-18|19-26|27".
+    # Groups must cover 0..n-1 exactly once, in order, so the plan is a
+    # partition of the real layer stack and the block count is always n.
+    m = re.fullmatch(r"([A-Za-z][\w.\-]*):(.+)", spec)
+    if m:
+        name, body = m.group(1), m.group(2)
+        groups = []
+        for part in body.split("|"):
+            part = part.strip()
+            if "-" in part:
+                lo, hi = (int(x) for x in part.split("-"))
+                groups.append(list(range(lo, hi + 1)))
+            else:
+                groups.append([int(part)])
+        if any(not g for g in groups):
+            raise ValueError(f"empty group in {spec}")
+        flat = [i for g in groups for i in g]
+        if flat != list(range(n)):
+            raise ValueError(
+                f"{spec}: groups must cover 0..{n - 1} exactly once in order, got {flat}")
+        return Plan(name, groups, "custom", n, len(groups), note=body)
+
     raise ValueError(f"unknown plan: {spec}")
 
 
@@ -138,6 +160,67 @@ def stage15_plans(n: int) -> list[Plan]:
     plans += [make_plan(n, f"delete-keep{d}") for d in depths if d < n]
     plans.append(make_plan(n, "serial"))
     return plans
+
+
+def stage16_plans(n: int) -> list[Plan]:
+    """Controlled boundary variants: same blocks, same depth, one boundary moved.
+
+    Baseline is ``prefix3-g8`` = ``tail-b27``:
+        [0][1][2][3-10][11-18][19-26][27]   depth 7, 28 blocks
+
+    Every variant below keeps all 28 blocks and depth 7 except the one
+    explicitly marked ``2serial`` (depth 8) and the ``d10`` family (depth 10),
+    which must not be compared against the depth-7 set.
+    """
+    if n != 28:
+        raise ValueError(f"stage1_6 plans assume a 28-layer model, got {n}")
+    head = [[0], [1], [2]]
+    g3 = list(range(3, 11))
+    g4 = list(range(11, 19))
+    plans = []
+
+    # A. tail boundary: 19..27 is 9 layers, split into [19,b) and [b,28).
+    for b in (27, 26, 25, 24, 23):
+        plans.append(Plan(f"tail-b{b}", head + [g3, g4,
+                                               list(range(19, b)), list(range(b, 28))],
+                          "custom", 28, 7,
+                          note=f"tail split at {b}: [19,{b}) + [{b},28)"))
+
+    # B. middle boundary: move exactly one internal boundary, nothing else.
+    for b in (10, 12):
+        plans.append(Plan(f"mid-b{b}", head + [list(range(3, b)), list(range(b, 19)),
+                                               list(range(19, 27)), [27]],
+                          "custom", 28, 7, note=f"first internal boundary at {b}"))
+    for b in (18, 20):
+        plans.append(Plan(f"mid-b{b}", head + [g3, list(range(11, b)),
+                                               list(range(b, 27)), [27]],
+                          "custom", 28, 7, note=f"second internal boundary at {b}"))
+
+    # C. keep the last two layers serial -> depth 8, NOT depth 7.
+    plans.append(Plan("tail-2serial", head + [g3, g4, list(range(19, 26)),
+                                             [26], [27]],
+                      "custom", 28, 8, note="last two layers serial (depth 8)"))
+
+    # D. same question at depth 10, to see whether the tail effect survives.
+    d10 = head + [list(range(3, 7)), list(range(7, 11)), list(range(11, 15)),
+                  list(range(15, 19))]
+    for b in (23, 22, 24, 25, 26):
+        plans.append(Plan(f"d10-b{b}", d10 + [list(range(19, b)), list(range(b, 27)), [27]],
+                          "custom", 28, 10, note=f"depth-10 tail split at {b}"))
+
+    plans.append(make_plan(n, "serial"))
+    return plans
+
+
+def resolve_plan(n: int, spec: str) -> Plan:
+    """Accept any plan spec, including the Stage 1.6 shorthand names."""
+    try:
+        return make_plan(n, spec)
+    except ValueError:
+        for p in stage16_plans(n):
+            if p.name == spec:
+                return p
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +449,8 @@ def main() -> None:
     ap.add_argument("--input", type=Path, required=True)
     ap.add_argument("--output", type=Path, default=Path("results/stage1"))
     ap.add_argument("--max-samples", type=int, default=8)
-    ap.add_argument("--preset", choices=["stage1", "stage1_5"], default="stage1")
+    ap.add_argument("--preset", choices=["stage1", "stage1_5", "stage1_6"],
+                    default="stage1")
     ap.add_argument("--plans", default=None,
                     help="comma separated; overrides --preset")
     ap.add_argument("--accum", default="fp32")
@@ -398,9 +482,11 @@ def main() -> None:
     args.output.mkdir(parents=True, exist_ok=True)
 
     if args.plans:
-        plans = [make_plan(n, p.strip()) for p in args.plans.split(",") if p.strip()]
+        plans = [resolve_plan(n, p.strip()) for p in args.plans.split(",") if p.strip()]
     elif args.preset == "stage1_5":
         plans = stage15_plans(n)
+    elif args.preset == "stage1_6":
+        plans = stage16_plans(n)
     else:
         plans = [make_plan(n, p) for p in stage1_plans(n)]
     accums = [a.strip() for a in args.accum.split(",") if a.strip()]
@@ -498,7 +584,8 @@ def main() -> None:
                                     f"coeffs {label} fitted for {cfg_meta.get('plan')}, "
                                     f"but running {plan.name}")
                         keep = (args.group_records == "parallel"
-                                and accum == "fp32" and plan.kind in ("parallel", "window"))
+                                and accum == "fp32"
+                                and plan.kind in ("parallel", "window", "custom"))
                         out, grecs = run_plan(model, ids, mask, plan, states, accum, mx,
                                               keep_group_records=keep,
                                               fusion=cfg_meta.get("fusion", "sum"),
