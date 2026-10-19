@@ -537,6 +537,278 @@ def fig_stage16(root: Path, out: Path) -> None:
         plt.close(fig)
 
 
+def _eval(root: Path, name: str) -> dict:
+    path = root / name / "eval_summary.json"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def fig_stage17(root: Path, out: Path) -> None:
+    """Stage 1.7: fixed-offset controls, site interference, serial vs parallel."""
+    plan = "irr-a"
+    # ---------------------------------------------------------------- A
+    sets = [("test_v2 (same corpus)", "A_test"), ("imdb (other corpus)", "A_ood")]
+    labels = ["no comp", "mean", "shuffled", "rank-32", "rank-64"]
+    fig, axes = plt.subplots(1, len(sets), figsize=(9.0, 3.4), sharey=True)
+    for ax, (title, key) in zip(np.atleast_1d(axes), sets):
+        s = _eval(root, key)
+        agg = s.get("aggregate", {})
+        if not agg:
+            continue
+        base = agg[f"{plan}"]["delta_nll_mean"]
+        vals, errs = [0.0], [0.0]
+        vals.append(agg[f"{plan}+mean"]["delta_nll_mean"] - base)
+        sh = [v["delta_nll_mean"] - base for k, v in agg.items()
+              if "shuffled" in k]
+        vals.append(float(np.mean(sh)) if sh else 0.0)
+        errs.append(0.0)
+        errs.append(float(np.std(sh)) if len(sh) > 1 else 0.0)
+        for r in ("mlp_r32", "mlp_r64"):
+            k = f"{plan}+{r}"
+            vals.append(agg[k]["delta_nll_mean"] - base if k in agg else 0.0)
+            errs.append(0.0)
+        cols = [C_LOCAL, C_LOCAL, C_DEL, C_PAR, C_ACC[3]]
+        ax.bar(range(len(vals)), vals, yerr=errs, color=cols, width=0.66,
+               error_kw={"elinewidth": 0.8, "capsize": 2})
+        ax.axhline(0, color="k", lw=0.8)
+        ax.set_xticks(range(len(vals)))
+        ax.set_xticklabels(labels, rotation=20, ha="right")
+        ax.set_title(title)
+        ax.set_ylabel("$\\Delta$NLL change vs no compensation")
+    fig.suptitle("Constant offset explains none of the gain; a wrong pairing is worse than nothing",
+                 fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out / "fig17_fixed_offset.png", bbox_inches="tight")
+    plt.close(fig)
+
+    # ------------------------------------------------------- table-driven part
+    # 后面的图全部从 table.json / paired_stats.json 读，保证图与报告表格同源，
+    # 避免"图上一套数、表里一套数"。这两个文件由
+    #   scripts/make_stage17_table.py
+    #   scripts/stage17_stats.py
+    # 生成。
+    table = {}
+    tp = root / "table.json"
+    if tp.exists():
+        table = json.loads(tp.read_text(encoding="utf-8"))
+    rows = table.get("rows", [])
+
+    def row(method: str, split: str) -> dict | None:
+        for r in rows:
+            if r["method"] == method and r["split"] == split:
+                return r
+        return None
+
+    # ---------------------------------------------------------------- sites
+    fig, axes = plt.subplots(1, 2, figsize=(9.4, 3.4))
+    ax = axes[0]
+    subs = []
+    for d in sorted(root.glob("B_sub_*")):
+        s = _eval(root, d.name)
+        agg = s.get("aggregate", {}) if s else {}
+        key = next((k for k in agg if k.startswith(f"{plan}+serial")), None)
+        if not key:
+            continue
+        subs.append((d.name.replace("B_sub_", "").replace("2_", ""), agg[key]["gap_closure"]))
+    if subs:
+        subs.sort(key=lambda x: x[1])
+        ax.barh([n for n, _ in subs], [v * 100 for _, v in subs],
+                color=[C_DEL if v < 0 else C_PAR for _, v in subs])
+        ax.axvline(0, color="k", lw=0.8)
+    ax.set_xlabel("gap closed vs no compensation (%)")
+    ax.set_title("round-0 4-site r32 model\n(one weight file, only --apply-sites changes)", fontsize=9)
+
+    ax = axes[1]
+    price = table.get("final_site_pricing", [])
+    if price:
+        order = {"4": 0, "5": 1, "4,5": 2}
+        price = sorted(price, key=lambda r: order.get(r["apply_sites"], 9))
+        ax.bar([r["apply_sites"] for r in price],
+               [r["gap_closure"] * 100 for r in price],
+               color=[C_DEL if r["gap_closure"] < 0 else C_PAR for r in price], width=0.55)
+        ax.axhline(0, color="k", lw=0.8)
+        for i, r in enumerate(price):
+            ax.annotate(f"{r['delta_nll']:.3f}", (i, r["gap_closure"] * 100),
+                        ha="center", va="bottom" if r["gap_closure"] >= 0 else "top",
+                        fontsize=7, xytext=(0, 3 if r["gap_closure"] >= 0 else -3),
+                        textcoords="offset points")
+    ax.set_xlabel("sites that receive the correction")
+    ax.set_ylabel("gap closed (%)")
+    ax.set_title("final 2-site B3 r64 model\n(site 5 alone is harmful, 4+5 is best)", fontsize=9)
+    fig.suptitle("Corrections are only valid on the stream they were fitted on", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out / "fig17_site_interference.png", bbox_inches="tight")
+    plt.close(fig)
+
+    # ------------------------------------------------ recurrence vs recovery
+    # 左：把"站点数"和"是否重采样"分开成两组柱，避免同一条折线在 x=2 处
+    #     上下折返（r0 与 r2 是同一个 x）。B1 是 1 站点、40 epoch 的同预算对照。
+    fig, axes = plt.subplots(1, 2, figsize=(9.6, 3.5))
+    ax = axes[0]
+    groups = [
+        ("1 site\n(B1, 40 ep)", ["B1 single-site r64"], ["B1 single-site r64"]),
+        ("2 sites\nround 0", ["B2 2-site r64 r0"], ["B3 2-site r64 r0"]),
+        ("2 sites\nround 2", ["B2 2-site r64 r2"], ["B3 2-site r64 r2"]),
+        ("4 sites\nround 0", ["B2 4-site r64 (no recollect)"],
+         ["B3 4-site r64 (no recollect)"]),
+    ]
+    w = 0.36
+    for k, (lab, b2m, b3m) in enumerate(groups):
+        for j, (methods, col) in enumerate(((b2m, "#2F6FB2"), (b3m, "#E08214"))):
+            r = row(methods[0], "val")
+            if r is None or r.get("gap_closure") is None:
+                continue
+            ax.bar(k + (j - 0.5) * w, r["gap_closure"] * 100, w * 0.92, color=col,
+                   label=("B2 no state" if j == 0 else "B3 carried state") if k == 0 else None)
+    ax.axhline(0, color="k", lw=0.8)
+    ax.set_xticks(range(len(groups)))
+    ax.set_xticklabels([g[0] for g in groups], fontsize=7.5)
+    ax.set_ylabel("gap closed vs no compensation (%)")
+    ax.set_title("Adding sites hurts until the data is re-collected", fontsize=9)
+    ax.legend(fontsize=7, loc="lower left")
+
+    ax = axes[1]
+    ps = root / "paired_stats.json"
+    if ps.exists():
+        st = json.loads(ps.read_text(encoding="utf-8"))["rows"]
+        want = ["B: B2(2site) vs B1(1site)", "B: B3(2site,carry) vs B2(2site)",
+                "B: B3(2site,carry) vs B1(1site)"]
+        cols = {"val": C_ACC[0], "test": C_ACC[2], "ood": C_ACC[3]}
+        w2 = 0.26
+        for k, lab in enumerate(want):
+            for j, split in enumerate(("val", "test", "ood")):
+                r = next((x for x in st if x.get("contrast") == lab and x.get("split") == split), None)
+                if not r or "mean_diff" not in r:
+                    continue
+                lo, hi = r["ci95"]
+                ax.errorbar([k + (j - 1) * w2], [r["mean_diff"]],
+                            yerr=[[r["mean_diff"] - lo], [hi - r["mean_diff"]]],
+                            fmt="o", color=cols[split], ms=4, capsize=2.5, lw=1.0,
+                            label=split if k == 0 else None)
+        ax.axhline(0, color="k", lw=0.8)
+        ax.set_xticks(range(len(want)))
+        ax.set_xticklabels(["B2 $-$ B1", "B3 $-$ B2", "B3 $-$ B1"], fontsize=8)
+        ax.set_ylabel("paired $\\Delta$NLL (negative = right-hand side better)")
+        ax.set_title("95% bootstrap CI, per-sample pairing", fontsize=9)
+        ax.legend(fontsize=7, loc="upper left")
+        ax.text(0.99, 0.02, "B1 baseline here is the 120-epoch cell (16.6%)",
+                transform=ax.transAxes, fontsize=6, ha="right", color="#555555")
+    fig.suptitle("Serial depth buys little; the state vector buys almost nothing", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out / "fig17_recurrence.png", bbox_inches="tight")
+    plt.close(fig)
+
+    # ---------------------------------------------------------------- cost
+    # 所有点都来自实测：参数量取 fit/bench 记录，时延取 bench 的 median
+    # ms/256-token 调用（单站点 MLP 取 stage1_6 的 benchmark.json，同为 256 token
+    # 一次调用）。标注里写明轮次，避免把 r0 的容量点和 r2 的收敛点混为一谈。
+    fig, axes = plt.subplots(1, 2, figsize=(9.8, 3.6))
+    bench = table.get("bench", {})
+    s16 = {}
+    b16 = Path("results/stage1_6/comp/benchmark.json")
+    if b16.exists():
+        s16 = json.loads(b16.read_text(encoding="utf-8"))
+
+    pts = []  # (params, ms, gap%, label, colour, marker)
+    for name, method, lab, key in (
+            ("r32", "A3 mlp r32", "MLP r32 (1 site)", "rank-32 MLP"),
+            ("r64", "A4 mlp r64", "MLP r64 (1 site)", "rank-64 MLP")):
+        r = row(method, "val")
+        b = s16.get(key, {})
+        if r and b:
+            pts.append((b["params"], b["ms_per_256tok"], r["gap_closure"] * 100,
+                        lab, C_LOCAL, "o"))
+    for lab, method, key in (
+            ("B1 r64 (1 site)", "B1 single-site r64", "serial_b1_r64.npz"),
+            ("B2 r64 (2 sites, r2)", "B2 2-site r64 r2", "serial_b2_r64.npz"),
+            ("B3 r64 (2 sites, r2)", "B3 2-site r64 r2", "serial_b3_r64.npz"),
+            ("B3 r64 (2 sites, r0)", "B3 2-site r64 r0", "serial_b3_r64.npz"),
+            ("B3 r32 (2 sites, r0)", "B3 2-site r32 r0", "serial_b3_r32.npz")):
+        r = row(method, "val")
+        b = bench.get(key)
+        if r and b:
+            pts.append((r.get("n_params") or b["n_params"], b["chain_ms"],
+                        r["gap_closure"] * 100, lab,
+                        "#E08214" if "B3" in lab else "#2F6FB2",
+                        "s" if "B3" in lab else "o"))
+    for ax, xi, xl, logx in ((axes[0], 0, "parameters (log scale)", True),
+                             (axes[1], 1, "measured ms per 256-token call", False)):
+        for p_ in pts:
+            ax.scatter([p_[xi]], [p_[2]], s=34, color=p_[4], marker=p_[5], zorder=3)
+        # 右上角两个 r2 点几乎重合，按标签错开，避免压字
+        off = {"B2 r64 (2 sites, r2)": (-8, -12), "B3 r64 (2 sites, r2)": (6, 6),
+               "B1 r64 (1 site)": (6, -12)}
+        for p_ in pts:
+            dx, dy = off.get(p_[3], (5, 5))
+            ax.annotate(p_[3], (p_[xi], p_[2]), fontsize=6.5, xytext=(dx, dy),
+                        textcoords="offset points",
+                        ha="right" if dx < 0 else "left")
+        ax.set_xlabel(xl)
+        ax.set_ylabel("gap closed on val (%)")
+        if logx:
+            ax.set_xscale("log")
+        ax.margins(x=0.25, y=0.2)
+        ax.axhline(0, color="k", lw=0.6)
+    axes[0].set_title("Doubling parameters does not help", fontsize=9)
+    axes[1].set_title("One transformer block costs 2.6 ms for scale", fontsize=9)
+    fig.suptitle("Cost-quality Pareto: the plain MLP is still the best point", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out / "fig17_cost_pareto.png", bbox_inches="tight")
+    plt.close(fig)
+
+    # ------------------------------------------------------------ exit error
+    fig, axes = plt.subplots(1, 2, figsize=(9.4, 3.4))
+    ax = axes[0]
+    s = _eval(root, "B_val_45_r2")
+    if s:
+        agg = s["aggregate"]
+        # no-state trace 与 carried 只差 ≤0.0015，画两条等于画一条
+        for k, col, lab in ((plan, "k", "no compensation"),
+                            (f"{plan}+serial_b3_r64", C_ACC[1], "B3 carried state (r2)")):
+            t = agg.get(k, {}).get("exit_rel_rms_mean")
+            if t:
+                ax.plot(range(len(t)), t, "o-", color=col, ms=4, label=lab, lw=1.6)
+        ax.set_xlabel("group index")
+        ax.set_ylabel("relative RMS error at group exit")
+        ax.set_title("Accumulated state error, round 2", fontsize=9)
+        ax.legend(fontsize=7, loc="upper left")
+    ax = axes[1]
+    fits = [("B1 site5", "B_r0_5", "b1_r64e120"),
+            ("B2 s4", "B_r2_45", "b2_r64"), ("B2 s5", "B_r2_45", "b2_r64"),
+            ("B3 s4", "B_r2_45", "b3_r64"), ("B3 s5", "B_r2_45", "b3_r64")]
+    labs, rel, cos = [], [], []
+    for lab, sub, tag in fits:
+        f = root / sub / f"fit_{tag}.json"
+        if not f.exists():
+            continue
+        ps = json.loads(f.read_text(encoding="utf-8"))["per_site_val"]
+        if "B1" in lab:
+            v = list(ps.values())[0]
+            labs.append(lab)
+            rel.append(v["rel_err"])
+            cos.append(v["cosine"])
+        else:
+            idx = 0 if lab.endswith("s4") else 1
+            v = ps[f"site{idx}"]
+            labs.append(lab)
+            rel.append(v["rel_err"])
+            cos.append(v["cosine"])
+    if rel:
+        x = np.arange(len(labs))
+        ax.bar(x, rel, 0.55, color=C_PAR, label="relative error of $\\hat c$")
+        ax.plot(x, cos, "o", color=C_ACC[1], ms=5, label="cosine($\\hat c$, $c^*$)")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labs, fontsize=7.5)
+        ax.set_ylim(0, 1.18)
+        ax.set_title("Per-site prediction error (validation windows)", fontsize=9)
+        ax.legend(fontsize=6.5, loc="upper center", ncol=2)
+    fig.suptitle("The predictor is weak per site; the correction still helps", fontsize=10)
+    fig.tight_layout()
+    fig.savefig(out / "fig17_exit_error.png", bbox_inches="tight")
+    plt.close(fig)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", type=Path, default=Path("results/stage1"))
@@ -547,11 +819,21 @@ def main() -> None:
     ap.add_argument("--b3-scan", type=Path, default=None)
     ap.add_argument("--stage16", type=Path, default=None,
                     help="results/stage1_6 root; also renders boundary + compensation")
+    ap.add_argument("--stage17", type=Path, default=None,
+                    help="results/stage1_7 root; renders the Stage 1.7 figures")
     args = ap.parse_args()
 
     runs = [Path(x.strip()) for x in args.runs.split(",")] if args.runs else [args.run]
     out = args.figdir or (runs[0] / "figures")
     out.mkdir(parents=True, exist_ok=True)
+
+    if args.stage17:
+        fig_stage17(args.stage17, out)
+        if not (runs[0] / "summary.json").exists():
+            print(f"figures -> {out}")
+            for p in sorted(out.glob("fig17_*.png")):
+                print(" ", p.name)
+            return
 
     parts, g = [], pd.DataFrame()
     for r in runs:

@@ -1,0 +1,162 @@
+{
+  "stage": "eval",
+  "plan": "irr-a",
+  "groups": [
+    [
+      0
+    ],
+    [
+      1
+    ],
+    [
+      2
+    ],
+    [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    [
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19
+    ],
+    [
+      20,
+      21,
+      22,
+      23,
+      24,
+      25
+    ],
+    [
+      26,
+      27
+    ]
+  ],
+  "sites": [
+    4,
+    5
+  ],
+  "site_layers": [
+    [
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19
+    ],
+    [
+      20,
+      21,
+      22,
+      23,
+      24,
+      25
+    ]
+  ],
+  "effective_depth": 7,
+  "executed_blocks": 28,
+  "model": "mlx-community/Qwen3-0.6B-Base-bf16",
+  "model_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
+  "input": "data257/validation.jsonl",
+  "n_samples": 32,
+  "compensators": {
+    "serial_b2_r64": {
+      "n_params": 278752,
+      "hidden": 64,
+      "rank": 64,
+      "carry_state": false,
+      "per_site": false,
+      "flops_per_token": 1115008,
+      "predict_ms_per_sample": 1.0034520009867265
+    }
+  },
+  "aggregate": {
+    "serial": {
+      "n": 32,
+      "delta_nll_mean": 0.0,
+      "delta_nll_std": 0.0,
+      "kl_mean": 0.0,
+      "top1_mean": 1.0,
+      "gap_closure": 1.0,
+      "recovery_vs_oracle": 1.1185679569142175,
+      "recovery_vs_oracle_ex_last": 1.546966333936429
+    },
+    "irr-a": {
+      "n": 32,
+      "delta_nll_mean": 4.039358451962471,
+      "delta_nll_std": 0.3994926221989166,
+      "kl_mean": 3.988415375351906,
+      "top1_mean": 0.165771484375,
+      "exit_rel_rms_mean": [
+        0.0,
+        0.0,
+        0.0,
+        0.08354875,
+        0.33167625,
+        0.617125,
+        0.938966875
+      ],
+      "gap_closure": 0.0,
+      "recovery_vs_oracle": 0.0,
+      "recovery_vs_oracle_ex_last": 0.0
+    },
+    "irr-a+oracle": {
+      "n": 32,
+      "delta_nll_mean": 0.4281711056828499,
+      "delta_nll_std": 0.11316124904579973,
+      "kl_mean": 0.43011624831706285,
+      "top1_mean": 0.6134033203125,
+      "gap_closure": 0.8940002203877627,
+      "recovery_vs_oracle": 1.0,
+      "recovery_vs_oracle_ex_last": 1.3829882434716168
+    },
+    "irr-a+oracle_ex_last": {
+      "n": 32,
+      "delta_nll_mean": 1.4282101914286613,
+      "delta_nll_std": 0.2845083384081512,
+      "kl_mean": 1.373095791786909,
+      "top1_mean": 0.478271484375,
+      "gap_closure": 0.6464264787556094,
+      "recovery_vs_oracle": 0.7230719456369139,
+      "recovery_vs_oracle_ex_last": 1.0
+    },
+    "irr-a+serial_b2_r64": {
+      "n": 32,
+      "delta_nll_mean": 3.307303786277771,
+      "delta_nll_std": 0.3789495171945004,
+      "kl_mean": 3.3873971924185753,
+      "top1_mean": 0.244140625,
+      "exit_rel_rms_mean": [
+        0.0,
+        0.0,
+        0.0,
+        0.08354875,
+        0.33167625,
+        0.5390703124999999,
+        0.7239318750000002
+      ],
+      "gap_closure": 0.18123042913634974,
+      "recovery_vs_oracle": 0.20271855084973361,
+      "recovery_vs_oracle_ex_last": 0.28035737255878473
+    }
+  },
+  "git_commit": "9cc8e4b77195857fc6b773ab7d2ee7b3f7553913",
+  "warning": "Measured cost only. The graph is still executed sequentially; no speedup is claimed."
+}

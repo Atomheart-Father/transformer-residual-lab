@@ -12,6 +12,8 @@ data257/*
 !data/data_manifest.json
 !data257/data_manifest.json
 !data257/fresh_test_manifest.json
+!data257/test_v2_manifest.json
+!data257/ood_imdb_manifest.json
 
 # local agent workspace (notes, memory) stays local
 .workbuddy-ai/
@@ -28,4 +30,10 @@ results/scratch/
 *.log
 
 # large derived tensors stay local; regenerate with scripts/compensate.py
+# and scripts/serial_compensate.py (collect stage). A.npy / C.npy are
+# [n_samples, n_sites, seq_len, hidden] float32 — ~250 MB each at 64 windows.
 **/pairs.npz
+**/seq_pairs.npz
+**/A.npy
+**/C.npy
+**/*_activations.npz

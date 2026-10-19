@@ -1,0 +1,52 @@
+{
+  "pairs": "results/stage1_7/smokeB/seq_pairs.npz",
+  "tag": "smoke",
+  "n_params": 68208,
+  "hidden": 16,
+  "rank": 16,
+  "carry_state": false,
+  "per_site": false,
+  "sites": 4,
+  "n_train_windows": 3,
+  "n_val_windows": 1,
+  "final_train_mse": 127.39342244466145,
+  "final_val_mse": 122.01899719238281,
+  "per_site_val": {
+    "site0": {
+      "target_rms": 1.0798417329788208,
+      "pred_rms": 0.2828500270843506,
+      "rel_err": 1.0333127975463867,
+      "cosine": 0.0016705947928130627
+    },
+    "site1": {
+      "target_rms": 4.546398639678955,
+      "pred_rms": 0.3538097143173218,
+      "rel_err": 0.9946079850196838,
+      "cosine": 0.10801104456186295
+    },
+    "site2": {
+      "target_rms": 12.950040817260742,
+      "pred_rms": 2.6813876628875732,
+      "rel_err": 0.9565161466598511,
+      "cosine": 0.30897191166877747
+    },
+    "site3": {
+      "target_rms": 19.149850845336914,
+      "pred_rms": 8.66446590423584,
+      "rel_err": 0.9237840175628662,
+      "cosine": 0.38825830817222595
+    }
+  },
+  "history": [
+    {
+      "epoch": 0,
+      "train_mse": 140.30559794108072,
+      "val_mse": 129.38490295410156
+    },
+    {
+      "epoch": 1,
+      "train_mse": 127.39342244466145,
+      "val_mse": 122.01899719238281
+    }
+  ]
+}

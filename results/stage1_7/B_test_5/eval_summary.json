@@ -1,0 +1,145 @@
+{
+  "stage": "eval",
+  "plan": "irr-a",
+  "groups": [
+    [
+      0
+    ],
+    [
+      1
+    ],
+    [
+      2
+    ],
+    [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    [
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19
+    ],
+    [
+      20,
+      21,
+      22,
+      23,
+      24,
+      25
+    ],
+    [
+      26,
+      27
+    ]
+  ],
+  "sites": [
+    5
+  ],
+  "site_layers": [
+    [
+      20,
+      21,
+      22,
+      23,
+      24,
+      25
+    ]
+  ],
+  "effective_depth": 7,
+  "executed_blocks": 28,
+  "model": "mlx-community/Qwen3-0.6B-Base-bf16",
+  "model_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
+  "input": "data257/test_v2.jsonl",
+  "n_samples": 64,
+  "compensators": {
+    "serial_b1_r64": {
+      "n_params": 278736,
+      "hidden": 64,
+      "rank": 64,
+      "carry_state": false,
+      "per_site": false,
+      "flops_per_token": 1114944,
+      "predict_ms_per_sample": 0.4812024535567616
+    }
+  },
+  "aggregate": {
+    "serial": {
+      "n": 64,
+      "delta_nll_mean": 0.0,
+      "delta_nll_std": 0.0,
+      "kl_mean": 0.0,
+      "top1_mean": 1.0,
+      "gap_closure": 1.0,
+      "recovery_vs_oracle": 1.1057825489187652
+    },
+    "irr-a": {
+      "n": 64,
+      "delta_nll_mean": 4.081005627289414,
+      "delta_nll_std": 0.38103951071516506,
+      "kl_mean": 4.016061138361692,
+      "top1_mean": 0.161376953125,
+      "exit_rel_rms_mean": [
+        0.0,
+        0.0,
+        0.0,
+        0.08173046875,
+        0.3252348437500001,
+        0.6177714062499999,
+        0.9232156249999999
+      ],
+      "gap_closure": 0.0,
+      "recovery_vs_oracle": 0.0
+    },
+    "irr-a+oracle": {
+      "n": 64,
+      "delta_nll_mean": 0.3904015105217695,
+      "delta_nll_std": 0.08398955505868576,
+      "kl_mean": 0.39098672289401293,
+      "top1_mean": 0.64056396484375,
+      "gap_closure": 0.9043369340362629,
+      "recovery_vs_oracle": 1.0
+    },
+    "irr-a+oracle_ex_last": {
+      "n": 64,
+      "delta_nll_mean": 4.081005627289414,
+      "delta_nll_std": 0.38103951071516506,
+      "kl_mean": 4.016061138361692,
+      "top1_mean": 0.161376953125,
+      "gap_closure": 0.0,
+      "recovery_vs_oracle": 0.0
+    },
+    "irr-a+serial_b1_r64": {
+      "n": 64,
+      "delta_nll_mean": 3.4308914113789797,
+      "delta_nll_std": 0.38602042665586184,
+      "kl_mean": 3.4858533553779125,
+      "top1_mean": 0.222412109375,
+      "exit_rel_rms_mean": [
+        0.0,
+        0.0,
+        0.0,
+        0.08173046875,
+        0.3252348437500001,
+        0.6177714062499999,
+        0.6968784375000002
+      ],
+      "gap_closure": 0.15930245515055505,
+      "recovery_vs_oracle": 0.17615387490539802
+    }
+  },
+  "git_commit": "9cc8e4b77195857fc6b773ab7d2ee7b3f7553913",
+  "warning": "Measured cost only. The graph is still executed sequentially; no speedup is claimed."
+}

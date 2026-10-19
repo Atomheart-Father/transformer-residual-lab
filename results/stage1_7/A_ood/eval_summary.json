@@ -1,0 +1,168 @@
+{
+  "stage": "eval",
+  "plan": "irr-a",
+  "groups": [
+    [
+      0
+    ],
+    [
+      1
+    ],
+    [
+      2
+    ],
+    [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    [
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19
+    ],
+    [
+      20,
+      21,
+      22,
+      23,
+      24,
+      25
+    ],
+    [
+      26,
+      27
+    ]
+  ],
+  "group_index": 5,
+  "group_layers": [
+    20,
+    21,
+    22,
+    23,
+    24,
+    25
+  ],
+  "effective_depth": 7,
+  "executed_blocks": 28,
+  "model": "mlx-community/Qwen3-0.6B-Base-bf16",
+  "model_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
+  "input": "data257/ood_imdb.jsonl",
+  "n_samples": 64,
+  "compensators": {
+    "mlp_r32": {
+      "n_params": 66592,
+      "rank": 32,
+      "flops_per_token": 266368,
+      "predict_seconds_total": 0.026867705048061907,
+      "predict_ms_per_sample": 0.4198078913759673,
+      "predict_ms_per_token": 0.0016398745756873723
+    },
+    "mlp_r64": {
+      "n_params": 132160,
+      "rank": 64,
+      "flops_per_token": 528640,
+      "predict_seconds_total": 0.02477499606902711,
+      "predict_ms_per_sample": 0.3871093135785486,
+      "predict_ms_per_token": 0.0015121457561662055
+    }
+  },
+  "shuffle_seeds": [
+    11,
+    12,
+    13
+  ],
+  "shuffle_draws": {
+    "11": "permutation",
+    "12": "permutation",
+    "13": "permutation"
+  },
+  "shuffle_note": "shuffled@K applies the trained network to another sample's entry state; weights and the transformer forward pass are unchanged",
+  "aggregate": {
+    "serial": {
+      "n": 64,
+      "delta_nll_mean": 0.0,
+      "delta_nll_std": 0.0,
+      "kl_mean": 0.0,
+      "top1_mean": 1.0,
+      "recovery_vs_oracle": 1.1200973262999874
+    },
+    "irr-a": {
+      "n": 64,
+      "delta_nll_mean": 3.4589873552322388,
+      "delta_nll_std": 0.4239810956817458,
+      "kl_mean": 3.484853371977806,
+      "top1_mean": 0.15380859375,
+      "recovery_vs_oracle": 0.0
+    },
+    "irr-a+oracle": {
+      "n": 64,
+      "delta_nll_mean": 0.37087414041161537,
+      "delta_nll_std": 0.07664376473870442,
+      "kl_mean": 0.37047763215377927,
+      "top1_mean": 0.60986328125,
+      "recovery_vs_oracle": 1.0
+    },
+    "irr-a+mean": {
+      "n": 64,
+      "delta_nll_mean": 3.534966617822647,
+      "delta_nll_std": 0.4479581896715547,
+      "kl_mean": 3.5605873577296734,
+      "top1_mean": 0.15576171875,
+      "recovery_vs_oracle": -0.024603781437081047
+    },
+    "irr-a+shuffled@11": {
+      "n": 64,
+      "delta_nll_mean": 4.069348536431789,
+      "delta_nll_std": 0.48833521326372864,
+      "kl_mean": 4.092490777373314,
+      "top1_mean": 0.1243896484375,
+      "recovery_vs_oracle": -0.1976485765710517
+    },
+    "irr-a+shuffled@12": {
+      "n": 64,
+      "delta_nll_mean": 4.0770581886172295,
+      "delta_nll_std": 0.49674916740355884,
+      "kl_mean": 4.108342297375202,
+      "top1_mean": 0.1219482421875,
+      "recovery_vs_oracle": -0.2001451340639699
+    },
+    "irr-a+shuffled@13": {
+      "n": 64,
+      "delta_nll_mean": 4.045616336166859,
+      "delta_nll_std": 0.49418440262014096,
+      "kl_mean": 4.074813172221184,
+      "top1_mean": 0.124267578125,
+      "recovery_vs_oracle": -0.1899635603122455
+    },
+    "irr-a+mlp_r32": {
+      "n": 64,
+      "delta_nll_mean": 3.416955955326557,
+      "delta_nll_std": 0.4589241508847007,
+      "kl_mean": 3.4434746019542217,
+      "top1_mean": 0.16778564453125,
+      "recovery_vs_oracle": 0.013610705625675403
+    },
+    "irr-a+mlp_r64": {
+      "n": 64,
+      "delta_nll_mean": 3.3649964705109596,
+      "delta_nll_std": 0.4444525342464831,
+      "kl_mean": 3.395421303808689,
+      "top1_mean": 0.17047119140625,
+      "recovery_vs_oracle": 0.030436346786184364
+    }
+  },
+  "git_commit": "9cc8e4b77195857fc6b773ab7d2ee7b3f7553913",
+  "warning": "Compensation cost is measured, not hidden. No speedup is claimed: the base graph is still executed sequentially."
+}

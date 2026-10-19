@@ -1,0 +1,21 @@
+{
+  "compensator": "results/stage1_7/B_r0_45/serial_b3_r32.npz",
+  "n_params": 136832,
+  "hidden": 32,
+  "rank": 32,
+  "carry_state": true,
+  "per_site": false,
+  "n_sites": 2,
+  "tokens": 256,
+  "repeat": 50,
+  "warmup": 5,
+  "per_site_ms": [
+    0.45062498247716576,
+    0.3873954847222194
+  ],
+  "per_site_total_ms": 0.8380204671993852,
+  "chain_ms": 0.6717294891132042,
+  "flops_per_token": 547328,
+  "peak_memory_mb": 5.621681213378906,
+  "note": "one call per site, 256 tokens per call; medians over repeats"
+}

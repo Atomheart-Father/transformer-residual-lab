@@ -9,13 +9,19 @@ overlap the old one by even a single token.
 The offsets are multiples of seq_len, so disjoint offsets imply disjoint token
 ranges and therefore disjoint text.
 
+Stage 1.7 also uses this script for a *different-corpus* split (`--dataset`
+plus `--text-field`), which has no offsets to exclude: a different corpus
+cannot overlap by construction.
+
 Output:
-    <out>/fresh_test.jsonl          new windows
-    <out>/fresh_test_manifest.json  seed, excluded offsets, disjointness proof
+    <out>/<name>.jsonl          new windows
+    <out>/<name>_manifest.json  seed, excluded offsets, disjointness proof
 
 Usage:
     python scripts/make_fresh_split.py --out data257 --split test --count 64 \
         --seq-len 257 --seed 771013 --exclude data257/test.jsonl
+    python scripts/make_fresh_split.py --out data257 --dataset stanfordnlp/imdb \
+        --split test --text-field text --source imdb --name ood_imdb --count 64
 """
 
 from __future__ import annotations
@@ -45,6 +51,11 @@ def main() -> None:
     ap.add_argument("--exclude", type=Path, action="append", default=[],
                     help="existing JSONL whose windows must not be reused")
     ap.add_argument("--name", default="fresh_test")
+    ap.add_argument("--text-field", default="text",
+                    help="column holding the raw text (IMDB also has 'text')")
+    ap.add_argument("--source", default="wikitext2",
+                    help="prefix for sample_id and the manifest source field")
+    ap.add_argument("--purpose", default=None)
     args = ap.parse_args()
 
     from datasets import load_dataset
@@ -57,7 +68,8 @@ def main() -> None:
 
     tok = AutoTokenizer.from_pretrained(args.model, revision=model_rev, use_fast=True)
     rows = load_dataset(args.dataset, args.config, split=args.split, revision=ds_rev)
-    text = "\n\n".join(r["text"] for r in rows if r["text"].strip())
+    text = "\n\n".join(r[args.text_field] for r in rows
+                       if r[args.text_field].strip())
     ids = tok.encode(text, add_special_tokens=False)
 
     excluded_offsets, excluded_hashes = set(), set()
@@ -86,8 +98,8 @@ def main() -> None:
         if h in excluded_hashes:
             raise SystemExit(f"window at {start} duplicates an excluded window")
         windows.append({
-            "sample_id": f"wikitext2:{args.split}:{start}",
-            "source": "wikitext2",
+            "sample_id": f"{args.source}:{args.split}:{start}",
+            "source": args.source,
             "split": args.split,
             "start_offset": start,
             "ids": w,
@@ -107,22 +119,29 @@ def main() -> None:
 
     manifest = {
         "name": args.name,
-        "purpose": "untouched evaluation split for Stage 1.6; never used for "
-                   "plan selection, alpha fitting, or compensator training",
+        "source": args.source,
+        "purpose": args.purpose or (
+            "untouched evaluation split; never used for plan selection, alpha "
+            "fitting, or compensator training"),
         "model_revision": model_rev,
         "dataset": args.dataset,
         "dataset_config": args.config,
         "dataset_revision": ds_rev,
         "split": args.split,
+        "text_field": args.text_field,
         "seq_len": args.seq_len,
         "n_windows": len(windows),
+        "n_corpus_tokens": len(ids),
         "seed": args.seed,
         "excluded_files": [str(p) for p in args.exclude],
         "n_excluded_offsets": len(excluded_offsets),
         "n_candidate_offsets": len(pool) + len(excluded_offsets & set(
             range(0, max_start + 1, args.seq_len))),
-        "disjointness": "offsets are multiples of seq_len, so distinct offsets "
-                        "imply distinct token ranges; also checked by sha256",
+        "disjointness": ("offsets are multiples of seq_len, so distinct offsets "
+                         "imply distinct token ranges; also checked by sha256")
+        if args.exclude else
+        "different corpus: overlap with the wikitext-2 windows is impossible by "
+        "construction; offsets are still unique within this file",
         "window_rule": "non-overlapping windows of seq_len tokens; offsets "
                        "shuffled by seed; sorted by start",
         "note": "Token ids stay local. Do not commit the sampled corpus.",

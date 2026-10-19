@@ -1,0 +1,190 @@
+{
+  "stage": "eval",
+  "plan": "irr-a",
+  "groups": [
+    [
+      0
+    ],
+    [
+      1
+    ],
+    [
+      2
+    ],
+    [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    [
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19
+    ],
+    [
+      20,
+      21,
+      22,
+      23,
+      24,
+      25
+    ],
+    [
+      26,
+      27
+    ]
+  ],
+  "sites": [
+    4,
+    5
+  ],
+  "site_layers": [
+    [
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19
+    ],
+    [
+      20,
+      21,
+      22,
+      23,
+      24,
+      25
+    ]
+  ],
+  "effective_depth": 7,
+  "executed_blocks": 28,
+  "model": "mlx-community/Qwen3-0.6B-Base-bf16",
+  "model_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
+  "input": "data257/test_v2.jsonl",
+  "n_samples": 64,
+  "compensators": {
+    "serial_b2_r64": {
+      "n_params": 278752,
+      "hidden": 64,
+      "rank": 64,
+      "carry_state": false,
+      "per_site": false,
+      "flops_per_token": 1115008,
+      "predict_ms_per_sample": 0.9361419370179647
+    },
+    "serial_b3_r64": {
+      "n_params": 278752,
+      "hidden": 64,
+      "rank": 64,
+      "carry_state": true,
+      "per_site": false,
+      "flops_per_token": 1115008,
+      "predict_ms_per_sample": 0.8994745921881986
+    }
+  },
+  "aggregate": {
+    "serial": {
+      "n": 64,
+      "delta_nll_mean": 0.0,
+      "delta_nll_std": 0.0,
+      "kl_mean": 0.0,
+      "top1_mean": 1.0,
+      "gap_closure": 1.0,
+      "recovery_vs_oracle": 1.1057825489187652,
+      "recovery_vs_oracle_ex_last": 1.5037828673025568
+    },
+    "irr-a": {
+      "n": 64,
+      "delta_nll_mean": 4.081005627289414,
+      "delta_nll_std": 0.38103951071516506,
+      "kl_mean": 4.016061138361692,
+      "top1_mean": 0.161376953125,
+      "exit_rel_rms_mean": [
+        0.0,
+        0.0,
+        0.0,
+        0.08173046875,
+        0.3252348437500001,
+        0.6177714062499999,
+        0.9232156249999999
+      ],
+      "gap_closure": 0.0,
+      "recovery_vs_oracle": 0.0,
+      "recovery_vs_oracle_ex_last": 0.0
+    },
+    "irr-a+oracle": {
+      "n": 64,
+      "delta_nll_mean": 0.3904015105217695,
+      "delta_nll_std": 0.08398955505868576,
+      "kl_mean": 0.39098672289401293,
+      "top1_mean": 0.64056396484375,
+      "gap_closure": 0.9043369340362629,
+      "recovery_vs_oracle": 1.0,
+      "recovery_vs_oracle_ex_last": 1.3599263876726546
+    },
+    "irr-a+oracle_ex_last": {
+      "n": 64,
+      "delta_nll_mean": 1.3671792391687632,
+      "delta_nll_std": 0.27729931138468095,
+      "kl_mean": 1.313882120884955,
+      "top1_mean": 0.4954833984375,
+      "gap_closure": 0.6649896216690989,
+      "recovery_vs_oracle": 0.7353339188537815,
+      "recovery_vs_oracle_ex_last": 1.0
+    },
+    "irr-a+serial_b2_r64": {
+      "n": 64,
+      "delta_nll_mean": 3.4038143921643496,
+      "delta_nll_std": 0.4066980447449,
+      "kl_mean": 3.4685813896358013,
+      "top1_mean": 0.23760986328125,
+      "exit_rel_rms_mean": [
+        0.0,
+        0.0,
+        0.0,
+        0.08173046875,
+        0.3252348437500001,
+        0.5450846874999999,
+        0.72894796875
+      ],
+      "gap_closure": 0.16593734411850156,
+      "recovery_vs_oracle": 0.18349061934016692,
+      "recovery_vs_oracle_ex_last": 0.24953373513109134
+    },
+    "irr-a+serial_b3_r64": {
+      "n": 64,
+      "delta_nll_mean": 3.3936484698206186,
+      "delta_nll_std": 0.4134434871714885,
+      "kl_mean": 3.453351031988859,
+      "top1_mean": 0.235595703125,
+      "exit_rel_rms_mean": [
+        0.0,
+        0.0,
+        0.0,
+        0.08173046875,
+        0.3252348437500001,
+        0.5435878125000001,
+        0.7346965624999997
+      ],
+      "gap_closure": 0.1684283777685784,
+      "recovery_vs_oracle": 0.18624516087919132,
+      "recovery_vs_oracle_ex_last": 0.2532797088559511
+    }
+  },
+  "git_commit": "9cc8e4b77195857fc6b773ab7d2ee7b3f7553913",
+  "warning": "Measured cost only. The graph is still executed sequentially; no speedup is claimed."
+}

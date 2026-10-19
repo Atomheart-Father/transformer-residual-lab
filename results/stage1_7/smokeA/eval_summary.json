@@ -1,0 +1,142 @@
+{
+  "stage": "eval",
+  "plan": "irr-a",
+  "groups": [
+    [
+      0
+    ],
+    [
+      1
+    ],
+    [
+      2
+    ],
+    [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    [
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19
+    ],
+    [
+      20,
+      21,
+      22,
+      23,
+      24,
+      25
+    ],
+    [
+      26,
+      27
+    ]
+  ],
+  "group_index": 5,
+  "group_layers": [
+    20,
+    21,
+    22,
+    23,
+    24,
+    25
+  ],
+  "effective_depth": 7,
+  "executed_blocks": 28,
+  "model": "mlx-community/Qwen3-0.6B-Base-bf16",
+  "model_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
+  "input": "data257/validation.jsonl",
+  "n_samples": 4,
+  "compensators": {
+    "mlp_r32": {
+      "n_params": 66592,
+      "rank": 32,
+      "flops_per_token": 266368,
+      "predict_seconds_total": 0.005694791005225852,
+      "predict_ms_per_sample": 1.423697751306463,
+      "predict_ms_per_token": 0.005561319341040871
+    }
+  },
+  "shuffle_seeds": [
+    1,
+    2
+  ],
+  "shuffle_draws": {
+    "1": "identity permutation replaced by a one-step rotation",
+    "2": "permutation"
+  },
+  "shuffle_note": "shuffled@K applies the trained network to another sample's entry state; weights and the transformer forward pass are unchanged",
+  "aggregate": {
+    "serial": {
+      "n": 4,
+      "delta_nll_mean": 0.0,
+      "delta_nll_std": 0.0,
+      "kl_mean": 0.0,
+      "top1_mean": 1.0,
+      "recovery_vs_oracle": 1.1562490152910674
+    },
+    "irr-a": {
+      "n": 4,
+      "delta_nll_mean": 4.076801180839539,
+      "delta_nll_std": 0.22771357464593947,
+      "kl_mean": 3.979626476764679,
+      "top1_mean": 0.173828125,
+      "recovery_vs_oracle": 0.0
+    },
+    "irr-a+oracle": {
+      "n": 4,
+      "delta_nll_mean": 0.5509160757064819,
+      "delta_nll_std": 0.1722256649511556,
+      "kl_mean": 0.520458996295929,
+      "top1_mean": 0.6171875,
+      "recovery_vs_oracle": 1.0
+    },
+    "irr-a+mean": {
+      "n": 4,
+      "delta_nll_mean": 4.030506253242493,
+      "delta_nll_std": 0.22913758070162307,
+      "kl_mean": 3.960906982421875,
+      "top1_mean": 0.169921875,
+      "recovery_vs_oracle": 0.013130015929801224
+    },
+    "irr-a+shuffled@1": {
+      "n": 4,
+      "delta_nll_mean": 4.799896955490112,
+      "delta_nll_std": 0.14797129886831908,
+      "kl_mean": 4.728086233139038,
+      "top1_mean": 0.14453125,
+      "recovery_vs_oracle": -0.2050820582888183
+    },
+    "irr-a+shuffled@2": {
+      "n": 4,
+      "delta_nll_mean": 4.714453220367432,
+      "delta_nll_std": 0.1522082266379513,
+      "kl_mean": 4.643225193023682,
+      "top1_mean": 0.1494140625,
+      "recovery_vs_oracle": -0.18084878562820608
+    },
+    "irr-a+mlp_r32": {
+      "n": 4,
+      "delta_nll_mean": 3.4307587146759033,
+      "delta_nll_std": 0.24439564468340977,
+      "kl_mean": 3.4691195487976074,
+      "top1_mean": 0.248046875,
+      "recovery_vs_oracle": 0.18322845098472246
+    }
+  },
+  "git_commit": "9cc8e4b77195857fc6b773ab7d2ee7b3f7553913",
+  "warning": "Compensation cost is measured, not hidden. No speedup is claimed: the base graph is still executed sequentially."
+}

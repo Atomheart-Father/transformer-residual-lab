@@ -154,6 +154,22 @@ def load_compensator(path: Path):
                           z["x_mean"], z["y_mean"])
 
 
+def comp_diag(pred, target):
+    """How well c_hat tracks c*, in the only units that matter here: scale,
+    residual, and direction. Vector error is *not* the same as NLL."""
+    pred = np.asarray(pred, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    err = pred - target
+    t_rms = float(np.sqrt((target ** 2).mean()))
+    num = float((pred * target).sum())
+    den = float(np.sqrt((pred ** 2).sum() * (target ** 2).sum())) + 1e-12
+    return {"target_rms": t_rms,
+            "pred_rms": float(np.sqrt((pred ** 2).mean())),
+            "err_rms": float(np.sqrt((err ** 2).mean())),
+            "rel_err": float(np.sqrt((err ** 2).mean()) / max(t_rms, 1e-12)),
+            "cosine": num / den}
+
+
 # ---------------------------------------------------------------------------
 # collect
 # ---------------------------------------------------------------------------
@@ -365,7 +381,29 @@ def cmd_fit(args, mx, load):
 # ---------------------------------------------------------------------------
 
 
+def finish(model, h, plan, mask, mx, start_gi):
+    """Run the remaining groups after a patch point."""
+    for group in plan.groups[start_gi:]:
+        h = run_group(model, h, group, mask, mx)
+    return h
+
+
 def cmd_eval(args, mx, load):
+    """Evaluate compensators, plus the two fixed-offset controls.
+
+    The prefix (groups 0..gi-1) is computed once per sample, because nothing we
+    vary touches it. Every variant then resumes from the patch point, which is
+    both faster and makes the comparison exact: all variants share one prefix.
+
+    Controls:
+      mean      c_hat = y_mean, the training-set average compensation. If this
+                already explains most of the gain, the network is not using the
+                input at all.
+      shuffled  the trained network, but sample i receives the prediction
+                computed from sample perm[i]'s entry state. Marginal
+                distribution, weights and forward pass are untouched; only the
+                input/output correspondence is destroyed. Repeated over seeds.
+    """
     from mlx_lm.models.base import create_attention_mask
     model, tokenizer, config = load(args.model, revision=args.revision,
                                     return_config=True)
@@ -374,102 +412,146 @@ def cmd_eval(args, mx, load):
     plan = resolve_plan(n, args.plan)
     gi = args.group_index if args.group_index >= 0 else \
         max(i for i, g in enumerate(plan.groups) if len(g) > 1)
+    group = plan.groups[gi]
 
     comps = {}
     for path in args.compensator or []:
         p = Path(path)
         comps[p.stem] = load_compensator(p)
 
-    args.output.mkdir(parents=True, exist_ok=True)
-    variants = ["serial", f"{plan.name}", f"{plan.name}+oracle"]
-    variants += [f"{plan.name}+{k}" for k in comps]
-
-    rows, done = [], 0
-    t_comp = {k: 0.0 for k in comps}
+    # ---------------------------------------------------------------- pass A
+    As, Cstar, H, refs, metas = [], [], [], [], []
+    t_pred = {k: 0.0 for k in comps}
     for line in args.input.open(encoding="utf-8"):
-        if done >= args.max_samples:
+        if len(As) >= args.max_samples:
             break
         sample = json.loads(line)
         ids = mx.array(sample["ids"], dtype=mx.int32)[None, :]
         h0 = embed(model, ids, mx)
         mask = create_attention_mask(h0, None)
         states, _ = teacher_pass(model, ids, mask, mx)
-        ref_logits = model(ids)
-        mx.eval(ref_logits)
-        row = {"sample_id": sample["sample_id"], "variants": {}}
+        ref = model(ids)
+        mx.eval(ref)
 
-        serial_out = states[-1]
-        row["variants"]["serial"] = logits_metrics(
-            ref_logits, project_logits(model, serial_out, mx), ids, mx)
-
-        base_out = run_with_patch(model, h0, plan, mask, mx, -1, None)
-        row["variants"][plan.name] = {
-            **logits_metrics(ref_logits, project_logits(model, base_out, mx), ids, mx),
-            "final_state": state_metrics(base_out, states[-1], mx)}
-
-        # what the group entry looks like, and how good the prediction is there
         a = advance_to_group(model, h0, plan, mask, mx, gi)
-        group = plan.groups[gi]
         par = run_group(model, a, group, mask, mx)
         truth = states[group[-1] + 1]
         c_star = truth.astype(mx.float32) - par.astype(mx.float32)
-        mx.eval(c_star)
-        cs = np.asarray(c_star)
-        comp_diag = {}
+        mx.eval(a, par, c_star, truth)
 
-        def make_patch(fn, sink):
-            def patch(entry, grp):
-                t0 = time.perf_counter()
-                pred = fn(entry, mx)
-                mx.eval(pred)
-                sink["predict_seconds"] = sink.get("predict_seconds", 0.0) + \
-                    (time.perf_counter() - t0)
-                out = (run_group(model, entry, grp, mask, mx).astype(mx.float32)
-                       + pred.astype(mx.float32))
-                mx.eval(out)
-                return out.astype(entry.dtype)
-            return patch
+        As.append(np.asarray(a.astype(mx.float32)).reshape(-1, a.shape[-1]))
+        Cstar.append(np.asarray(c_star).reshape(-1, c_star.shape[-1]))
+        H.append((a, par, truth, states[-1]))
+        refs.append(ref)
+        metas.append({"sample_id": sample["sample_id"],
+                      "ids": ids, "n_tokens": int(ids.shape[1])})
+        print(f"[eval A {len(As)}/{args.max_samples}] {sample['sample_id']}",
+              flush=True)
 
-        def make_oracle_patch():
-            def patch(entry, grp):
-                return truth
-            return patch
+    n_samples = len(As)
+    P = {}
+    for name, comp in comps.items():
+        preds = []
+        for i in range(n_samples):
+            t0 = time.perf_counter()
+            preds.append(comp.predict_np(As[i]))
+            t_pred[name] += time.perf_counter() - t0
+        P[name] = preds
 
+    # ---------------------------------------------------------------- pass B
+    variants = ["serial", plan.name, f"{plan.name}+oracle"]
+    variants += [f"{plan.name}+mean"] if comps else []
+    for seed in args.shuffle_seed or []:
+        variants.append(f"{plan.name}+shuffled@{seed}")
+    variants += [f"{plan.name}+{k}" for k in comps]
+
+    shuffle_note = {}
+
+    def metric(out, ref, ids):
+        return logits_metrics(ref, project_logits(model, out, mx), ids, mx)
+
+    rows = []
+    for i in range(n_samples):
+        a, par, truth, final = H[i]
+        ids, sid = metas[i]["ids"], metas[i]["sample_id"]
+        ref = refs[i]
+        row = {"sample_id": sid, "variants": {}}
+
+        row["variants"]["serial"] = logits_metrics(
+            ref, project_logits(model, final, mx), ids, mx)
+
+        base_out = finish(model, par, plan, mask, mx, gi + 1)
+        mx.eval(base_out)
+        row["variants"][plan.name] = {
+            **metric(base_out, ref, ids),
+            "final_state": state_metrics(base_out, truth, mx)}
+
+        orc_out = finish(model, truth, plan, mask, mx, gi + 1)
+        mx.eval(orc_out)
         row["variants"][f"{plan.name}+oracle"] = {
-            **logits_metrics(ref_logits, project_logits(
-                model, run_with_patch(model, h0, plan, mask, mx, gi,
-                                      make_oracle_patch()), mx), ids, mx)}
+            **metric(orc_out, ref, ids),
+            "final_state": state_metrics(orc_out, final, mx)}
 
-        for name, comp in comps.items():
-            sink = {}
-            out = run_with_patch(model, h0, plan, mask, mx, gi, make_patch(
-                lambda e, m, c=comp: c.predict_mx(e, m), sink))
-            t_comp[name] += sink.get("predict_seconds", 0.0)
-            pred = comp.predict_np(np.asarray(a.astype(mx.float32)).reshape(-1, a.shape[-1]))
-            err = pred - cs.reshape(-1, cs.shape[-1])
-            num = float((pred * cs.reshape(-1, cs.shape[-1])).sum())
-            den = float(np.sqrt((pred ** 2).sum() * (cs ** 2).sum())) + 1e-12
+        cs = Cstar[i]
+        diag = {}
+        if comps:
+            y_mean = next(iter(comps.values())).y_mean
+            const = np.broadcast_to(y_mean[None, :], cs.shape)
+            mean_out = finish(model, (par.astype(mx.float32)
+                                      + mx.array(const)).astype(par.dtype),
+                              plan, mask, mx, gi + 1)
+            mx.eval(mean_out)
+            row["variants"][f"{plan.name}+mean"] = {
+                **metric(mean_out, ref, ids),
+                "final_state": state_metrics(mean_out, truth, mx),
+                "comp": comp_diag(const, cs)}
+
+        for seed in args.shuffle_seed or []:
+            rng = np.random.default_rng(seed)
+            order = rng.permutation(n_samples)
+            if np.array_equal(order, np.arange(n_samples)):
+                # a shuffle that keeps every sample in place would silently
+                # reproduce the unshuffled result; roll by one and say so
+                order = np.roll(order, 1)
+                shuffle_note[seed] = ("identity permutation replaced by a "
+                                      "one-step rotation")
+            else:
+                shuffle_note[seed] = "permutation"
+            src = next(iter(comps))
+            c_hat = P[src][order[i]]
+            out = finish(model, (par.astype(mx.float32)
+                                 + mx.array(c_hat)).astype(par.dtype),
+                         plan, mask, mx, gi + 1)
+            mx.eval(out)
+            row["variants"][f"{plan.name}+shuffled@{seed}"] = {
+                **metric(out, ref, ids),
+                "final_state": state_metrics(out, truth, mx),
+                "comp": comp_diag(c_hat, cs),
+                "shuffle_source": f"{src} prediction from sample "
+                                  f"{metas[order[i]]['sample_id']}",
+            }
+
+        for name in comps:
+            c_hat = P[name][i]
+            out = finish(model, (par.astype(mx.float32)
+                                 + mx.array(c_hat)).astype(par.dtype),
+                         plan, mask, mx, gi + 1)
+            mx.eval(out)
             row["variants"][f"{plan.name}+{name}"] = {
-                **logits_metrics(ref_logits, project_logits(model, out, mx), ids, mx),
-                "final_state": state_metrics(out, states[-1], mx),
-                "comp": {
-                    "target_rms": float(np.sqrt((cs ** 2).mean())),
-                    "pred_rms": float(np.sqrt((pred ** 2).mean())),
-                    "err_rms": float(np.sqrt((err ** 2).mean())),
-                    "rel_err": float(np.sqrt((err ** 2).mean())
-                                     / max(np.sqrt((cs ** 2).mean()), 1e-12)),
-                    "cosine": num / den,
-                }}
-            comp_diag[name] = row["variants"][f"{plan.name}+{name}"]["comp"]
+                **metric(out, ref, ids),
+                "final_state": state_metrics(out, truth, mx),
+                "comp": comp_diag(c_hat, cs)}
+            diag[name] = row["variants"][f"{plan.name}+{name}"]["comp"]
+
         row["boundary"] = {"group_index": gi, "layers": group,
                            "c_star_rms": float(np.sqrt((cs ** 2).mean())),
-                           "comp": comp_diag}
+                           "comp": diag}
         rows.append(row)
-        done += 1
-        print(f"[eval {done}/{args.max_samples}] {sample['sample_id']} " + " ".join(
+        print(f"[eval B {i + 1}/{n_samples}] {sid} " + " ".join(
             f"{k.split('+')[-1]}={v['delta_nll']:.3f}"
             for k, v in row["variants"].items()), flush=True)
 
+    args.output.mkdir(parents=True, exist_ok=True)
     with (args.output / "samples.jsonl").open("w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
@@ -497,16 +579,21 @@ def cmd_eval(args, mx, load):
         "effective_depth": plan.effective_depth,
         "executed_blocks": plan.executed_blocks,
         "model": args.model, "model_revision": args.revision,
-        "input": str(args.input), "n_samples": done,
+        "input": str(args.input), "n_samples": n_samples,
         "compensators": {k: {
             "n_params": c.n_params, "rank": c.r,
             "flops_per_token": 4 * c.n_params,
-            "predict_seconds_total": t_comp[k],
-            "predict_ms_per_sample": 1000.0 * t_comp[k] / max(done, 1),
-            "predict_ms_per_token": 1000.0 * t_comp[k] / max(done, 1) / 256.0,
+            "predict_seconds_total": t_pred[k],
+            "predict_ms_per_sample": 1000.0 * t_pred[k] / max(n_samples, 1),
+            "predict_ms_per_token": (1000.0 * t_pred[k] / max(n_samples, 1)
+                                     / max(float(np.mean([m["n_tokens"] - 1
+                                                          for m in metas])), 1.0)),
         } for k, c in comps.items()},
-        "block_reference": {"params_per_block": 21_700_000,
-                            "note": "Qwen3-0.6B has ~0.6B params over 28 blocks"},
+        "shuffle_seeds": list(args.shuffle_seed or []),
+        "shuffle_draws": shuffle_note,
+        "shuffle_note": "shuffled@K applies the trained network to another "
+                        "sample's entry state; weights and the transformer "
+                        "forward pass are unchanged",
         "aggregate": agg,
         "git_commit": git_sha(),
         "warning": "Compensation cost is measured, not hidden. No speedup is "
@@ -532,6 +619,9 @@ def main() -> None:
     ap.add_argument("--pairs", type=Path, help="pairs.npz for --stage fit")
     ap.add_argument("--compensator", action="append", default=[],
                     help="npz files for --stage eval (repeatable)")
+    ap.add_argument("--shuffle-seed", action="append", type=int, default=[],
+                    help="add a shuffled control with this seed (repeatable); "
+                         "the first compensator provides the predictions")
     ap.add_argument("--rank-linear", type=int, default=8)
     ap.add_argument("--rank-mlp", type=int, default=16)
     ap.add_argument("--lam-rel", type=float, default=1e-3)

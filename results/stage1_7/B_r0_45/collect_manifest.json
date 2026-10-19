@@ -1,0 +1,164 @@
+{
+  "stage": "collect",
+  "plan": "irr-a",
+  "groups": [
+    [
+      0
+    ],
+    [
+      1
+    ],
+    [
+      2
+    ],
+    [
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    [
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19
+    ],
+    [
+      20,
+      21,
+      22,
+      23,
+      24,
+      25
+    ],
+    [
+      26,
+      27
+    ]
+  ],
+  "sites": [
+    4,
+    5
+  ],
+  "site_layers": [
+    [
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19
+    ],
+    [
+      20,
+      21,
+      22,
+      23,
+      24,
+      25
+    ]
+  ],
+  "effective_depth": 7,
+  "executed_blocks": 28,
+  "model": "mlx-community/Qwen3-0.6B-Base-bf16",
+  "model_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
+  "input": "data257/calibration.jsonl",
+  "n_samples": 64,
+  "shape": [
+    64,
+    2,
+    257,
+    1024
+  ],
+  "sample_ids": [
+    "wikitext2:train:73502",
+    "wikitext2:train:89693",
+    "wikitext2:train:205343",
+    "wikitext2:train:216394",
+    "wikitext2:train:218450",
+    "wikitext2:train:255972",
+    "wikitext2:train:257000",
+    "wikitext2:train:280644",
+    "wikitext2:train:305316",
+    "wikitext2:train:321250",
+    "wikitext2:train:471852",
+    "wikitext2:train:484445",
+    "wikitext2:train:495496",
+    "wikitext2:train:522224",
+    "wikitext2:train:523252",
+    "wikitext2:train:574652",
+    "wikitext2:train:619370",
+    "wikitext2:train:854011",
+    "wikitext2:train:944732",
+    "wikitext2:train:946274",
+    "wikitext2:train:972231",
+    "wikitext2:train:1022860",
+    "wikitext2:train:1038023",
+    "wikitext2:train:1070405",
+    "wikitext2:train:1109212",
+    "wikitext2:train:1109983",
+    "wikitext2:train:1196078",
+    "wikitext2:train:1217152",
+    "wikitext2:train:1231544",
+    "wikitext2:train:1238997",
+    "wikitext2:train:1353876",
+    "wikitext2:train:1373151",
+    "wikitext2:train:1396538",
+    "wikitext2:train:1568471",
+    "wikitext2:train:1652510",
+    "wikitext2:train:1658421",
+    "wikitext2:train:1676925",
+    "wikitext2:train:1692345",
+    "wikitext2:train:1704167",
+    "wikitext2:train:1708279",
+    "wikitext2:train:1753511",
+    "wikitext2:train:1772529",
+    "wikitext2:train:1793860",
+    "wikitext2:train:1845260",
+    "wikitext2:train:1897174",
+    "wikitext2:train:1935981",
+    "wikitext2:train:1952686",
+    "wikitext2:train:2000231",
+    "wikitext2:train:2024903",
+    "wikitext2:train:2143380",
+    "wikitext2:train:2166510",
+    "wikitext2:train:2170622",
+    "wikitext2:train:2224849",
+    "wikitext2:train:2225877",
+    "wikitext2:train:2236157",
+    "wikitext2:train:2249007",
+    "wikitext2:train:2287557",
+    "wikitext2:train:2288585",
+    "wikitext2:train:2410146",
+    "wikitext2:train:2418627",
+    "wikitext2:train:2453322",
+    "wikitext2:train:2500353",
+    "wikitext2:train:2513974",
+    "wikitext2:train:2515773"
+  ],
+  "files": {
+    "A": "A.npy",
+    "C": "C.npy"
+  },
+  "compensated_during_collection": false,
+  "compensator": null,
+  "c_rms_per_site": {
+    "g4": 4.611092507839203,
+    "g5": 13.169648513197899
+  },
+  "input_is": "free-running candidate group entry (deployable)",
+  "label_is": "teacher group exit minus candidate parallel group output",
+  "git_commit": "9cc8e4b77195857fc6b773ab7d2ee7b3f7553913"
+}

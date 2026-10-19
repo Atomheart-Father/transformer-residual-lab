@@ -1,0 +1,23 @@
+{
+  "compensator": "results/stage1_7/smokeB/serial_smoke.npz",
+  "n_params": 68208,
+  "hidden": 16,
+  "rank": 16,
+  "carry_state": false,
+  "per_site": false,
+  "n_sites": 4,
+  "tokens": 256,
+  "repeat": 30,
+  "warmup": 5,
+  "per_site_ms": [
+    0.34143749508075416,
+    0.35687450144905597,
+    0.3700624802149832,
+    0.392166490200907
+  ],
+  "per_site_total_ms": 1.4605409669457003,
+  "chain_ms": 1.1401665105950087,
+  "flops_per_token": 272832,
+  "peak_memory_mb": 4.850139617919922,
+  "note": "one call per site, 256 tokens per call; medians over repeats"
+}

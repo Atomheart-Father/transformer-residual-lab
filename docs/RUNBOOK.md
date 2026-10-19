@@ -221,3 +221,95 @@ python -m unittest discover -s tests -v
 - **`oracle` 用教师态，不可部署**，只能当上界。`recovery_vs_oracle` 是相对 oracle 空间的百分比，不是相对串行参考。
 - 补偿器只在**一个**组上验证过，多点补偿的相互干扰完全没测。
 - rank-64 已出现轻微过拟合（train 0.789 vs val 0.812）。扩容量前先扩 calibration 集，当前只有 64 个窗口 / 14,803 行。
+
+## Stage 1.7：多站点 / 共享 / 串行状态
+
+引擎是 `scripts/serial_compensate.py`，四个阶段 `collect → fit → eval → bench`。
+
+### 1) 新数据划分
+
+```bash
+# 同语料独立测试（排除 test.jsonl 与 fresh_test.jsonl 的 offset）
+python scripts/make_fresh_split.py --out data257 --name test_v2 --count 64 --seed 90210 \
+    --source wikitext2 --purpose "Stage 1.7 same-corpus independent test" \
+    --exclude data257/test.jsonl --exclude data257/fresh_test.jsonl
+
+# 跨语料测试（IMDB，不与 wikitext 共享任何窗口）
+python scripts/make_fresh_split.py --out data257 --name ood_imdb --count 64 --seed 31337 \
+    --dataset stanfordnlp/imdb --config plain_text --split test \
+    --text-field text --source imdb --purpose "Stage 1.7 cross-corpus test"
+```
+
+`--out` 是**目录**，文件名由 `--name` 决定（`<out>/<name>.jsonl`）。IMDB 的文本字段名也是 `text`，但一定要显式写 `--text-field text` 并给 `--source imdb`，否则 `sample_id` 会和 wikitext 混在一起。
+
+### 2) 采集（注意 `A.npy` / `C.npy` 是 mmap 的）
+
+```bash
+PLAN="irr-a:0|1|2|3-10|11-19|20-25|26-27"
+python scripts/serial_compensate.py --stage collect --plan "$PLAN" --sites 4,5 \
+    --input data257/calibration.jsonl --max-samples 64 \
+    --output results/stage1_7/B_r0_45
+```
+
+`--plan` 必须是 `名字:分组体` 的完整写法（`irr-a:0|1|2|...`）。只给 `irr-a` 会在 `measure.make_plan` 里报 `unknown plan`——名字本身不是合法的 spec。
+
+`collect` 写 `A.npy` / `C.npy`（`[n,S,T,D]`，float32，每个约 250 MB）。`fit` 用 `mmap_mode="r"` 读，**不要**改回 `np.load` 全量读入：4 站点 r64 时会吃掉 500 MB+ 然后被 OOM kill（exit 137）。
+
+### 3) 训练
+
+```bash
+python scripts/serial_compensate.py --stage fit --pairs results/stage1_7/B_r0_45 \
+    --hidden 64 --rank 64 --epochs 40 --output results/stage1_7/B_r0_45 --tag b3_r64
+```
+
+- `--carry-state` 打开状态传递（B3）；不打开就是 B2。**参数、FLOPs、输入、站点完全相同**，这是唯一的控制变量。
+- `--per-site` 给每个站点独立权重（参数量 ×S），默认共享。
+- `--site-weight normalized` 按站点方差归一化损失。**对 4 站点崩溃没有用**（−43% → −29%），别指望它修站点干扰。
+- `--output` 是必填项，即使和 `--pairs` 同一个目录也要显式写。
+
+### 4) 评估
+
+```bash
+python scripts/serial_compensate.py --stage eval --plan "$PLAN" --sites 4,5 \
+    --compensator results/stage1_7/B_r2_45/serial_b3_r64.npz \
+    --input data257/test_v2.jsonl --max-samples 64 \
+    --output results/stage1_7/B_test_r2
+```
+
+- `--apply-sites 4` 只让部分站点生效，用来给每个站点定价。**必须**是 `--sites` 的子集。
+- 评估同时给出 `irr-a` / `+oracle` / `+oracle_ex_last` / 各补偿器。`gap_closure` 由脚本算好；`recovery_vs_oracle` 只在自己站点集合内可比。
+- 大张量留在本地；`serial_*.npz` 合计约 12 MB，可以提交。
+
+### 5) 时延
+
+```bash
+python scripts/serial_compensate.py --stage bench \
+    --compensator results/stage1_7/B_r2_45/serial_b3_r64.npz \
+    --output results/stage1_7/bench_serial_b3_r64.json
+```
+
+`per_site_ms` 是单站点中位数，`chain_ms` 是整条链（含站点间的串行依赖），`flops_per_token = 4 × n_params`。**`chain_ms` 才是关键路径上的增量**，`per_site_total_ms` 是各站点耗时之和，二者不等。
+
+### 6) 汇总、统计、出图
+
+```bash
+python scripts/make_stage17_table.py                      # -> table.json
+python scripts/stage17_stats.py                           # -> paired_stats.json
+python scripts/make_figures.py --stage17 results/stage1_7 --figdir results/stage1_7/figures
+```
+
+**顺序不能反**：`make_figures.py --stage17` 从 `table.json` 与 `paired_stats.json` 读数据，缺文件时会静默少画点。`--figdir` 不给的话默认写到 `--run` 目录下（容易写错地方）。
+
+`make_stage17_table.py` 只做汇总，不做重算；缺键会进 `missing` 并打印，不会静默补 0。加新 run 就改脚本里的 `ROWS` 表。
+
+## Stage 1.7 的已知事项
+
+- **多站点补偿的输入分布由前驱修正决定。** 用未补偿图采集的数据训练多站点补偿器，部署时会因为前驱改写而失效（4 站点 r64 比不补偿差 1.76 nats，带状态的 B3 差 2.95 nats）。必须用 `--compensator` 在**补偿生效**的图上重采数据，然后重训。这是本轮最大的单一效应（8% → 18%）。
+- **修正必须成组上线。** 最终 2 站点模型上只开站点 5 是 −8.1%，只开站点 4 是 +10.0%，一起开是 +18.4%。按站点逐个加补偿的部署策略不成立。
+- **最后一组不要修。** 4 站点模型上单独修 group 6 只有 +1.5%，而且它会直接改写进 logits 的那一步。
+- **状态传递（B3 − B2）在 2 站点上没有显著收益**，三个集 CI 全跨 0。要检验长链状态需要 8+ 站点且每轮重采，代价高，先不要假设它有用。
+- **跨语料迁移失败。** IMDB 上所有方法都只有 2.5–3.0% gap closure，而 test_v2 是 16.8%。补偿器拟合的是 WikiText-2 的残差统计。
+- **NLL 与 top-1 会背离。** B3 的 NLL 比 B2 好但 top-1 略低（0.237 vs 0.244）。只报一个指标会误导。
+- **`test_v2` 在 Experiment A 里当过诊断集。** B 部分的结构/轮次/站点全在 validation 上定，但严格说它不算"从未见过"。`ood_imdb` 是唯一完全干净的集。
+- **本轮没有任何并发执行。** 所有时延都是顺序测的，`eval_summary.json` 里的 `warning` 字段写着这一点。不宣称加速。
+

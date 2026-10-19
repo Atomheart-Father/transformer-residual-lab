@@ -99,3 +99,58 @@
 ## 状态取值
 
 `NOT MEASURED` / `MEASURED` / `INCONCLUSIVE` / `FAIL` 必须显式保留，不得用占位图或推算值替代。
+
+## Stage 1.7 产物
+
+### `results/stage1_7/<run>/eval_summary.json`
+
+由 `serial_compensate.py --stage eval` 写出。比 Stage 1.6 多了几个字段：
+
+| 字段 | 含义 |
+|---|---|
+| `sites` | 补偿站点（group 索引列表），例如 `[4, 5]` |
+| `site_layers` | 每个站点对应的层区间，例如 `[[11..19], [20..25]]` |
+| `aggregate[v].gap_closure` | `(ΔNLL_base − ΔNLL_v) / ΔNLL_base`，**跨方法可比** |
+| `aggregate[v].recovery_vs_oracle` | 相对本族 oracle，**跨站点集合不可比** |
+| `aggregate[v].recovery_vs_oracle_ex_last` | 除最后一组外全 oracle，4 站点族内可比 |
+| `aggregate[v].exit_rel_rms_mean` | 每组出口的 `rel_rms_diff` 均值序列，长度 = group 数 |
+| `compensators[k].predict_ms_per_sample` | 该补偿器在评估中的实测耗时（含所有站点） |
+| `warning` | 固定写着「顺序执行，不宣称加速」 |
+
+### `results/stage1_7/<run>/fit_<tag>.json`
+
+| 字段 | 含义 |
+|---|---|
+| `n_params` / `hidden` / `rank` / `carry_state` / `per_site` | 结构 |
+| `site_weight` | `mse` 或 `normalized`；`site_weights` 是实际用的权重 |
+| `site_c_rms` | 每个站点目标的 RMS，解释为什么需要归一化（可差 17 倍） |
+| `final_train_mse` / `final_val_mse` | 注意：**不同架构的 MSE 不可比**（B1 与 Stage 1.6 的 MLP 不同尺度） |
+| `per_site_val.siteN.rel_err` / `.cosine` / `.pred_rms` / `.target_rms` | 逐站点预测质量，**这是判断预测器强弱的唯一依据** |
+
+### `results/stage1_7/table.json`
+
+由 `make_stage17_table.py` 汇总，是报告表格与图表的**唯一数据来源**。
+
+| 键 | 内容 |
+|---|---|
+| `rows[]` | 每行一个 (方法, 评估集)：`delta_nll`、`kl`、`top1`、`gap_closure`、`recovery_vs_oracle_ex_last`、`n_params`、`epochs`、`weights`（相对路径） |
+| `site_ablation[]` | 同一个 4 站点 r32 权重 + 不同 `--apply-sites` |
+| `final_site_pricing[]` | 最终 2 站点 B3 r64 权重的站点定价（4 / 5 / 4+5） |
+| `references{}` | 每个评估集的 no-comp / oracle / oracle_ex_last / serial 参考值 |
+| `bench{}` | `bench_serial_*.json` 的合并视图 |
+| `missing[]` | 缺文件或缺键的记录；**非空就必须查，不能忽略** |
+
+### `results/stage1_7/paired_stats.json`
+
+逐样本配对 bootstrap。`d = nll(A) − nll(B)`，**d > 0 表示 B 更好**（NLL 更低）。字段：`mean_diff`、`se`、`ci95`、`frac_positive`、`n_paired`、`significant_95`。
+
+配对必须按 `sample_id` 对齐，不能按行序——不同 run 的样本顺序没有保证。
+
+### `results/stage1_7/drift.json`
+
+前驱补偿对后续站点入口分布的影响：`entry_rms_r0/r1`、`entry_rel_token_shift`、`mean_vec_rel_change`、`cstar_rms_r0/r1`、`cstar_rel_change`。**这个文件是"必须重采样"的定量依据**，换站点集合就要重测。
+
+### 大张量
+
+`A.npy` / `C.npy`（`[n,S,T,D]`，float32，每个约 250 MB）与 `seq_pairs.npz` 只留在本地，`.gitignore` 已排除。提交的是 `serial_*.npz`（每个 270 KB–2 MB）与所有 JSON。
+

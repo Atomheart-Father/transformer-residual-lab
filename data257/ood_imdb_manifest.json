@@ -1,0 +1,21 @@
+{
+  "name": "ood_imdb",
+  "source": "imdb",
+  "purpose": "Stage 1.7 cross-corpus independent test (movie reviews, not Wikipedia): checks whether compensation transfers beyond WikiText-2",
+  "model_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
+  "dataset": "stanfordnlp/imdb",
+  "dataset_config": "plain_text",
+  "dataset_revision": "e6281661ce1c48d982bc483cf8a173c1bbeb5d31",
+  "split": "test",
+  "text_field": "text",
+  "seq_len": 257,
+  "n_windows": 64,
+  "n_corpus_tokens": 7292750,
+  "seed": 31337,
+  "excluded_files": [],
+  "n_excluded_offsets": 0,
+  "n_candidate_offsets": 28376,
+  "disjointness": "different corpus: overlap with the wikitext-2 windows is impossible by construction; offsets are still unique within this file",
+  "window_rule": "non-overlapping windows of seq_len tokens; offsets shuffled by seed; sorted by start",
+  "note": "Token ids stay local. Do not commit the sampled corpus."
+}

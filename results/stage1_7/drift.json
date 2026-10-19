@@ -1,0 +1,22 @@
+{
+  "g4": {
+    "entry_rms_r0": 13.403756141662598,
+    "entry_rms_r1": 13.403756141662598,
+    "entry_rel_token_shift": 0.0,
+    "mean_vec_rel_change": 0.0,
+    "std_dim_rel_change_mean": 0.0,
+    "cstar_rms_r0": 4.611719131469727,
+    "cstar_rms_r1": 4.611719131469727,
+    "cstar_rel_change": 0.0
+  },
+  "g5": {
+    "entry_rms_r0": 14.282891273498535,
+    "entry_rms_r1": 14.156281471252441,
+    "entry_rel_token_shift": 0.1840796172618866,
+    "mean_vec_rel_change": 0.4532279372215271,
+    "std_dim_rel_change_mean": 0.060271553695201874,
+    "cstar_rms_r0": 13.179288864135742,
+    "cstar_rms_r1": 11.405466079711914,
+    "cstar_rel_change": -0.1345916986465454
+  }
+}
