@@ -1,0 +1,19 @@
+{
+  "stage": "2.1 selection",
+  "split": "validation (data257/s21_val.jsonl, 32 windows, seed 20261025)",
+  "frozen_at_git": "1aefea3",
+  "rule": "rank by free-running delta_nll mean on s21_val with paired bootstrap vs serial; the chosen structure is the best at its depth, ties broken toward fewer missed updates",
+  "candidates_measured": {
+    "single-pair": {"window_depth": 7, "misses": 1, "delta_nll_mean": 0.043, "selected_point": "best quality point on the frontier"},
+    "greedy-depth6": {"window_depth": 6, "misses": 2, "delta_nll_mean": 0.0672},
+    "best-depth5-3miss": {"window_depth": 5, "misses": 3, "delta_nll_mean": 0.1082, "selected_point": "depth-5 frontier"},
+    "best-depth5-absolute": {"window_depth": 5, "misses": 5, "delta_nll_mean": 0.1149},
+    "g2": {"window_depth": 4, "misses": 4, "delta_nll_mean": 0.1786, "selected_point": "depth-4 frontier, the Stage 2.0 standard structure"},
+    "best-depth4-exhaustive": {"window_depth": 4, "misses": 5, "delta_nll_mean": 0.1864, "note": "best of 106 exhaustively measured depth-4 structures on cal (0.1758); the cal advantage did not survive validation (g2 - this = -0.0078, ci95 [-0.0175,+0.0028])"},
+    "mix3": {"window_depth": 3, "misses": 7, "delta_nll_mean": 0.312},
+    "g4": {"window_depth": 2, "misses": 12, "delta_nll_mean": 0.5235}
+  },
+  "selected_for_blind_test": ["serial", "single-pair", "greedy-depth6", "best-depth5-3miss", "g2"],
+  "conclusion": "the depth/quality frontier is monotone and shallow; no structure found in the exhaustive reachable space (754 candidates) improves on the Stage 2.0 regular families at matched depth on validation data",
+  "blind_split": "data257/s21_final.jsonl (64 windows, seed 20261026, never used by any search or selection step); runs exactly once, guarded by results/stage2_1/search_blind/ONESHOT"
+}

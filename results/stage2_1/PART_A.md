@@ -150,7 +150,9 @@ deeper windows slower). The bottlenecks, in order:
    ms/token). Every one of the 28 blocks' weights must be streamed every step
    regardless of the graph — parallelism cannot remove bytes. Measured
    decode pace is ~0.25 ms/block with ≈43 MB of BF16 weights per block
-   (inferred ≈170 GB/s against a ~270 GB/s class machine).
+   (31.5 MB of BF16 weights per block, measured from the pinned
+  checkpoint; 0.253 ms/block implies an inferred ~125 GB/s against a
+  ~270 GB/s class machine).
 2. **Whole-block overlap saturates at ~1.46×** (A2) for 8 independent blocks,
    reached already at k=4. The device is not idle (A7 ≈40% of peak), but the
    remaining capacity does not scale with more parallel blocks.

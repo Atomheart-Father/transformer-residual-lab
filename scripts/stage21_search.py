@@ -859,10 +859,15 @@ def mode_weights(model, mx, refs, out, probe_table, gammas, structures):
 
 
 def parse_specs(text: str, n: int) -> dict[str, Dag]:
-    """``name:spec,name:spec`` -> Dag objects (exact reproduction)."""
+    """``name:spec;name:spec`` -> Dag objects (exact reproduction).
+
+    Candidates are separated by ``;`` because a spec body already contains
+    commas inside its predecessor lists (``10,11,12|...``); only ``;`` splits
+    candidates, commas inside a body are preserved.
+    """
     from dag_exec import _expand
     out: dict[str, Dag] = {}
-    for chunk in text.split(","):
+    for chunk in text.split(";"):
         chunk = chunk.strip()
         if not chunk:
             continue

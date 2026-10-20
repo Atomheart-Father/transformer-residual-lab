@@ -1,0 +1,178 @@
+{
+  "variants": {
+    "best-depth5-3miss": {
+      "n": 64,
+      "delta_nll_mean": 0.11954061686992645,
+      "delta_nll_median": 0.11834859848022461,
+      "delta_nll_p90": 0.16930623054504396,
+      "kl_mean": 0.1184633836383,
+      "top1_mean": 0.814697265625,
+      "critical_path": 25,
+      "window_depth": 5,
+      "window_levels": 5,
+      "window_level_sizes": [
+        1,
+        1,
+        2,
+        2,
+        2
+      ],
+      "missed_updates_in_window": 3,
+      "merge_points": 3,
+      "n_edges": 375,
+      "vs_serial": {
+        "mean_diff": 0.11954061686992645,
+        "ci95": [
+          0.11103039318695665,
+          0.12827784018591046
+        ]
+      },
+      "vs_g2": {
+        "mean_diff": -0.06972773373126984,
+        "ci95": [
+          -0.07701697666198015,
+          -0.06260276781395079
+        ]
+      }
+    },
+    "g2": {
+      "n": 64,
+      "delta_nll_mean": 0.1892683506011963,
+      "delta_nll_median": 0.1925591230392456,
+      "delta_nll_p90": 0.25026276111602785,
+      "kl_mean": 0.1926434829365462,
+      "top1_mean": 0.76416015625,
+      "critical_path": 24,
+      "window_depth": 4,
+      "window_levels": 4,
+      "window_level_sizes": [
+        2,
+        2,
+        2,
+        2
+      ],
+      "missed_updates_in_window": 4,
+      "merge_points": 4,
+      "n_edges": 374,
+      "vs_serial": {
+        "mean_diff": 0.1892683506011963,
+        "ci95": [
+          0.17762917131185532,
+          0.2006277491338551
+        ]
+      }
+    },
+    "greedy-depth6": {
+      "n": 64,
+      "delta_nll_mean": 0.07516194880008698,
+      "delta_nll_median": 0.07543337345123291,
+      "delta_nll_p90": 0.11399900913238527,
+      "kl_mean": 0.07344280881807208,
+      "top1_mean": 0.85693359375,
+      "critical_path": 26,
+      "window_depth": 6,
+      "window_levels": 6,
+      "window_level_sizes": [
+        1,
+        1,
+        1,
+        2,
+        2,
+        1
+      ],
+      "missed_updates_in_window": 2,
+      "merge_points": 2,
+      "n_edges": 376,
+      "vs_serial": {
+        "mean_diff": 0.07516194880008698,
+        "ci95": [
+          0.06819433532655239,
+          0.08203304512426257
+        ]
+      },
+      "vs_g2": {
+        "mean_diff": -0.11410640180110931,
+        "ci95": [
+          -0.1259082978591323,
+          -0.10227280100807548
+        ]
+      }
+    },
+    "serial": {
+      "n": 64,
+      "delta_nll_mean": 0.0,
+      "delta_nll_median": 0.0,
+      "delta_nll_p90": 0.0,
+      "kl_mean": 0.0,
+      "top1_mean": 1.0,
+      "critical_path": 28,
+      "window_depth": 8,
+      "window_levels": 8,
+      "window_level_sizes": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "missed_updates_in_window": 0,
+      "merge_points": 0,
+      "n_edges": 378,
+      "vs_serial": null,
+      "vs_g2": {
+        "mean_diff": -0.1892683506011963,
+        "ci95": [
+          -0.20074130203574897,
+          -0.17781207766383886
+        ]
+      }
+    },
+    "single-pair": {
+      "n": 64,
+      "delta_nll_mean": 0.04218611121177673,
+      "delta_nll_median": 0.03942430019378662,
+      "delta_nll_p90": 0.0756462574005127,
+      "kl_mean": 0.04983888322021812,
+      "top1_mean": 0.87603759765625,
+      "critical_path": 27,
+      "window_depth": 7,
+      "window_levels": 7,
+      "window_level_sizes": [
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "missed_updates_in_window": 1,
+      "merge_points": 1,
+      "n_edges": 377,
+      "vs_serial": {
+        "mean_diff": 0.04218611121177673,
+        "ci95": [
+          0.03638305142521858,
+          0.048139294236898396
+        ]
+      },
+      "vs_g2": {
+        "mean_diff": -0.14708223938941956,
+        "ci95": [
+          -0.1561759604141116,
+          -0.13805845230817795
+        ]
+      }
+    }
+  },
+  "role": "final blind test",
+  "ranking": [
+    "single-pair",
+    "greedy-depth6",
+    "best-depth5-3miss",
+    "g2"
+  ]
+}
