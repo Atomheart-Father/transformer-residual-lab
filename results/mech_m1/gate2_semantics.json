@@ -1,0 +1,289 @@
+{
+  "b_persist_two_impls": {
+    "rows": [
+      {
+        "sample_id": "wikitext2:test:5911",
+        "edge": "P1",
+        "readout_impl": 1.3810267448425293,
+        "plain_impl": 1.3810267448425293,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:5911",
+        "edge": "P2",
+        "readout_impl": 0.008533477783203125,
+        "plain_impl": 0.008533477783203125,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:5911",
+        "edge": "C1",
+        "readout_impl": 0.01644754409790039,
+        "plain_impl": 0.01644754409790039,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:5911",
+        "edge": "C2",
+        "readout_impl": 0.032532691955566406,
+        "plain_impl": 0.032532691955566406,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:6425",
+        "edge": "P1",
+        "readout_impl": 1.6302733421325684,
+        "plain_impl": 1.6302733421325684,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:6425",
+        "edge": "P2",
+        "readout_impl": 0.003918170928955078,
+        "plain_impl": 0.003918170928955078,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:6425",
+        "edge": "C1",
+        "readout_impl": 0.06142878532409668,
+        "plain_impl": 0.06142878532409668,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:6425",
+        "edge": "C2",
+        "readout_impl": 0.05400371551513672,
+        "plain_impl": 0.05400371551513672,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:10537",
+        "edge": "P1",
+        "readout_impl": 1.4711408615112305,
+        "plain_impl": 1.4711408615112305,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:10537",
+        "edge": "P2",
+        "readout_impl": -0.01458120346069336,
+        "plain_impl": -0.01458120346069336,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:10537",
+        "edge": "C1",
+        "readout_impl": 0.025848865509033203,
+        "plain_impl": 0.025848865509033203,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:10537",
+        "edge": "C2",
+        "readout_impl": 0.15191125869750977,
+        "plain_impl": 0.15191125869750977,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:36237",
+        "edge": "P1",
+        "readout_impl": 1.610734224319458,
+        "plain_impl": 1.610734224319458,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:36237",
+        "edge": "P2",
+        "readout_impl": 0.011432647705078125,
+        "plain_impl": 0.011432647705078125,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:36237",
+        "edge": "C1",
+        "readout_impl": -0.005625009536743164,
+        "plain_impl": -0.005625009536743164,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:36237",
+        "edge": "C2",
+        "readout_impl": 0.08578658103942871,
+        "plain_impl": 0.08578658103942871,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:46003",
+        "edge": "P1",
+        "readout_impl": 1.3732423782348633,
+        "plain_impl": 1.3732423782348633,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:46003",
+        "edge": "P2",
+        "readout_impl": -0.0016241073608398438,
+        "plain_impl": -0.0016241073608398438,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:46003",
+        "edge": "C1",
+        "readout_impl": 0.031159400939941406,
+        "plain_impl": 0.031159400939941406,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:46003",
+        "edge": "C2",
+        "readout_impl": 0.10584497451782227,
+        "plain_impl": 0.10584497451782227,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:46260",
+        "edge": "P1",
+        "readout_impl": 1.173738956451416,
+        "plain_impl": 1.173738956451416,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:46260",
+        "edge": "P2",
+        "readout_impl": 0.009836912155151367,
+        "plain_impl": 0.009836912155151367,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:46260",
+        "edge": "C1",
+        "readout_impl": 0.046713829040527344,
+        "plain_impl": 0.046713829040527344,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:46260",
+        "edge": "C2",
+        "readout_impl": 0.0353703498840332,
+        "plain_impl": 0.0353703498840332,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:55512",
+        "edge": "P1",
+        "readout_impl": 1.8373620510101318,
+        "plain_impl": 1.8373620510101318,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:55512",
+        "edge": "P2",
+        "readout_impl": -0.008695840835571289,
+        "plain_impl": -0.008695840835571289,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:55512",
+        "edge": "C1",
+        "readout_impl": 0.02149653434753418,
+        "plain_impl": 0.02149653434753418,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:55512",
+        "edge": "C2",
+        "readout_impl": 0.06367921829223633,
+        "plain_impl": 0.06367921829223633,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:58082",
+        "edge": "P1",
+        "readout_impl": 1.5011284351348877,
+        "plain_impl": 1.5011284351348877,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:58082",
+        "edge": "P2",
+        "readout_impl": 0.0006153583526611328,
+        "plain_impl": 0.0006153583526611328,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:58082",
+        "edge": "C1",
+        "readout_impl": 0.004142045974731445,
+        "plain_impl": 0.004142045974731445,
+        "abs_diff": 0.0
+      },
+      {
+        "sample_id": "wikitext2:test:58082",
+        "edge": "C2",
+        "readout_impl": 0.09305405616760254,
+        "plain_impl": 0.09305405616760254,
+        "abs_diff": 0.0
+      }
+    ],
+    "max_abs_diff": 0.0,
+    "passed": true
+  },
+  "c_stage2_ordering": {
+    "rows": [],
+    "passed": true,
+    "means": {
+      "P1": 0.05580127239227295,
+      "P2": -0.0013788938522338867,
+      "C1": 0.001577615737915039,
+      "C2": 0.032258421182632446
+    },
+    "recorded_stage21_means": {
+      "P1": 0.06985031813383102,
+      "P2": 0.0007196366786956787,
+      "C1": 0.004716686904430389,
+      "C2": 0.041186876595020294
+    },
+    "ordering_P1_gt_C2_gt_C1_gt_P2": true
+  },
+  "d_dag_vs_measure_batch": {
+    "rows": [
+      {
+        "variant": "serial",
+        "measure_batch_mean": 0.0
+      },
+      {
+        "variant": "P1",
+        "measure_batch_mean": 0.05580127239227295
+      },
+      {
+        "variant": "P2",
+        "measure_batch_mean": -0.0013788938522338867
+      },
+      {
+        "variant": "C1",
+        "measure_batch_mean": 0.001577615737915039
+      },
+      {
+        "variant": "C2",
+        "measure_batch_mean": 0.032258421182632446
+      }
+    ],
+    "max_abs_diff": 0.0,
+    "passed": true
+  },
+  "passed": true,
+  "a_stage2_replication": {
+    "passed": true,
+    "measured": {
+      "serial": 0.0,
+      "d15_2": 0.06985031813383102,
+      "d16_1": 0.0007196366786956787
+    },
+    "recorded": {
+      "serial": 0.0,
+      "d15_2": 0.06985031813383102,
+      "d16_1": 0.0007196366786956787
+    }
+  }
+}

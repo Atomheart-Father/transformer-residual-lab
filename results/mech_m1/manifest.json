@@ -1,0 +1,77 @@
+{
+  "status": "DONE",
+  "purpose": "M1 submodule-level trace of a missing real upstream residual update",
+  "model": "mlx-community/Qwen3-0.6B-Base-bf16",
+  "model_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
+  "mlx_lm": "0.31.3",
+  "python": "3.12.12",
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "git_sha": "53565b2ad5c1ff838356f91c2763932c8e4f055d",
+  "split": "data257/s21_cal.jsonl",
+  "n_samples": 8,
+  "sample_ids": [
+    "wikitext2:test:5911",
+    "wikitext2:test:6425",
+    "wikitext2:test:10537",
+    "wikitext2:test:36237",
+    "wikitext2:test:46003",
+    "wikitext2:test:46260",
+    "wikitext2:test:55512",
+    "wikitext2:test:58082"
+  ],
+  "edges": [
+    {
+      "id": "P1",
+      "reader": 15,
+      "contributor": 2,
+      "stage21_delta_nll": 0.06985031813383102
+    },
+    {
+      "id": "P2",
+      "reader": 16,
+      "contributor": 1,
+      "stage21_delta_nll": 0.0007196366786956787
+    },
+    {
+      "id": "C1",
+      "reader": 15,
+      "contributor": 4,
+      "stage21_delta_nll": 0.004716686904430389
+    },
+    {
+      "id": "C2",
+      "reader": 16,
+      "contributor": 15,
+      "stage21_delta_nll": 0.041186876595020294
+    }
+  ],
+  "conditions": [
+    "real",
+    "matched_radial",
+    "matched_tan",
+    "matched_rand",
+    "small_radial",
+    "small_tan",
+    "small_rand"
+  ],
+  "readouts": [
+    "ln1",
+    "r_attn",
+    "h",
+    "ln2",
+    "r_mlp",
+    "out",
+    "delta_new"
+  ],
+  "eta_small": 0.01,
+  "seed": 20261020,
+  "rel_denom_floor": 0.001,
+  "bf16_ulp_rel": 0.00390625,
+  "perturbation_axis": "per-token, whole sequence",
+  "semantics_primary": "S-PERSIST (removed update never returns)",
+  "semantics_contrast": "S-STAGE2 (scripts/dag_exec.py materialized)",
+  "n_layers": 28,
+  "gate1_passed": true,
+  "gate2_passed": true,
+  "elapsed_s": 40.9
+}

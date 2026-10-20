@@ -1,0 +1,30 @@
+{
+  "rule": "P1=global max cost; P2=global min cost; C1=min cost among reader==P1.reader; C2=max cost among reader==P2.reader",
+  "source": "results/stage2_1/search_single/search.json",
+  "selected": [
+    {
+      "id": "P1",
+      "reader": 15,
+      "contributor": 2,
+      "stage21_delta_nll": 0.06985031813383102
+    },
+    {
+      "id": "P2",
+      "reader": 16,
+      "contributor": 1,
+      "stage21_delta_nll": 0.0007196366786956787
+    },
+    {
+      "id": "C1",
+      "reader": 15,
+      "contributor": 4,
+      "stage21_delta_nll": 0.004716686904430389
+    },
+    {
+      "id": "C2",
+      "reader": 16,
+      "contributor": 15,
+      "stage21_delta_nll": 0.041186876595020294
+    }
+  ]
+}

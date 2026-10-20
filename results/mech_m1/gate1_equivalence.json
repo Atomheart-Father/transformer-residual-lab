@@ -1,0 +1,20 @@
+{
+  "checks": [
+    {
+      "layer": 0,
+      "max_abs_diff": 0.0
+    },
+    {
+      "layer": 14,
+      "max_abs_diff": 0.0
+    },
+    {
+      "layer": 27,
+      "max_abs_diff": 0.0
+    },
+    {
+      "chain_x_next_eq_out": 0.0
+    }
+  ],
+  "passed": true
+}
