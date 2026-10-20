@@ -73,7 +73,11 @@ def main() -> None:
     ap.add_argument("--input", type=Path, default=Path("data257/s20_cal.jsonl"))
     ap.add_argument("--max-samples", type=int, default=12)
     ap.add_argument("--output", type=Path, default=Path("results/stage2_0/probe"))
+    ap.add_argument("--distances", default="1,2,3,4,6",
+                    help="upstream distances d probed as drop1_b{i}_m{i-d}; "
+                         "Stage 2.1 completes the scan with 5,7,8,10,12")
     args = ap.parse_args()
+    distances = tuple(int(x) for x in args.distances.split(",") if x.strip())
 
     import mlx.core as mx
     from mlx_lm import load
@@ -92,7 +96,7 @@ def main() -> None:
 
     add("full", lambda: full_window(n))
     for i in range(LO, HI):
-        for d in (1, 2, 3, 4, 6):
+        for d in distances:
             j = i - d
             if j < 0:
                 continue
@@ -241,7 +245,7 @@ def main() -> None:
 
     edge_table = {m: {} for m in MODES}
     for i in range(LO, HI):
-        for d in (1, 2, 3, 4, 6):
+        for d in distances:
             j = i - d
             if j < 0:
                 continue

@@ -1,0 +1,17 @@
+{
+  "status": "MEASURED",
+  "stage": "2.1 Part A (block-parallelism wall-clock, M4 Pro)",
+  "model": "mlx-community/Qwen3-0.6B-Base-bf16",
+  "model_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
+  "n_layers": 28,
+  "n_tokens": 257,
+  "mlx_version": "0.31.2",
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "has_synchronize": true,
+  "git_commit": "6a5e6ea0ce12976a402f4c9def18904363ed1a61",
+  "parts": [
+    "a1",
+    "a2"
+  ],
+  "note": "interleaved round-robin timing; no speedup is claimed from graph depth alone - only measured wall clock is reported"
+}

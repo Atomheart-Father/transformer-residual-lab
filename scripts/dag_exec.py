@@ -296,11 +296,20 @@ def load_dag(path: Path) -> Dag:
 # It reproduces the production ``group_forward`` g2 bit-for-bit.
 
 
-def _merge(h0, deltas: dict, idxs, mx):
-    """fp32 accumulation of selected residual updates, ascending index."""
+def _merge(h0, deltas: dict, idxs, mx, weights: Optional[dict] = None):
+    """fp32 accumulation of selected residual updates, ascending index.
+
+    ``weights={j: w_j}`` scales update ``j``. It is only honoured in
+    ``merge_mode="roadmap"`` inputs (never in the final output merge), where the
+    input of a block is literally ``h0 + sum_j w_j * delta_j``; with all
+    ``w_j == 1`` this is bit-identical to the unweighted rule, which the
+    stage-2.1 unit test asserts.
+    """
     acc = h0.astype(mx.float32)
     for j in idxs:
-        acc = acc + deltas[j].astype(mx.float32)
+        w = 1.0 if weights is None else weights.get(j, 1.0)
+        acc = acc + (deltas[j].astype(mx.float32) if w == 1.0
+                     else (deltas[j] * w).astype(mx.float32))
     return acc
 
 
@@ -310,7 +319,8 @@ def dag_forward(model, h0, dag: Dag, mask, mx, *,
                 record: bool = False, eval_each: bool = False,
                 sync_levels: bool = False, chain_mode: str = "auto",
                 refine: bool = True, merge_mode: str = "materialized",
-                caches: Optional[dict] = None):
+                caches: Optional[dict] = None,
+                weights: Optional[dict] = None):
     """Execute ``dag`` on the frozen blocks.
 
     ``delta_override[j]`` replaces the computed residual update of block j: used
@@ -343,6 +353,12 @@ def dag_forward(model, h0, dag: Dag, mask, mx, *,
     own per-layer KV cache instead of attending to a full masked sequence. The
     merge rule is unchanged - a DAG only recombines hidden-state inputs, so the
     per-layer caches are independent of the graph.
+
+    ``weights={j: w_j}`` is the training-free merge-semantics axis: it scales
+    the residual update of block ``j`` when constructing an input, and is only
+    honoured in ``merge_mode="roadmap"`` (where an input is literally
+    ``h0 + sum_j w_j delta_j``) and only for inputs, never for the final output
+    merge. All weights equal to 1 reproduces the unweighted rule exactly.
 
     Returns ``h_final``, or ``(h_final, records)`` when ``record=True``.
     """
@@ -389,7 +405,7 @@ def dag_forward(model, h0, dag: Dag, mask, mx, *,
                 x = over_x[i]
                 contains[i] = frozenset(range(i))   # oracle input: true prefix
             elif merge_mode == "roadmap":
-                x = _merge(h0, deltas, sorted(P), mx).astype(h0.dtype)
+                x = _merge(h0, deltas, sorted(P), mx, weights).astype(h0.dtype)
                 contains[i] = P
             else:
                 new = P - covered

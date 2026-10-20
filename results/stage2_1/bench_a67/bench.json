@@ -1,0 +1,111 @@
+{
+  "a6_decode_batch1": {
+    "note": "per-step wall clock with a 257-token KV cache; correctness checked per variant before any timing was trusted",
+    "correctness": {
+      "serial": {
+        "max_abs_diff": 3.0,
+        "critical_path": 28,
+        "passed": true
+      },
+      "win10-17-g2": {
+        "max_abs_diff": 24.0,
+        "critical_path": 24,
+        "passed": false
+      },
+      "win10-17-g4": {
+        "max_abs_diff": 54.0,
+        "critical_path": 22,
+        "passed": false
+      }
+    },
+    "per_variant": {
+      "serial-lazy": {
+        "median_ms": 7.074353998177685,
+        "p10_ms": 6.538540998008102,
+        "p90_ms": 8.87829199200496,
+        "n": 40,
+        "critical_path": 28
+      },
+      "serial-eager": {
+        "median_ms": 14.39641701290384,
+        "p10_ms": 12.377583014313132,
+        "p90_ms": 47.4624169874005,
+        "n": 40,
+        "critical_path": 28
+      },
+      "win10-17-g2-lazy": {
+        "median_ms": 6.81250001071021,
+        "p10_ms": 6.479291012510657,
+        "p90_ms": 7.452959020156413,
+        "n": 40,
+        "critical_path": 24
+      },
+      "win10-17-g2-eager": {
+        "median_ms": 23.1341875041835,
+        "p10_ms": 15.279457991709933,
+        "p90_ms": 56.23229101183824,
+        "n": 40,
+        "critical_path": 24
+      },
+      "win10-17-g4-lazy": {
+        "median_ms": 7.918750503449701,
+        "p10_ms": 6.948334019398317,
+        "p90_ms": 10.02899999730289,
+        "n": 40,
+        "critical_path": 22
+      },
+      "win10-17-g4-eager": {
+        "median_ms": 14.360646004206501,
+        "p10_ms": 13.402374985162169,
+        "p90_ms": 17.4973749963101,
+        "n": 40,
+        "critical_path": 22
+      },
+      "serial-compiled": {
+        "median_ms": 7.150728997658007,
+        "p10_ms": 6.595874991035089,
+        "p90_ms": 7.792541990056634,
+        "n": 40,
+        "critical_path": 28
+      }
+    },
+    "compiled_decode": "serial compiled decode with a persistent KVCache worked"
+  },
+  "a7_achieved_tflops_257tok": {
+    "note": "matmul FLOPs only (projections, MLP, attention scores); softmax / norms / rope excluded, so these are upper bounds on achieved throughput",
+    "per_block": {
+      "block0": {
+        "median_ms": 2.462249991367571,
+        "p10_ms": 2.3025000118650496,
+        "p90_ms": 2.707959007238969,
+        "n": 12,
+        "approx_tflops": 3.3932613232986446,
+        "approx_mflops_per_token": 32.509952
+      },
+      "block10": {
+        "median_ms": 2.3965420114109293,
+        "p10_ms": 2.3286670038942248,
+        "p90_ms": 2.617958001792431,
+        "n": 12,
+        "approx_tflops": 3.4862971832824585,
+        "approx_mflops_per_token": 32.509952
+      },
+      "block20": {
+        "median_ms": 2.4133335100486875,
+        "p10_ms": 2.312459022505209,
+        "p90_ms": 2.683291007997468,
+        "n": 12,
+        "approx_tflops": 3.4620402150017973,
+        "approx_mflops_per_token": 32.509952
+      },
+      "block27": {
+        "median_ms": 2.4813750060275197,
+        "p10_ms": 2.3360420018434525,
+        "p90_ms": 2.6739579916466027,
+        "n": 12,
+        "approx_tflops": 3.3671080121725616,
+        "approx_mflops_per_token": 32.509952
+      }
+    }
+  }
+}

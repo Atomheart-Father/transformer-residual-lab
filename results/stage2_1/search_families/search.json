@@ -1,0 +1,197 @@
+{
+  "variants": {
+    "g2": {
+      "n": 12,
+      "delta_nll_mean": 0.1859401067097982,
+      "delta_nll_median": 0.17452776432037354,
+      "delta_nll_p90": 0.26466419696807864,
+      "kl_mean": 0.1885328690210978,
+      "top1_mean": 0.7669270833333334,
+      "critical_path": 24,
+      "window_depth": 4,
+      "window_level_sizes": [
+        2,
+        2,
+        2,
+        2
+      ],
+      "missed_updates_in_window": 4,
+      "merge_points": 4,
+      "n_edges": 374,
+      "vs_serial": {
+        "mean_diff": 0.1859401067097982,
+        "ci95": [
+          0.16098081370194753,
+          0.21367784639199572
+        ]
+      }
+    },
+    "g4": {
+      "n": 12,
+      "delta_nll_mean": 0.5862359404563904,
+      "delta_nll_median": 0.5747171640396118,
+      "delta_nll_p90": 0.6893553972244263,
+      "kl_mean": 0.5645906577507654,
+      "top1_mean": 0.6126302083333334,
+      "critical_path": 22,
+      "window_depth": 2,
+      "window_level_sizes": [
+        4,
+        4
+      ],
+      "missed_updates_in_window": 12,
+      "merge_points": 6,
+      "n_edges": 366,
+      "vs_serial": {
+        "mean_diff": 0.5862359404563904,
+        "ci95": [
+          0.549603705604871,
+          0.6253297155102093
+        ]
+      },
+      "vs_g2": {
+        "mean_diff": 0.4002958337465922,
+        "ci95": [
+          0.3592263787984848,
+          0.4421878531575203
+        ]
+      }
+    },
+    "mix3": {
+      "n": 12,
+      "delta_nll_mean": 0.3462563355763753,
+      "delta_nll_median": 0.34129798412323,
+      "delta_nll_p90": 0.4080796480178833,
+      "kl_mean": 0.3497333725293477,
+      "top1_mean": 0.6940104166666666,
+      "critical_path": 23,
+      "window_depth": 3,
+      "window_level_sizes": [
+        3,
+        3,
+        2
+      ],
+      "missed_updates_in_window": 7,
+      "merge_points": 5,
+      "n_edges": 371,
+      "vs_serial": {
+        "mean_diff": 0.3462563355763753,
+        "ci95": [
+          0.3200694158673286,
+          0.3746690804759661
+        ]
+      },
+      "vs_g2": {
+        "mean_diff": 0.16031622886657715,
+        "ci95": [
+          0.1392445902029673,
+          0.1818236500024795
+        ]
+      }
+    },
+    "pair-first": {
+      "n": 12,
+      "delta_nll_mean": 0.03152314821879069,
+      "delta_nll_median": 0.02890181541442871,
+      "delta_nll_p90": 0.05477764606475831,
+      "kl_mean": 0.046638955983022846,
+      "top1_mean": 0.8785807291666666,
+      "critical_path": 27,
+      "window_depth": 7,
+      "window_level_sizes": [
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "missed_updates_in_window": 1,
+      "merge_points": 1,
+      "n_edges": 377,
+      "vs_serial": {
+        "mean_diff": 0.03152314821879069,
+        "ci95": [
+          0.024532701075077056,
+          0.039476179083188366
+        ]
+      },
+      "vs_g2": {
+        "mean_diff": -0.15441695849100748,
+        "ci95": [
+          -0.1799581671754519,
+          -0.13117221494515738
+        ]
+      }
+    },
+    "pair-last": {
+      "n": 12,
+      "delta_nll_mean": 0.05231712261835734,
+      "delta_nll_median": 0.0557025671005249,
+      "delta_nll_p90": 0.06906738281250001,
+      "kl_mean": 0.04355212145795425,
+      "top1_mean": 0.888671875,
+      "critical_path": 27,
+      "window_depth": 7,
+      "window_level_sizes": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2
+      ],
+      "missed_updates_in_window": 1,
+      "merge_points": 1,
+      "n_edges": 377,
+      "vs_serial": {
+        "mean_diff": 0.05231712261835734,
+        "ci95": [
+          0.040381776293118794,
+          0.06226307700077692
+        ]
+      },
+      "vs_g2": {
+        "mean_diff": -0.13362298409144083,
+        "ci95": [
+          -0.1603142261505127,
+          -0.11117704610029858
+        ]
+      }
+    },
+    "serial": {
+      "n": 12,
+      "delta_nll_mean": 0.0,
+      "delta_nll_median": 0.0,
+      "delta_nll_p90": 0.0,
+      "kl_mean": 0.0,
+      "top1_mean": 1.0,
+      "critical_path": 28,
+      "window_depth": 8,
+      "window_level_sizes": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "missed_updates_in_window": 0,
+      "merge_points": 0,
+      "n_edges": 378,
+      "vs_serial": null,
+      "vs_g2": {
+        "mean_diff": -0.1859401067097982,
+        "ci95": [
+          -0.21381507565577826,
+          -0.16089417537053427
+        ]
+      }
+    }
+  },
+  "role": "calibration"
+}

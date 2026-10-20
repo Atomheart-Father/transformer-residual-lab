@@ -1,0 +1,502 @@
+{
+  "role": "calibration",
+  "merge_mode": "materialized",
+  "history": [
+    {
+      "generation": 0,
+      "drops": [],
+      "structure": {
+        "critical_path": 28,
+        "window_depth": 8,
+        "window_levels": 8,
+        "window_level_sizes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "missed_updates_in_window": 0,
+        "merge_points": 0,
+        "n_edges": 378
+      },
+      "measured": {
+        "serial": {
+          "delta_nll_mean": 0.0,
+          "ci95_vs_cur": null
+        },
+        "m11_10": {
+          "delta_nll_mean": 0.03751879930496216,
+          "ci95_vs_cur": [
+            0.028035170026123525,
+            0.04641412533819672
+          ]
+        },
+        "m12_11": {
+          "delta_nll_mean": 0.04892244189977646,
+          "ci95_vs_cur": [
+            0.040099149383604524,
+            0.05792843587696552
+          ]
+        },
+        "m13_12": {
+          "delta_nll_mean": 0.027594394981861115,
+          "ci95_vs_cur": [
+            0.021189274080097676,
+            0.033863912336528294
+          ]
+        },
+        "m14_13": {
+          "delta_nll_mean": 0.019105151295661926,
+          "ci95_vs_cur": [
+            0.012448950298130512,
+            0.02592326067388057
+          ]
+        },
+        "m15_14": {
+          "delta_nll_mean": 0.027424462139606476,
+          "ci95_vs_cur": [
+            0.02247345894575119,
+            0.03267417550086975
+          ]
+        },
+        "m16_15": {
+          "delta_nll_mean": 0.041186876595020294,
+          "ci95_vs_cur": [
+            0.03528378754854202,
+            0.04697316512465477
+          ]
+        },
+        "m17_16": {
+          "delta_nll_mean": 0.05029924213886261,
+          "ci95_vs_cur": [
+            0.04309179726988077,
+            0.05741224233061072
+          ]
+        }
+      },
+      "current_dnll": 0.0,
+      "chosen_move": "m14_13"
+    },
+    {
+      "generation": 1,
+      "drops": [
+        [
+          14,
+          13
+        ]
+      ],
+      "structure": {
+        "critical_path": 27,
+        "window_depth": 7,
+        "window_levels": 7,
+        "window_level_sizes": [
+          1,
+          1,
+          1,
+          2,
+          1,
+          1,
+          1
+        ],
+        "missed_updates_in_window": 1,
+        "merge_points": 1,
+        "n_edges": 377
+      },
+      "measured": {
+        "g14-13": {
+          "delta_nll_mean": 0.019105151295661926,
+          "ci95_vs_cur": null
+        },
+        "m11_10": {
+          "delta_nll_mean": 0.0763460025191307,
+          "ci95_vs_cur": [
+            0.04674428515136242,
+            0.06849001739174125
+          ]
+        },
+        "m12_11": {
+          "delta_nll_mean": 0.08326508849859238,
+          "ci95_vs_cur": [
+            0.05244290996342897,
+            0.07551954500377175
+          ]
+        },
+        "m16_15": {
+          "delta_nll_mean": 0.06607281416654587,
+          "ci95_vs_cur": [
+            0.03901401665061712,
+            0.0549741519615054
+          ]
+        },
+        "m17_16": {
+          "delta_nll_mean": 0.0750756561756134,
+          "ci95_vs_cur": [
+            0.047093780152499674,
+            0.06449527833610771
+          ]
+        }
+      },
+      "current_dnll": 0.019105151295661926,
+      "chosen_move": "m16_15"
+    },
+    {
+      "generation": 2,
+      "drops": [
+        [
+          14,
+          13
+        ],
+        [
+          16,
+          15
+        ]
+      ],
+      "structure": {
+        "critical_path": 26,
+        "window_depth": 6,
+        "window_levels": 6,
+        "window_level_sizes": [
+          1,
+          1,
+          1,
+          2,
+          2,
+          1
+        ],
+        "missed_updates_in_window": 2,
+        "merge_points": 2,
+        "n_edges": 376
+      },
+      "measured": {
+        "g14-13_16-15": {
+          "delta_nll_mean": 0.06607281416654587,
+          "ci95_vs_cur": null
+        },
+        "m11_10": {
+          "delta_nll_mean": 0.12640491873025894,
+          "ci95_vs_cur": [
+            0.04856363385915756,
+            0.07172129303216934
+          ]
+        },
+        "m12_11": {
+          "delta_nll_mean": 0.13831277936697006,
+          "ci95_vs_cur": [
+            0.0611752575263381,
+            0.08291988130658863
+          ]
+        }
+      },
+      "current_dnll": 0.06607281416654587,
+      "chosen_move": "m11_10"
+    },
+    {
+      "generation": 3,
+      "drops": [
+        [
+          14,
+          13
+        ],
+        [
+          16,
+          15
+        ],
+        [
+          11,
+          10
+        ]
+      ],
+      "structure": {
+        "critical_path": 25,
+        "window_depth": 5,
+        "window_levels": 5,
+        "window_level_sizes": [
+          2,
+          1,
+          2,
+          2,
+          1
+        ],
+        "missed_updates_in_window": 3,
+        "merge_points": 3,
+        "n_edges": 375
+      },
+      "note": "search ended: no move reduces window depth"
+    }
+  ],
+  "final_drops": [
+    [
+      14,
+      13
+    ],
+    [
+      16,
+      15
+    ],
+    [
+      11,
+      10
+    ]
+  ],
+  "note": "each generation must reduce the window depth by >=1; the chosen move minimises free-running dNLL on cal.",
+  "all_candidates": {
+    "g14-13": {
+      "n": 32,
+      "delta_nll_mean": 0.019105151295661926,
+      "critical_path": 27,
+      "window_depth": 7,
+      "window_levels": 7,
+      "window_level_sizes": [
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1
+      ],
+      "missed_updates_in_window": 1,
+      "merge_points": 1,
+      "n_edges": 377,
+      "vs_serial": {
+        "mean_diff": 0.019105151295661926,
+        "ci95": [
+          0.012324816733598708,
+          0.02585665155202149
+        ]
+      }
+    },
+    "g14-13_16-15": {
+      "n": 32,
+      "delta_nll_mean": 0.06607281416654587,
+      "critical_path": 26,
+      "window_depth": 6,
+      "window_levels": 6,
+      "window_level_sizes": [
+        1,
+        1,
+        1,
+        2,
+        2,
+        1
+      ],
+      "missed_updates_in_window": 2,
+      "merge_points": 2,
+      "n_edges": 376,
+      "vs_serial": {
+        "mean_diff": 0.06607281416654587,
+        "ci95": [
+          0.05658318772912026,
+          0.07580627035349606
+        ]
+      }
+    },
+    "m11_10": {
+      "n": 96,
+      "delta_nll_mean": 0.0800899068514506,
+      "critical_path": 25,
+      "window_depth": 5,
+      "window_levels": 5,
+      "window_level_sizes": [
+        2,
+        1,
+        2,
+        2,
+        1
+      ],
+      "missed_updates_in_window": 3,
+      "merge_points": 3,
+      "n_edges": 375,
+      "vs_serial": {
+        "mean_diff": 0.0800899068514506,
+        "ci95": [
+          0.07019746024161577,
+          0.08997209140410026
+        ]
+      }
+    },
+    "m12_11": {
+      "n": 96,
+      "delta_nll_mean": 0.09016676992177963,
+      "critical_path": 25,
+      "window_depth": 5,
+      "window_levels": 5,
+      "window_level_sizes": [
+        1,
+        2,
+        2,
+        2,
+        1
+      ],
+      "missed_updates_in_window": 3,
+      "merge_points": 3,
+      "n_edges": 375,
+      "vs_serial": {
+        "mean_diff": 0.09016676992177963,
+        "ci95": [
+          0.07991317318131526,
+          0.1005510486041506
+        ]
+      }
+    },
+    "m13_12": {
+      "n": 32,
+      "delta_nll_mean": 0.027594394981861115,
+      "critical_path": 27,
+      "window_depth": 7,
+      "window_levels": 7,
+      "window_level_sizes": [
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1
+      ],
+      "missed_updates_in_window": 1,
+      "merge_points": 1,
+      "n_edges": 377,
+      "vs_serial": {
+        "mean_diff": 0.027594394981861115,
+        "ci95": [
+          0.021062404662370682,
+          0.03388337697833776
+        ]
+      }
+    },
+    "m14_13": {
+      "n": 32,
+      "delta_nll_mean": 0.019105151295661926,
+      "critical_path": 27,
+      "window_depth": 7,
+      "window_levels": 7,
+      "window_level_sizes": [
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1
+      ],
+      "missed_updates_in_window": 1,
+      "merge_points": 1,
+      "n_edges": 377,
+      "vs_serial": {
+        "mean_diff": 0.019105151295661926,
+        "ci95": [
+          0.012324816733598708,
+          0.02585665155202149
+        ]
+      }
+    },
+    "m15_14": {
+      "n": 32,
+      "delta_nll_mean": 0.027424462139606476,
+      "critical_path": 27,
+      "window_depth": 7,
+      "window_levels": 7,
+      "window_level_sizes": [
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1
+      ],
+      "missed_updates_in_window": 1,
+      "merge_points": 1,
+      "n_edges": 377,
+      "vs_serial": {
+        "mean_diff": 0.027424462139606476,
+        "ci95": [
+          0.022458522766828536,
+          0.03261790201067924
+        ]
+      }
+    },
+    "m16_15": {
+      "n": 64,
+      "delta_nll_mean": 0.05362984538078308,
+      "critical_path": 26,
+      "window_depth": 6,
+      "window_levels": 6,
+      "window_level_sizes": [
+        1,
+        1,
+        1,
+        2,
+        2,
+        1
+      ],
+      "missed_updates_in_window": 2,
+      "merge_points": 2,
+      "n_edges": 376,
+      "vs_serial": {
+        "mean_diff": 0.05362984538078308,
+        "ci95": [
+          0.04733421765267849,
+          0.0600968077778816
+        ]
+      }
+    },
+    "m17_16": {
+      "n": 64,
+      "delta_nll_mean": 0.062687449157238,
+      "critical_path": 26,
+      "window_depth": 6,
+      "window_levels": 6,
+      "window_level_sizes": [
+        1,
+        1,
+        1,
+        2,
+        1,
+        2
+      ],
+      "missed_updates_in_window": 2,
+      "merge_points": 2,
+      "n_edges": 376,
+      "vs_serial": {
+        "mean_diff": 0.062687449157238,
+        "ci95": [
+          0.055200005136430266,
+          0.07026824839413165
+        ]
+      }
+    },
+    "serial": {
+      "n": 32,
+      "delta_nll_mean": 0.0,
+      "critical_path": 28,
+      "window_depth": 8,
+      "window_levels": 8,
+      "window_level_sizes": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "missed_updates_in_window": 0,
+      "merge_points": 0,
+      "n_edges": 378,
+      "vs_serial": {
+        "mean_diff": 0.0,
+        "ci95": [
+          0.0,
+          0.0
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,160 @@
+{
+  "a3_serial_prefill_257": {
+    "note": "28 blocks, 257 tokens, batch 1; serial-eager is the historical measurement style, serial-lazy one graph + single eval, serial-compiled wraps the lazy graph in mx.compile",
+    "critical_path": 28,
+    "per_variant": {
+      "serial-eager": {
+        "median_ms": 126.66656251531094,
+        "p10_ms": 120.16391698853113,
+        "p90_ms": 135.59358401107602,
+        "n": 10,
+        "speedup_vs_best_serial": 0.900650576103246
+      },
+      "serial-lazy": {
+        "median_ms": 116.91900000732858,
+        "p10_ms": 110.06625002482906,
+        "p90_ms": 118.93429097835906,
+        "n": 10,
+        "speedup_vs_best_serial": 0.9757380108902902
+      },
+      "serial-compiled": {
+        "median_ms": 114.08231250243261,
+        "p10_ms": 108.4964579786174,
+        "p90_ms": 123.00200000754558,
+        "n": 10,
+        "speedup_vs_best_serial": 1.0
+      }
+    }
+  },
+  "a4_dag_prefill_257": {
+    "note": "same weights, dtype and total block work as a3; only the execution order / merge schedule differs",
+    "per_variant": {
+      "win10-17-g2-lazy": {
+        "median_ms": 118.01708349958062,
+        "p10_ms": 110.14133397839032,
+        "p90_ms": 131.70695898588747,
+        "n": 10,
+        "critical_path": 24
+      },
+      "win10-17-g2-compiled": {
+        "median_ms": 118.39264549780637,
+        "p10_ms": 109.92062499281019,
+        "p90_ms": 128.53491699206643,
+        "n": 10,
+        "critical_path": 24
+      },
+      "win10-17-g4-lazy": {
+        "median_ms": 115.37237500306219,
+        "p10_ms": 108.63675002474338,
+        "p90_ms": 129.24895898322575,
+        "n": 10,
+        "critical_path": 22
+      },
+      "win10-17-g4-compiled": {
+        "median_ms": 113.66285450640135,
+        "p10_ms": 110.56945798918605,
+        "p90_ms": 129.05420799506828,
+        "n": 10,
+        "critical_path": 22
+      },
+      "full-g2-lazy": {
+        "median_ms": 114.39247899397742,
+        "p10_ms": 109.56220899242908,
+        "p90_ms": 120.58220800827257,
+        "n": 10,
+        "critical_path": 14
+      },
+      "full-g2-compiled": {
+        "median_ms": 113.46854150178842,
+        "p10_ms": 107.54550001001917,
+        "p90_ms": 126.21200000285171,
+        "n": 10,
+        "critical_path": 14
+      },
+      "full-g4-lazy": {
+        "median_ms": 110.40720800519921,
+        "p10_ms": 108.63500001141801,
+        "p90_ms": 119.33958300505765,
+        "n": 10,
+        "critical_path": 7
+      },
+      "full-g4-compiled": {
+        "median_ms": 108.38649998186156,
+        "p10_ms": 102.37450001295656,
+        "p90_ms": 119.53324999194592,
+        "n": 10,
+        "critical_path": 7
+      }
+    }
+  },
+  "a5_weight_batched_matmul": {
+    "n1": {
+      "max_abs_diff_separate_vs_batched": 0.0,
+      "note": "identical math: each batch element uses its own weight; batched-matmul stacks the 4 real q_proj weights once and reuses the stack",
+      "per_variant": {
+        "separate-matmul": {
+          "median_ms": 0.33668699325062335,
+          "p10_ms": 0.23570898338221014,
+          "p90_ms": 0.4571670142468065,
+          "n": 12,
+          "ms_per_matmul": 0.08417174831265584
+        },
+        "batched-matmul": {
+          "median_ms": 0.4357289872132242,
+          "p10_ms": 0.2212919935118407,
+          "p90_ms": 0.6472500099334866,
+          "n": 12,
+          "ms_per_matmul": 0.10893224680330604
+        },
+        "separate-compiled": {
+          "median_ms": 0.36360450030770153,
+          "p10_ms": 0.21341702085919678,
+          "p90_ms": 0.5897080118302256,
+          "n": 12,
+          "ms_per_matmul": 0.09090112507692538
+        },
+        "batched-compiled": {
+          "median_ms": 0.37918750604148954,
+          "p10_ms": 0.22316700778901577,
+          "p90_ms": 0.9876670083031058,
+          "n": 12,
+          "ms_per_matmul": 0.09479687651037239
+        }
+      }
+    },
+    "n256": {
+      "max_abs_diff_separate_vs_batched": 0.0,
+      "note": "identical math: each batch element uses its own weight; batched-matmul stacks the 4 real q_proj weights once and reuses the stack",
+      "per_variant": {
+        "separate-matmul": {
+          "median_ms": 1.5095624839887023,
+          "p10_ms": 1.1879999947268516,
+          "p90_ms": 2.206292003393173,
+          "n": 12,
+          "ms_per_matmul": 0.3773906209971756
+        },
+        "batched-matmul": {
+          "median_ms": 1.2076460116077214,
+          "p10_ms": 1.0304579918738455,
+          "p90_ms": 1.7896660137921572,
+          "n": 12,
+          "ms_per_matmul": 0.30191150290193036
+        },
+        "separate-compiled": {
+          "median_ms": 1.5739585069241002,
+          "p10_ms": 1.2069160002283752,
+          "p90_ms": 2.0251250243745744,
+          "n": 12,
+          "ms_per_matmul": 0.39348962673102506
+        },
+        "batched-compiled": {
+          "median_ms": 1.2613125145435333,
+          "p10_ms": 1.0723329905886203,
+          "p90_ms": 1.4275829889811575,
+          "n": 12,
+          "ms_per_matmul": 0.31532812863588333
+        }
+      }
+    }
+  }
+}

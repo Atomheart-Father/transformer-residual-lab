@@ -1,169 +1,207 @@
 {
- "model_repo": "mlx-community/Qwen3-0.6B-Base-bf16",
- "model_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
- "tokenizer_repo": "mlx-community/Qwen3-0.6B-Base-bf16",
- "tokenizer_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
- "tokenizer_class": "Qwen2Tokenizer",
- "vocab_size": 151643,
- "dataset": "Salesforce/wikitext",
- "dataset_config": "wikitext-2-raw-v1",
- "dataset_revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
- "seq_len": 257,
- "n_predicted_tokens": 256,
- "seed": 20261019,
- "split_targets": {
-  "train": "calibration",
-  "validation": "validation",
-  "test": "test"
- },
- "requested_windows": {
-  "train": 64,
-  "validation": 32,
-  "test": 64
- },
- "corpus": {
-  "train": {
-   "n_tokens": 2517232,
-   "corpus_sha256": "fb23ad9643a34514eec5cb85ec2a6f49d1a33e6a3d5077dff5a403e1d18f5047",
-   "n_documents": 36718
+  "model_repo": "mlx-community/Qwen3-0.6B-Base-bf16",
+  "model_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
+  "tokenizer_repo": "mlx-community/Qwen3-0.6B-Base-bf16",
+  "tokenizer_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
+  "tokenizer_class": "Qwen2Tokenizer",
+  "vocab_size": 151643,
+  "dataset": "Salesforce/wikitext",
+  "dataset_config": "wikitext-2-raw-v1",
+  "dataset_revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+  "seq_len": 257,
+  "n_predicted_tokens": 256,
+  "seed": 20261019,
+  "split_targets": {
+    "train": "calibration",
+    "validation": "validation",
+    "test": "test"
   },
-  "validation": {
-   "n_tokens": 262210,
-   "corpus_sha256": "f3714de012180492efbcf4f0380322389a27f735ddb63e8c016a6a6285f50408",
-   "n_documents": 3760
+  "requested_windows": {
+    "train": 64,
+    "validation": 32,
+    "test": 64
   },
-  "test": {
-   "n_tokens": 298938,
-   "corpus_sha256": "c5b5caea5bd655cb221545a484f2f0f59d35092a17a66840d7b9513d0b99687d",
-   "n_documents": 4358
+  "corpus": {
+    "train": {
+      "n_tokens": 2517232,
+      "corpus_sha256": "fb23ad9643a34514eec5cb85ec2a6f49d1a33e6a3d5077dff5a403e1d18f5047",
+      "n_documents": 36718
+    },
+    "validation": {
+      "n_tokens": 262210,
+      "corpus_sha256": "f3714de012180492efbcf4f0380322389a27f735ddb63e8c016a6a6285f50408",
+      "n_documents": 3760
+    },
+    "test": {
+      "n_tokens": 298938,
+      "corpus_sha256": "c5b5caea5bd655cb221545a484f2f0f59d35092a17a66840d7b9513d0b99687d",
+      "n_documents": 4358
+    }
+  },
+  "concat_rule": "join non-empty rows with '\\n\\n', then tokenize without special tokens",
+  "window_rule": "non-overlapping windows of seq_len tokens; offsets shuffled by seed; sorted by start",
+  "note": "Token ids stay local. Do not commit the sampled corpus to a public repo.",
+  "splits_s18": {
+    "train_8.jsonl": {
+      "role": "train",
+      "source": "wikitext-2 train",
+      "split_name": "train_s18",
+      "seed": 880001,
+      "n_windows": 512,
+      "sha256": "84aab670e0f1f2ad94875fed2a6824f93ee948ac408f17156fff50a0106d7dd9",
+      "excluded_files": [
+        "calibration.jsonl",
+        "validation.jsonl",
+        "test.jsonl",
+        "fresh_test.jsonl",
+        "test_v2.jsonl",
+        "test_v3.jsonl",
+        "ood_imdb.jsonl",
+        "ood_imdb_v2.jsonl",
+        "train_8_imdb.jsonl",
+        "train_8_val.jsonl"
+      ],
+      "n_exact_window_overlap_with_any_other_split": 0
+    },
+    "train_8_imdb.jsonl": {
+      "role": "train",
+      "source": "IMDB train",
+      "split_name": "calibration_extra_imdb",
+      "seed": 880006,
+      "n_windows": 128,
+      "sha256": "4c660cf25ffa3ba60f945d24839dea2c8c4774d507ccf8a43d8bafdd2fc06349",
+      "n_exact_window_overlap": {
+        "none": 0
+      }
+    },
+    "test_v3.jsonl": {
+      "role": "test",
+      "source": "wikitext-2 held-out",
+      "split_name": "test_s18",
+      "seed": 880003,
+      "n_windows": 64,
+      "sha256": "d1f522d75931e0c53d8ed39534a9edc659e637cc9972b1e06595d735479db9c4",
+      "n_exact_window_overlap": {
+        "none": 0
+      }
+    },
+    "ood_imdb_v2.jsonl": {
+      "role": "ood",
+      "source": "IMDB held-out",
+      "split_name": "ood_s18",
+      "seed": 880005,
+      "n_windows": 64,
+      "sha256": "0d3fe4c4eb0c9d7867689d1ba3715bc552d062facbcfa0ee0f6cf37be217f2c3",
+      "n_exact_window_overlap": {
+        "none": 0
+      }
+    },
+    "train_8_val.jsonl": {
+      "role": "selection",
+      "source": "wikitext-2 train",
+      "split_name": "selection_s18",
+      "seed": 880002,
+      "n_windows": 64,
+      "sha256": "be755bbd7da8d57822564551b8be6c28311e13a11c9d3acef715b4fdedab11a9",
+      "excluded_files": [
+        "calibration.jsonl",
+        "validation.jsonl",
+        "test.jsonl",
+        "fresh_test.jsonl",
+        "test_v2.jsonl",
+        "test_v3.jsonl",
+        "ood_imdb.jsonl",
+        "ood_imdb_v2.jsonl",
+        "train_8.jsonl",
+        "train_8_imdb.jsonl"
+      ],
+      "n_exact_window_overlap_with_any_other_split": 0
+    }
+  },
+  "splits_s20": {
+    "s20_cal.jsonl": {
+      "role": "measurement",
+      "source": "wikitext-2 test (fresh offsets)",
+      "split_name": "cal_s20",
+      "seed": 20261020,
+      "n_windows": 64,
+      "sha256": "768ae1bc134a4053dec0e5feeef032a082552de978ddcfeddf60a8e565851f6c",
+      "purpose": "dependency probes and candidate screening only",
+      "n_exact_window_overlap_with_any_other_split": 0
+    },
+    "s20_val.jsonl": {
+      "role": "selection",
+      "source": "wikitext-2 test (fresh offsets)",
+      "split_name": "val_s20",
+      "seed": 20261021,
+      "n_windows": 32,
+      "sha256": "a28dbec7f72460ffbd602ae91fb9e763e761026428eb08d0995a7ed146a34825",
+      "purpose": "candidate selection only; never used to fit anything",
+      "n_exact_window_overlap_with_any_other_split": 0
+    },
+    "s20_test.jsonl": {
+      "role": "blind test",
+      "source": "wikitext-2 test (fresh offsets)",
+      "split_name": "test_s20",
+      "seed": 20261022,
+      "n_windows": 64,
+      "sha256": "346148a9cc06077dd4dddff7ef844d0b4abedecc66a4c95a808b0392b4711654",
+      "purpose": "final one-shot evaluation of frozen candidates; never used for selection",
+      "n_exact_window_overlap_with_any_other_split": 0
+    },
+    "s20_ood_c4.jsonl": {
+      "role": "ood test",
+      "source": "C4 en validation (streamed 400 docs)",
+      "split_name": "ood_c4_s20",
+      "seed": 20261023,
+      "n_windows": 64,
+      "sha256": "9c7744d5bf22bd7f62855e66c16f34cdc0858a1480a0a1f0885ab161e579598d",
+      "purpose": "distribution-shift check for frozen candidates; different corpus, impossible to overlap by construction",
+      "n_exact_window_overlap_with_any_other_split": 0
+    }
+  },
+  "splits_s20_disjointness": {
+    "method": "pairwise sample_id / start_offset / token-window sha256 over all 15 split files in this directory",
+    "n_pairs_checked": 105,
+    "n_overlapping_pairs": 0,
+    "note": "s20_test and s20_ood_c4 have never been used by any earlier stage (re-verified against s21 splits: still zero overlap)"
+  },
+  "splits_s21": {
+    "s21_cal.jsonl": {
+      "role": "measurement",
+      "source": "wikitext-2 test (fresh offsets)",
+      "split_name": "cal_s21",
+      "seed": 20261024,
+      "n_windows": 48,
+      "sha256": "d28ba9dd43eb259ea2f91c45384573c65dc33a134e848fb0feb5fb684c31546a",
+      "purpose": "Stage 2.1 free-running screening / probe completion only",
+      "n_exact_window_overlap_with_any_other_split": 0
+    },
+    "s21_val.jsonl": {
+      "role": "selection",
+      "source": "wikitext-2 test (fresh offsets)",
+      "split_name": "val_s21",
+      "seed": 20261025,
+      "n_windows": 32,
+      "sha256": "28c6464b5621a748b4673d005b4b77f464180b53a7a5eb304f3d57406066346c",
+      "purpose": "Stage 2.1 structure selection only; no blind measurement",
+      "n_exact_window_overlap_with_any_other_split": 0
+    },
+    "s21_final.jsonl": {
+      "role": "blind final",
+      "source": "wikitext-2 test (fresh offsets)",
+      "split_name": "final_s21",
+      "seed": 20261026,
+      "n_windows": 64,
+      "sha256": "faa1bff80e8158f55a2fc26b03686f7aba1496f145636fbe903f33ee62870ed0",
+      "purpose": "Stage 2.1 one-shot final blind test (runs once, after selection.json is frozen)",
+      "n_exact_window_overlap_with_any_other_split": 0
+    }
+  },
+  "splits_s21_disjointness": {
+    "method": "pairwise sample_id / start_offset / token-window sha256 over all 18 split files in this directory",
+    "n_pairs_checked": 153,
+    "n_overlapping_pairs": 0,
+    "note": "s21_final is a brand-new split that no prior stage has ever measured; s20_test / s20_ood_c4 / test_v3 / IMDB remain retired and are not reused."
   }
- },
- "concat_rule": "join non-empty rows with '\\n\\n', then tokenize without special tokens",
- "window_rule": "non-overlapping windows of seq_len tokens; offsets shuffled by seed; sorted by start",
- "note": "Token ids stay local. Do not commit the sampled corpus to a public repo.",
- "splits_s18": {
-  "train_8.jsonl": {
-   "role": "train",
-   "source": "wikitext-2 train",
-   "split_name": "train_s18",
-   "seed": 880001,
-   "n_windows": 512,
-   "sha256": "84aab670e0f1f2ad94875fed2a6824f93ee948ac408f17156fff50a0106d7dd9",
-   "excluded_files": [
-    "calibration.jsonl",
-    "validation.jsonl",
-    "test.jsonl",
-    "fresh_test.jsonl",
-    "test_v2.jsonl",
-    "test_v3.jsonl",
-    "ood_imdb.jsonl",
-    "ood_imdb_v2.jsonl",
-    "train_8_imdb.jsonl",
-    "train_8_val.jsonl"
-   ],
-   "n_exact_window_overlap_with_any_other_split": 0
-  },
-  "train_8_imdb.jsonl": {
-   "role": "train",
-   "source": "IMDB train",
-   "split_name": "calibration_extra_imdb",
-   "seed": 880006,
-   "n_windows": 128,
-   "sha256": "4c660cf25ffa3ba60f945d24839dea2c8c4774d507ccf8a43d8bafdd2fc06349",
-   "n_exact_window_overlap": {
-    "none": 0
-   }
-  },
-  "test_v3.jsonl": {
-   "role": "test",
-   "source": "wikitext-2 held-out",
-   "split_name": "test_s18",
-   "seed": 880003,
-   "n_windows": 64,
-   "sha256": "d1f522d75931e0c53d8ed39534a9edc659e637cc9972b1e06595d735479db9c4",
-   "n_exact_window_overlap": {
-    "none": 0
-   }
-  },
-  "ood_imdb_v2.jsonl": {
-   "role": "ood",
-   "source": "IMDB held-out",
-   "split_name": "ood_s18",
-   "seed": 880005,
-   "n_windows": 64,
-   "sha256": "0d3fe4c4eb0c9d7867689d1ba3715bc552d062facbcfa0ee0f6cf37be217f2c3",
-   "n_exact_window_overlap": {
-    "none": 0
-   }
-  },
-  "train_8_val.jsonl": {
-   "role": "selection",
-   "source": "wikitext-2 train",
-   "split_name": "selection_s18",
-   "seed": 880002,
-   "n_windows": 64,
-   "sha256": "be755bbd7da8d57822564551b8be6c28311e13a11c9d3acef715b4fdedab11a9",
-   "excluded_files": [
-    "calibration.jsonl",
-    "validation.jsonl",
-    "test.jsonl",
-    "fresh_test.jsonl",
-    "test_v2.jsonl",
-    "test_v3.jsonl",
-    "ood_imdb.jsonl",
-    "ood_imdb_v2.jsonl",
-    "train_8.jsonl",
-    "train_8_imdb.jsonl"
-   ],
-   "n_exact_window_overlap_with_any_other_split": 0
-  }
- },
- "splits_s20": {
-  "s20_cal.jsonl": {
-   "role": "measurement",
-   "source": "wikitext-2 test (fresh offsets)",
-   "split_name": "cal_s20",
-   "seed": 20261020,
-   "n_windows": 64,
-   "sha256": "768ae1bc134a4053dec0e5feeef032a082552de978ddcfeddf60a8e565851f6c",
-   "purpose": "dependency probes and candidate screening only",
-   "n_exact_window_overlap_with_any_other_split": 0
-  },
-  "s20_val.jsonl": {
-   "role": "selection",
-   "source": "wikitext-2 test (fresh offsets)",
-   "split_name": "val_s20",
-   "seed": 20261021,
-   "n_windows": 32,
-   "sha256": "a28dbec7f72460ffbd602ae91fb9e763e761026428eb08d0995a7ed146a34825",
-   "purpose": "candidate selection only; never used to fit anything",
-   "n_exact_window_overlap_with_any_other_split": 0
-  },
-  "s20_test.jsonl": {
-   "role": "blind test",
-   "source": "wikitext-2 test (fresh offsets)",
-   "split_name": "test_s20",
-   "seed": 20261022,
-   "n_windows": 64,
-   "sha256": "346148a9cc06077dd4dddff7ef844d0b4abedecc66a4c95a808b0392b4711654",
-   "purpose": "final one-shot evaluation of frozen candidates; never used for selection",
-   "n_exact_window_overlap_with_any_other_split": 0
-  },
-  "s20_ood_c4.jsonl": {
-   "role": "ood test",
-   "source": "C4 en validation (streamed 400 docs)",
-   "split_name": "ood_c4_s20",
-   "seed": 20261023,
-   "n_windows": 64,
-   "sha256": "9c7744d5bf22bd7f62855e66c16f34cdc0858a1480a0a1f0885ab161e579598d",
-   "purpose": "distribution-shift check for frozen candidates; different corpus, impossible to overlap by construction",
-   "n_exact_window_overlap_with_any_other_split": 0
-  }
- },
- "splits_s20_disjointness": {
-  "method": "pairwise sample_id / start_offset / token-window sha256 over all 15 split files in this directory",
-  "n_pairs_checked": 105,
-  "n_overlapping_pairs": 0,
-  "note": "s20_test and s20_ood_c4 have never been used by any earlier stage"
- }
 }
