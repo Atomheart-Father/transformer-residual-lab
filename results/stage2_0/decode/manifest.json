@@ -1,0 +1,11 @@
+{
+  "status": "MEASURED",
+  "stage": "2.0 decode-time concurrency bench (1 token + KV cache)",
+  "model": "mlx-community/Qwen3-0.6B-Base-bf16",
+  "model_revision": "e8e73ff38f0eb570eb57ed044ef3f95588c43bc8",
+  "n_layers": 28,
+  "n_decode": 40,
+  "warmup": 8,
+  "git_commit": "06fedfd8aee1192b689853cdc5a6ad6d16c9efc3",
+  "note": "A DAG only recombines hidden inputs; each block keeps its own per-layer cache, so decode is exact for any graph. Timing starts only after the correctness check passes."
+}

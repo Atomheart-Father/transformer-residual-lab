@@ -1,0 +1,93 @@
+{
+  "correctness": {
+    "max_abs_diff_last_positions": 4.0,
+    "nll_decode_mean": 3.5976333618164062,
+    "nll_full_forward_mean": 3.609548568725586,
+    "nll_abs_diff": 0.011915206909179688,
+    "passed": true
+  },
+  "n_decode": 40,
+  "variants": {
+    "serial-lazy": {
+      "critical_path": 28,
+      "median_ms": 6.1406040185829625,
+      "p10_ms": 5.9487920079845935,
+      "p90_ms": 6.5441659826319665,
+      "tokens_per_s": 162.85042920431877,
+      "n": 40
+    },
+    "serial-eager": {
+      "critical_path": 28,
+      "median_ms": 10.777916497318074,
+      "p10_ms": 10.340334003558382,
+      "p90_ms": 11.47425000090152,
+      "tokens_per_s": 92.78231096416782,
+      "n": 40
+    },
+    "g2-lazy": {
+      "critical_path": 14,
+      "median_ms": 6.3379170023836195,
+      "p10_ms": 5.699333007214591,
+      "p90_ms": 7.956375018693507,
+      "tokens_per_s": 157.78054518920194,
+      "n": 40
+    },
+    "g2-eager": {
+      "critical_path": 14,
+      "median_ms": 13.078541989671066,
+      "p10_ms": 12.816583010135219,
+      "p90_ms": 13.687333004781976,
+      "tokens_per_s": 76.46112240873347,
+      "n": 40
+    },
+    "prefix3-g2-lazy": {
+      "critical_path": 16,
+      "median_ms": 5.982083501294255,
+      "p10_ms": 5.789374990854412,
+      "p90_ms": 6.360125000355765,
+      "tokens_per_s": 167.16583775262328,
+      "n": 40
+    },
+    "prefix3-g2-eager": {
+      "critical_path": 16,
+      "median_ms": 12.89141649613157,
+      "p10_ms": 12.36700001754798,
+      "p90_ms": 13.4920830023475,
+      "tokens_per_s": 77.57099464593965,
+      "n": 40
+    },
+    "win-g2-lazy": {
+      "critical_path": 24,
+      "median_ms": 6.330958509352058,
+      "p10_ms": 6.003582995617762,
+      "p90_ms": 6.950458016945049,
+      "tokens_per_s": 157.95396518912662,
+      "n": 40
+    },
+    "win-g2-eager": {
+      "critical_path": 24,
+      "median_ms": 11.800728985690512,
+      "p10_ms": 11.3851249916479,
+      "p90_ms": 12.867625016951934,
+      "tokens_per_s": 84.74052757355868,
+      "n": 40
+    },
+    "win-g4-lazy": {
+      "critical_path": 22,
+      "median_ms": 6.23020798957441,
+      "p10_ms": 5.9679580153897405,
+      "p90_ms": 6.705207983031869,
+      "tokens_per_s": 160.50828506422155,
+      "n": 40
+    },
+    "win-g4-eager": {
+      "critical_path": 22,
+      "median_ms": 11.795708007412031,
+      "p10_ms": 11.257999984081835,
+      "p90_ms": 12.7856659819372,
+      "tokens_per_s": 84.77659835014848,
+      "n": 40
+    }
+  },
+  "prefill_note": "shared serial prefill"
+}

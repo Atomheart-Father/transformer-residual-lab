@@ -427,9 +427,15 @@ python scripts/stage20_screen.py --input data257/s20_val.jsonl --max-samples 32 
 
 # 实验 C 第三轮：盲测（s20_test / s20_ood_c4，只跑一次；--only 限定冻结集）
 python scripts/stage20_screen.py --input data257/s20_test.jsonl --max-samples 64 \
-  --role blind --only serial,p1,p2,p3,g2,g4 --output results/stage2_0/blind_test
+  --role blind --only serial,pair-mid,p2,p3,g2,mix3,g4,del-w1 --output results/stage2_0/blind_test
 python scripts/stage20_screen.py --input data257/s20_ood_c4.jsonl --max-samples 64 \
-  --role blind --only serial,p1,p2,p3,g2,g4 --output results/stage2_0/blind_ood
+  --role blind --only serial,pair-mid,p2,p3,g2,mix3,g4,del-w1 --output results/stage2_0/blind_ood
+
+# 全模型与窗口位置扫描（s20_cal；stage20_screen.py 的 --lo/--hi 可换任意 8 宽窗口）
+python scripts/stage20_full.py --max-samples 12 --output results/stage2_0/full
+
+# decode（1 token + KV cache）：正确性检查（缓存解码 vs 全长前向）通过后才计时
+python scripts/stage20_decode.py --n-decode 40 --warmup 8 --output results/stage2_0/decode
 ```
 
 DAG spec 三种形式：`chain`；`名字:p0|p1|...|p27`（每块一部分，逗号列表，支持 `10-12` 区间）；
@@ -444,6 +450,12 @@ DAG spec 三种形式：`chain`；`名字:p0|p1|...|p27`（每块一部分，逗
   否则「丢掉中边、保留后边」会被运行状态悄悄抵消，探针变成 no-op。
 - **理论深度不等于延迟。** 257 token prefill 下 g4（深度 7）比串行逐块 eval 还慢；DAG 的
   merge 记账（合并点数量决定）要付 6%–21%。窗口实验只在中窗做、合并点越少越接近串行成本。
+  1 token + KV cache 的 decode 同样零收益（lazy 深度 28→14：6.14→6.34 ms；eager DAG 反慢
+  9–21%）：decode 步由总 kernel 工作量与启动开销决定，DAG 不减少总工作量。batch=1 之外未测。
+- **depth-vs-quality 只在同一窗口内可比。** 同深度同位置的比较才有意义；跨位置必须看
+  位置曲线（0–7 窗口 7.57 nats vs 10–17 窗口 0.19 nats，同为深度 24、4 个漏更新）。
+- **漏更新必须位置加权。** 计数不是预测器：mix4（5 misses）比 noncontig（6 misses）差，
+  irr-a（80 misses）比 g4（42 misses）好 3.3 倍。位置权重曲线见 `results/stage2_0/full`。
 - **深度必须按最长依赖链算**，不能用分组数冒充；窗口外串行意味着总深度 = 10 + 窗口深度 + 10。
 - **`delta_override` 探针只筛候选**；教师入口 anchor 上的局部干预是 triage，最终判定必须是
   完整自由运行的 ΔNLL / KL / top1。

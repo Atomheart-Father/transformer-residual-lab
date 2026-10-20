@@ -309,7 +309,8 @@ def dag_forward(model, h0, dag: Dag, mask, mx, *,
                 input_override: Optional[dict] = None,
                 record: bool = False, eval_each: bool = False,
                 sync_levels: bool = False, chain_mode: str = "auto",
-                refine: bool = True, merge_mode: str = "materialized"):
+                refine: bool = True, merge_mode: str = "materialized",
+                caches: Optional[dict] = None):
     """Execute ``dag`` on the frozen blocks.
 
     ``delta_override[j]`` replaces the computed residual update of block j: used
@@ -338,6 +339,11 @@ def dag_forward(model, h0, dag: Dag, mask, mx, *,
     before the next level starts (bounded memory, some scheduling freedom).
     ``eval_each=True`` materializes every node (no scheduling freedom at all).
 
+    ``caches={i: cache}`` is the decode path: block ``i`` reads and writes its
+    own per-layer KV cache instead of attending to a full masked sequence. The
+    merge rule is unchanged - a DAG only recombines hidden-state inputs, so the
+    per-layer caches are independent of the graph.
+
     Returns ``h_final``, or ``(h_final, records)`` when ``record=True``.
     """
     if chain_mode not in ("auto", "off", "force"):
@@ -359,7 +365,7 @@ def dag_forward(model, h0, dag: Dag, mask, mx, *,
                 d = over_d[i]
                 h = x + d                       # constructed; block not executed
             else:
-                out = layers[i](x, mask, None)
+                out = layers[i](x, mask, caches[i] if caches else None)
                 d = out - x
                 h = out                         # exact reference semantics
             if record:
@@ -417,7 +423,7 @@ def dag_forward(model, h0, dag: Dag, mask, mx, *,
             if i in over_d:
                 d = over_d[i]
             else:
-                out = layers[i](x, mask, None)
+                out = layers[i](x, mask, caches[i] if caches else None)
                 d = out - x
                 outs[i] = out
             if eval_each:
