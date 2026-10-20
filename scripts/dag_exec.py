@@ -30,6 +30,19 @@ Three consequences make the executor verifiable instead of merely plausible:
   block steps). The number of groups, the number of edges or FLOPs are never
   used as a depth proxy, and no wall-clock speedup is claimed from the graph
   alone.
+
+Two merge modes, both valid bf16 schedules of the same semantics:
+
+* ``materialized`` (default) advances a running bf16 state at merge points
+  and reads the true previous output on serial continuation. It reproduces
+  the production implementation bit-for-bit for chain / grouped / windowed
+  graphs; a predecessor set can only remove an update that is not already
+  inside the running state.
+* ``roadmap`` builds every input as ``h0 + sum_{j in P_i} delta_j`` with one
+  fp32 sum and a single cast, honoring arbitrary predecessor sets literally
+  (dropping a middle edge while keeping later ones is expressible). For
+  chain/grouped graphs it differs from production only by the merge
+  schedule, a difference the gate-0 report quantifies.
 """
 
 from __future__ import annotations
@@ -296,7 +309,7 @@ def dag_forward(model, h0, dag: Dag, mask, mx, *,
                 input_override: Optional[dict] = None,
                 record: bool = False, eval_each: bool = False,
                 sync_levels: bool = False, chain_mode: str = "auto",
-                refine: bool = True):
+                refine: bool = True, merge_mode: str = "materialized"):
     """Execute ``dag`` on the frozen blocks.
 
     ``delta_override[j]`` replaces the computed residual update of block j: used
@@ -304,6 +317,17 @@ def dag_forward(model, h0, dag: Dag, mask, mx, *,
     updates are exact, so no inherited error contaminates the measurement.
     ``input_override[i]`` replaces the constructed input of block i entirely
     (diagnostic oracle interventions only - never a deployable result).
+
+    ``merge_mode="materialized"`` (default) advances a running bf16 state at
+    merge points and reads the true previous output on serial continuation;
+    this reproduces the production implementation bit-for-bit for chain,
+    grouped and windowed graphs, but a predecessor set can only remove an
+    update that is not yet inside the running state (dropping a middle edge
+    while keeping later ones is not expressible). ``merge_mode="roadmap"``
+    builds every input as ``h0 + sum_{j in P_i} delta_j`` with one fp32 sum
+    and a single cast, honoring arbitrary predecessor sets literally; for
+    chain/grouped graphs it then differs from production only by the merge
+    schedule (bf16 double rounding, quantified in the gate-0 report).
 
     ``chain_mode="auto"`` reduces a full-chain graph to the plain serial call
     sequence, which is bit-identical to the reference model. ``"off"`` forces
@@ -318,6 +342,8 @@ def dag_forward(model, h0, dag: Dag, mask, mx, *,
     """
     if chain_mode not in ("auto", "off", "force"):
         raise ValueError(f"unknown chain_mode {chain_mode!r}")
+    if merge_mode not in ("materialized", "roadmap"):
+        raise ValueError(f"unknown merge_mode {merge_mode!r}")
     if chain_mode == "off":
         refine = False          # expose the merge rule without the shortcut
     over_d = delta_override or {}
@@ -356,14 +382,21 @@ def dag_forward(model, h0, dag: Dag, mask, mx, *,
             if i in over_x:
                 x = over_x[i]
                 contains[i] = frozenset(range(i))   # oracle input: true prefix
+            elif merge_mode == "roadmap":
+                x = _merge(h0, deltas, sorted(P), mx).astype(h0.dtype)
+                contains[i] = P
             else:
                 new = P - covered
                 prev_full = covered == frozenset(range(i - 1)) and i >= 1
                 prev_contains = contains.get(i - 1, frozenset())
-                if (refine and new == frozenset({i - 1}) and prev_full
+                if (refine and P == frozenset(range(i))
+                        and prev_full
                         and prev_contains >= frozenset(range(i - 1))
                         and (i - 1) in outs):
-                    # exact serial continuation: out_{i-1} already is the merge
+                    # exact serial continuation, only valid when this block
+                    # waits for the *entire* prefix: out_{i-1} then already is
+                    # the merge of exactly P_i. Any declined middle edge must
+                    # go through the merge/fallback branches instead.
                     x = outs[i - 1]
                     contains[i] = prev_contains | {i - 1}
                     h, covered = x, covered | {i - 1}
@@ -395,15 +428,18 @@ def dag_forward(model, h0, dag: Dag, mask, mx, *,
         if sync_levels and lvl_nodes:
             mx.eval(*[deltas[i] for i in lvl_nodes])
 
-    unabsorbed = all_blocks - covered
-    if (refine and unabsorbed == frozenset({n - 1}) and n >= 1
-            and contains.get(n - 1, frozenset()) >= frozenset(range(n - 1))
-            and (n - 1) in outs):
-        h_final = outs[n - 1]
-    elif covered <= all_blocks:
-        h_final = _merge(h, deltas, sorted(unabsorbed), mx).astype(h0.dtype)
-    else:
+    if merge_mode == "roadmap":
         h_final = _merge(h0, deltas, range(n), mx).astype(h0.dtype)
+    else:
+        unabsorbed = all_blocks - covered
+        if (refine and unabsorbed == frozenset({n - 1}) and n >= 1
+                and contains.get(n - 1, frozenset()) >= frozenset(range(n - 1))
+                and (n - 1) in outs):
+            h_final = outs[n - 1]
+        elif covered <= all_blocks:
+            h_final = _merge(h, deltas, sorted(unabsorbed), mx).astype(h0.dtype)
+        else:
+            h_final = _merge(h0, deltas, range(n), mx).astype(h0.dtype)
     if record:
         recs["out_final"] = h_final
         return h_final, recs

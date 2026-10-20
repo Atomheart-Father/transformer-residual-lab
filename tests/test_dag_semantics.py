@@ -187,6 +187,51 @@ class MergeRule(unittest.TestCase):
         np.testing.assert_allclose(np.asarray(got.astype(mx.float32)), want,
                                    rtol=1e-5, atol=1e-6)
 
+    def test_middle_edge_drop_is_honored_not_a_noop(self):
+        """A block that declines an already-covered middle edge must not read
+        a state that still contains it (the serial-continuation shortcut is
+        only valid for the full prefix)."""
+        mx = self.mx
+        scales = [0.05, -0.03, 0.02, 0.01]
+        model = self.toy(scales)
+        h0 = mx.array(np.array([[[0.3, -0.7, 0.5, 0.1]]], dtype=np.float32))
+        g = np.asarray(h0.astype(mx.float32))
+
+        def f(v, a):
+            return v + a * v * v
+
+        # 0:{}, 1:{0}, 2:{0,1}, 3:{0,2}  (3 declines edge 1, keeps 0 and 2)
+        d = make_dag(4, "t:|0|0,1|0,2")
+        for mode in ("materialized", "roadmap"):
+            got = dag_forward(model, h0, d, None, mx, merge_mode=mode)
+            mx.eval(got)
+            out0 = f(g, 0.05)
+            d0 = out0 - g
+            out1 = f(out0, -0.03)
+            d1 = out1 - out0
+            x2 = out1                          # merge{0,1}
+            d2 = f(x2, 0.02) - x2
+            x3 = g + d0 + d2                   # honest: h0 + d0 + d2, no d1
+            d3 = f(x3, 0.01) - x3
+            want = out1 + d2 + d3              # final merges every update once
+            np.testing.assert_allclose(np.asarray(got.astype(mx.float32)), want,
+                                       rtol=1e-5, atol=1e-6, err_msg=mode)
+
+    def test_roadmap_mode_matches_monolithic_merge(self):
+        """roadmap inputs are exactly h0 + sum(P_i) deltas, so the g2 graph
+        must agree bit-for-bit with the monolithic fp32 merge reference."""
+        mx = self.mx
+        scales = [0.05, -0.03, 0.02, 0.01, -0.04, 0.06]
+        model = self.toy(scales)
+        h0 = mx.array(np.linspace(-1, 1, 12, dtype=np.float32).reshape(1, 3, 4))
+        d = group_dag(len(scales), 2)
+        got = dag_forward(model, h0, d, None, mx, merge_mode="roadmap")
+        mx.eval(got)
+        from dag_exec import monolithic_reference
+        want = monolithic_reference(model, h0, d, None, mx)
+        mx.eval(want)
+        np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+
     def test_final_serial_tail_uses_last_output(self):
         mx = self.mx
         scales = [0.05, -0.03, 0.02]

@@ -3954,7 +3954,7 @@
       "note": "10 serial blocks, tail grouped by 2"
     }
   },
-  "git_commit": "73d33798688a65e4552632fa01d8cf9285d4b378",
+  "git_commit": "3fa7884b726ef219b1044b3135521ca02d9db92c",
   "note": "Correctness gate only. No speedup is claimed from the graph and no result here is used for structure selection.",
   "n_measured": 8
 }
