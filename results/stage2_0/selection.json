@@ -1,0 +1,45 @@
+{
+  "status": "FROZEN",
+  "stage": "2.0 experiment C structure selection (validation)",
+  "frozen_at": "2026-10-20T00:55:00Z",
+  "data_role": "s20_val (32 windows, seed 20261021) - selection only, never blind",
+  "rule_stated_a_priori": [
+    "Among candidates at matched critical-path depth, the one with the lowest mean delta_nll on s20_val advances.",
+    "One representative per depth is carried to the blind test, forming the depth curve.",
+    "Deletion controls (del-w*) are carried as a control axis, not as DAG candidates.",
+    "No candidate is added, dropped or re-ranked after the blind splits are measured."
+  ],
+  "validation_ranking_by_depth": {
+    "28": {"candidates": ["serial"], "winner": "serial", "winner_delta_nll": 0.0,
+           "note": "reference: full-chain DAG reproduces the original model bit-exactly"},
+    "27": {"candidates": ["p1", "pair-mid", "pair-last"], "winner": "pair-mid",
+           "winner_delta_nll": 0.0300,
+           "runner_up": {"p1": 0.0433, "pair-last": 0.0543},
+           "note": "same depth and same 1 missed update; pair position is worth ~0.024 nats spread, ordering matches the per-edge probe cost (0.0300 < 0.0377 < 0.0433)"},
+    "26": {"candidates": ["p2"], "winner": "p2", "winner_delta_nll": 0.0774},
+    "25": {"candidates": ["p3", "hyp-shift"], "winner": "p3", "winner_delta_nll": 0.1273,
+           "runner_up": {"hyp-shift": 0.1426},
+           "note": "same depth and 3 missed updates; contiguous pairing in front is not worse than shifted pairing"},
+    "24": {"candidates": ["g2", "noncontig", "mix4"], "winner": "g2",
+           "winner_delta_nll": 0.1931,
+           "runner_up": {"noncontig": 0.2119, "mix4": 0.2658},
+           "note": "contiguous even pairing is miss-minimal at this depth and wins; non-contiguous alignment with the same level sizes is worse despite a similar miss count; a size-3 level (mix4) is worse than both"},
+    "23": {"candidates": ["mix3"], "winner": "mix3", "winner_delta_nll": 0.3555},
+    "22": {"candidates": ["g4"], "winner": "g4", "winner_delta_nll": 0.5731}
+  },
+  "deletion_controls": {
+    "del-w1": {"delta_nll": 0.1001, "depth": 27,
+               "note": "same depth as pair-mid but one block fewer executed: 0.1001 vs 0.0300, the two axes stay separate"},
+    "del-w2": {"delta_nll": 0.2275, "depth": 26},
+    "del-w3": {"delta_nll": 0.3089, "depth": 25},
+    "del-w4": {"delta_nll": 0.5455, "depth": 24}
+  },
+  "excluded": {
+    "sparse-x1": {"delta_nll": 5.2471, "reason": "80 missed updates in the window; collapses the model"}
+  },
+  "blind_set": ["serial", "pair-mid", "p2", "p3", "g2", "mix3", "g4", "del-w1"],
+  "blind_splits": ["s20_test", "s20_ood_c4"],
+  "headline_claim_to_test": "No sparse or non-contiguous DAG beats the fixed contiguous grouping at matched critical-path depth; quality is essentially a function of depth (and, secondarily, of how the missed updates are distributed).",
+  "merge_modes": ["materialized", "roadmap"],
+  "note": "Selection used s20_val only. The blind splits were not opened before this file was written."
+}

@@ -412,6 +412,24 @@ python scripts/stage20_bench.py --reps 15 --warmup 3 --output results/stage2_0/b
 
 # 代数与 merge 规则测试（含 toy block，MLX CPU 流）
 python -m pytest tests/test_dag_semantics.py -q
+
+# 实验 B：局部依赖干预探针（77 个探针，s20_cal，两种 merge 模式）
+python scripts/stage20_probe.py --input data257/s20_cal.jsonl --max-samples 12 \
+  --output results/stage2_0/probe
+
+# 实验 C 第一轮：自由运行筛选（s20_cal，16 张候选 DAG × 2 模式 + 4 个删层对照）
+python scripts/stage20_screen.py --input data257/s20_cal.jsonl --max-samples 12 \
+  --role calibration --output results/stage2_0/screen
+
+# 实验 C 第二轮：选型（s20_val，跑完冻结 selection.json）
+python scripts/stage20_screen.py --input data257/s20_val.jsonl --max-samples 32 \
+  --role validation --output results/stage2_0/screen_val
+
+# 实验 C 第三轮：盲测（s20_test / s20_ood_c4，只跑一次；--only 限定冻结集）
+python scripts/stage20_screen.py --input data257/s20_test.jsonl --max-samples 64 \
+  --role blind --only serial,p1,p2,p3,g2,g4 --output results/stage2_0/blind_test
+python scripts/stage20_screen.py --input data257/s20_ood_c4.jsonl --max-samples 64 \
+  --role blind --only serial,p1,p2,p3,g2,g4 --output results/stage2_0/blind_ood
 ```
 
 DAG spec 三种形式：`chain`；`名字:p0|p1|...|p27`（每块一部分，逗号列表，支持 `10-12` 区间）；
@@ -422,9 +440,13 @@ DAG spec 三种形式：`chain`；`名字:p0|p1|...|p27`（每块一部分，逗
 - **门槛 0 未过之前不做任何搜索。** 当前六项检查全过，其中三项逐位等价（G0.1a 链式复现原
   模型、G0.2a g2 DAG == 生产 g2、G0.2d 窗口 DAG == run_plan），prefix-k ΔNLL 与 Stage 1.5
   历史数字完全一致。merge 机制去掉串行捷径后只剩 bf16 双舍入噪声（rel ≤ 0.0159）。
+- **串行延续捷径只允许完整前缀。** 捷径要求 `P_i == {0..i-1}`；否则必须走 merge/回退分支，
+  否则「丢掉中边、保留后边」会被运行状态悄悄抵消，探针变成 no-op。
 - **理论深度不等于延迟。** 257 token prefill 下 g4（深度 7）比串行逐块 eval 还慢；DAG 的
   merge 记账（合并点数量决定）要付 6%–21%。窗口实验只在中窗做、合并点越少越接近串行成本。
 - **深度必须按最长依赖链算**，不能用分组数冒充；窗口外串行意味着总深度 = 10 + 窗口深度 + 10。
 - **`delta_override` 探针只筛候选**；教师入口 anchor 上的局部干预是 triage，最终判定必须是
   完整自由运行的 ΔNLL / KL / top1。
+- **删层对照（del-w*）必须同深度出现**：自由运行表里同时有 DAG（28 block 全执行）与删层
+  （少执行 block），否则会把删层损失误读成并行代价。
 - **测量与筛选用 s20_cal、选型用 s20_val、盲测 s20_test / s20_ood_c4 只跑一次。**

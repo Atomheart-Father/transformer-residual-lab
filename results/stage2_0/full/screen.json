@@ -1,0 +1,560 @@
+{
+  "n_samples": 12,
+  "variants": {
+    "g2@materialized": {
+      "n": 12,
+      "delta_nll_mean": 8.40738312403361,
+      "delta_nll_median": 8.609854221343994,
+      "delta_nll_p90": 9.461573362350464,
+      "kl_mean": 8.487786134084066,
+      "top1_mean": 0.028971354166666668,
+      "critical_path": 14,
+      "missed_updates_total": 14,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 8.40738312403361,
+        "ci95": [
+          7.976085594793161,
+          8.846188613275684
+        ]
+      },
+      "vs_g2": null
+    },
+    "g2@roadmap": {
+      "n": 12,
+      "delta_nll_mean": 8.402484575907389,
+      "delta_nll_median": 8.622451305389404,
+      "delta_nll_p90": 9.444575738906861,
+      "kl_mean": 8.48495626449585,
+      "top1_mean": 0.0283203125,
+      "critical_path": 14,
+      "missed_updates_total": 14,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 8.402484575907389,
+        "ci95": [
+          7.961949008206527,
+          8.84235575099786
+        ]
+      }
+    },
+    "g3@materialized": {
+      "n": 12,
+      "delta_nll_mean": 12.839397748311361,
+      "delta_nll_median": 12.858459949493408,
+      "delta_nll_p90": 13.84928047657013,
+      "kl_mean": 12.911181608835856,
+      "top1_mean": 0.011393229166666666,
+      "critical_path": 10,
+      "missed_updates_total": 27,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 12.839397748311361,
+        "ci95": [
+          12.169210842748484,
+          13.620576405028501
+        ]
+      },
+      "vs_g2": {
+        "mean_diff": 4.432014624277751,
+        "ci95": [
+          3.7813303331534067,
+          5.187022471427915
+        ]
+      }
+    },
+    "g3@roadmap": {
+      "n": 12,
+      "delta_nll_mean": 12.834203640619913,
+      "delta_nll_median": 12.8525071144104,
+      "delta_nll_p90": 13.850083470344543,
+      "kl_mean": 12.906851132710775,
+      "top1_mean": 0.011393229166666666,
+      "critical_path": 10,
+      "missed_updates_total": 27,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 12.834203640619913,
+        "ci95": [
+          12.157295175393422,
+          13.625354841848214
+        ]
+      }
+    },
+    "g4@materialized": {
+      "n": 12,
+      "delta_nll_mean": 12.447749694188436,
+      "delta_nll_median": 12.45473301410675,
+      "delta_nll_p90": 14.191968703269959,
+      "kl_mean": 12.46418825785319,
+      "top1_mean": 0.005208333333333333,
+      "critical_path": 7,
+      "missed_updates_total": 42,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 12.447749694188436,
+        "ci95": [
+          11.65483031521241,
+          13.251756365100542
+        ]
+      },
+      "vs_g2": {
+        "mean_diff": 4.040366570154826,
+        "ci95": [
+          3.0734641969203946,
+          5.02571616768837
+        ]
+      }
+    },
+    "g4@roadmap": {
+      "n": 12,
+      "delta_nll_mean": 12.449429750442505,
+      "delta_nll_median": 12.462179064750671,
+      "delta_nll_p90": 14.172684454917908,
+      "kl_mean": 12.467287143071493,
+      "top1_mean": 0.005533854166666667,
+      "critical_path": 7,
+      "missed_updates_total": 42,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 12.449429750442505,
+        "ci95": [
+          11.661801116665204,
+          13.247521845499675
+        ]
+      }
+    },
+    "irr-a-t3@materialized": {
+      "n": 12,
+      "delta_nll_mean": 5.734735409418742,
+      "delta_nll_median": 5.584046840667725,
+      "delta_nll_p90": 6.8567314624786375,
+      "kl_mean": 5.798194964726766,
+      "top1_mean": 0.12044270833333333,
+      "critical_path": 7,
+      "missed_updates_total": 77,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 5.734735409418742,
+        "ci95": [
+          5.305104737480481,
+          6.176946016649404
+        ]
+      },
+      "vs_g2": {
+        "mean_diff": -2.672647714614868,
+        "ci95": [
+          -3.04040877421697,
+          -2.2552649696667997
+        ]
+      }
+    },
+    "irr-a-t3@roadmap": {
+      "n": 12,
+      "delta_nll_mean": 5.738526423772176,
+      "delta_nll_median": 5.586693286895752,
+      "delta_nll_p90": 6.878815698623657,
+      "kl_mean": 5.8027628262837725,
+      "top1_mean": 0.11783854166666667,
+      "critical_path": 7,
+      "missed_updates_total": 77,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 5.738526423772176,
+        "ci95": [
+          5.31518007516861,
+          6.184129978716373
+        ]
+      }
+    },
+    "irr-a@materialized": {
+      "n": 12,
+      "delta_nll_mean": 3.8027474085489907,
+      "delta_nll_median": 3.772820234298706,
+      "delta_nll_p90": 4.025614166259766,
+      "kl_mean": 3.8083290457725525,
+      "top1_mean": 0.18229166666666666,
+      "critical_path": 7,
+      "missed_updates_total": 80,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 3.8027474085489907,
+        "ci95": [
+          3.681169664859772,
+          3.9359296793739
+        ]
+      },
+      "vs_g2": {
+        "mean_diff": -4.604635715484619,
+        "ci95": [
+          -4.998623203237852,
+          -4.201202550530434
+        ]
+      }
+    },
+    "irr-a@roadmap": {
+      "n": 12,
+      "delta_nll_mean": 3.803375999132792,
+      "delta_nll_median": 3.77626371383667,
+      "delta_nll_p90": 4.023140382766724,
+      "kl_mean": 3.8086084723472595,
+      "top1_mean": 0.18391927083333334,
+      "critical_path": 7,
+      "missed_updates_total": 80,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 3.803375999132792,
+        "ci95": [
+          3.683472695449988,
+          3.9366339127222694
+        ]
+      }
+    },
+    "keep7": {
+      "n": 12,
+      "delta_nll_mean": 13.930993795394897,
+      "delta_nll_median": 14.657933473587036,
+      "delta_nll_p90": 15.969987201690675,
+      "kl_mean": 14.155565818150839,
+      "top1_mean": 0.0,
+      "critical_path": 7,
+      "missed_updates_total": null,
+      "executed_blocks": 7,
+      "vs_serial": {
+        "mean_diff": 13.930993795394897,
+        "ci95": [
+          12.837368027369182,
+          14.957436110575992
+        ]
+      },
+      "vs_g2": {
+        "mean_diff": 5.523610671361287,
+        "ci95": [
+          4.447413235902786,
+          6.56223225792249
+        ]
+      }
+    },
+    "keep9": {
+      "n": 12,
+      "delta_nll_mean": 14.400522788365683,
+      "delta_nll_median": 13.871841788291931,
+      "delta_nll_p90": 16.78843734264374,
+      "kl_mean": 14.382739702860514,
+      "top1_mean": 0.0,
+      "critical_path": 9,
+      "missed_updates_total": null,
+      "executed_blocks": 9,
+      "vs_serial": {
+        "mean_diff": 14.400522788365683,
+        "ci95": [
+          13.244800898929437,
+          15.670796713232992
+        ]
+      },
+      "vs_g2": {
+        "mean_diff": 5.993139664332072,
+        "ci95": [
+          4.833537093798319,
+          7.241523003578186
+        ]
+      }
+    },
+    "prefix3-g2@materialized": {
+      "n": 12,
+      "delta_nll_mean": 1.0568047364552815,
+      "delta_nll_median": 1.0517159700393677,
+      "delta_nll_p90": 1.1965044260025024,
+      "kl_mean": 1.0590547323226929,
+      "top1_mean": 0.5113932291666666,
+      "critical_path": 16,
+      "missed_updates_total": 12,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 1.0568047364552815,
+        "ci95": [
+          1.0060764769713084,
+          1.1102520212531088
+        ]
+      },
+      "vs_g2": {
+        "mean_diff": -7.350578387578328,
+        "ci95": [
+          -7.796423727273941,
+          -6.921064670880636
+        ]
+      }
+    },
+    "prefix3-g2@roadmap": {
+      "n": 12,
+      "delta_nll_mean": 1.056203544139862,
+      "delta_nll_median": 1.0540674924850464,
+      "delta_nll_p90": 1.19737708568573,
+      "kl_mean": 1.0592237412929535,
+      "top1_mean": 0.5130208333333334,
+      "critical_path": 16,
+      "missed_updates_total": 12,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 1.056203544139862,
+        "ci95": [
+          1.0050957774122558,
+          1.109210477769375
+        ]
+      }
+    },
+    "serial@materialized": {
+      "n": 12,
+      "delta_nll_mean": 0.0,
+      "delta_nll_median": 0.0,
+      "delta_nll_p90": 0.0,
+      "kl_mean": 0.0,
+      "top1_mean": 1.0,
+      "critical_path": 28,
+      "missed_updates_total": 0,
+      "executed_blocks": 28,
+      "vs_serial": null,
+      "vs_g2": {
+        "mean_diff": -8.40738312403361,
+        "ci95": [
+          -8.845781096319357,
+          -7.973233188688756
+        ]
+      }
+    },
+    "serial@roadmap": {
+      "n": 12,
+      "delta_nll_mean": 0.0,
+      "delta_nll_median": 0.0,
+      "delta_nll_p90": 0.0,
+      "kl_mean": 0.0,
+      "top1_mean": 1.0,
+      "critical_path": 28,
+      "missed_updates_total": 0,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 0.0,
+        "ci95": [
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "win0-8-g2@materialized": {
+      "n": 12,
+      "delta_nll_mean": 7.572107871373494,
+      "delta_nll_median": 7.733937740325928,
+      "delta_nll_p90": 8.39982075691223,
+      "kl_mean": 7.672712961832683,
+      "top1_mean": 0.047200520833333336,
+      "critical_path": 24,
+      "missed_updates_total": 4,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 7.572107871373494,
+        "ci95": [
+          7.063243586818377,
+          8.076296644409497
+        ]
+      },
+      "vs_g2": {
+        "mean_diff": -0.8352752526601156,
+        "ci95": [
+          -1.0136681457360586,
+          -0.6640465855598453
+        ]
+      }
+    },
+    "win0-8-g2@roadmap": {
+      "n": 12,
+      "delta_nll_mean": 7.566964149475098,
+      "delta_nll_median": 7.730195045471191,
+      "delta_nll_p90": 8.385804796218872,
+      "kl_mean": 7.668754140535991,
+      "top1_mean": 0.047200520833333336,
+      "critical_path": 24,
+      "missed_updates_total": 4,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 7.566964149475098,
+        "ci95": [
+          7.052009642620882,
+          8.064828895032406
+        ]
+      }
+    },
+    "win10-18-g2@materialized": {
+      "n": 12,
+      "delta_nll_mean": 0.18741466601689658,
+      "delta_nll_median": 0.18886184692382812,
+      "delta_nll_p90": 0.22500195503234863,
+      "kl_mean": 0.19086128969987234,
+      "top1_mean": 0.7662760416666666,
+      "critical_path": 24,
+      "missed_updates_total": 4,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 0.18741466601689658,
+        "ci95": [
+          0.1674503947297732,
+          0.2073328028122584
+        ]
+      },
+      "vs_g2": {
+        "mean_diff": -8.219968458016714,
+        "ci95": [
+          -8.658027452230453,
+          -7.779543003439904
+        ]
+      }
+    },
+    "win10-18-g2@roadmap": {
+      "n": 12,
+      "delta_nll_mean": 0.18785850207010904,
+      "delta_nll_median": 0.18835437297821045,
+      "delta_nll_p90": 0.22142975330352785,
+      "kl_mean": 0.1910743589202563,
+      "top1_mean": 0.763671875,
+      "critical_path": 24,
+      "missed_updates_total": 4,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 0.18785850207010904,
+        "ci95": [
+          0.1687722737590472,
+          0.20739370981852212
+        ]
+      }
+    },
+    "win15-23-g2@materialized": {
+      "n": 12,
+      "delta_nll_mean": 0.22434939940770468,
+      "delta_nll_median": 0.23279500007629395,
+      "delta_nll_p90": 0.24276378154754638,
+      "kl_mean": 0.22434828306237856,
+      "top1_mean": 0.7457682291666666,
+      "critical_path": 24,
+      "missed_updates_total": 4,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 0.22434939940770468,
+        "ci95": [
+          0.2056258291006088,
+          0.24157082736492155
+        ]
+      },
+      "vs_g2": {
+        "mean_diff": -8.183033724625906,
+        "ci95": [
+          -8.616550374527773,
+          -7.7557004327575365
+        ]
+      }
+    },
+    "win15-23-g2@roadmap": {
+      "n": 12,
+      "delta_nll_mean": 0.22403979301452637,
+      "delta_nll_median": 0.23365211486816406,
+      "delta_nll_p90": 0.2443572998046875,
+      "kl_mean": 0.2243144872287909,
+      "top1_mean": 0.75,
+      "critical_path": 24,
+      "missed_updates_total": 4,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 0.22403979301452637,
+        "ci95": [
+          0.20464637031157812,
+          0.24119340926408767
+        ]
+      }
+    },
+    "win20-28-g2@materialized": {
+      "n": 12,
+      "delta_nll_mean": 0.7144883672396342,
+      "delta_nll_median": 0.7409278154373169,
+      "delta_nll_p90": 0.8774162530899048,
+      "kl_mean": 0.6978465815385183,
+      "top1_mean": 0.5703125,
+      "critical_path": 24,
+      "missed_updates_total": 4,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 0.7144883672396342,
+        "ci95": [
+          0.6374178205927212,
+          0.78887237260739
+        ]
+      },
+      "vs_g2": {
+        "mean_diff": -7.692894756793976,
+        "ci95": [
+          -8.099633939067521,
+          -7.290139150619507
+        ]
+      }
+    },
+    "win20-28-g2@roadmap": {
+      "n": 12,
+      "delta_nll_mean": 0.7132784128189087,
+      "delta_nll_median": 0.7350780963897705,
+      "delta_nll_p90": 0.8746406555175782,
+      "kl_mean": 0.6987007906039556,
+      "top1_mean": 0.5680338541666666,
+      "critical_path": 24,
+      "missed_updates_total": 4,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 0.7132784128189087,
+        "ci95": [
+          0.6357330838839214,
+          0.7899351855119069
+        ]
+      }
+    },
+    "win5-13-g2@materialized": {
+      "n": 12,
+      "delta_nll_mean": 0.3677435517311096,
+      "delta_nll_median": 0.3861582279205322,
+      "delta_nll_p90": 0.40885324478149415,
+      "kl_mean": 0.37161171436309814,
+      "top1_mean": 0.6969401041666666,
+      "critical_path": 24,
+      "missed_updates_total": 4,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 0.3677435517311096,
+        "ci95": [
+          0.3374180018901825,
+          0.39264997045199074
+        ]
+      },
+      "vs_g2": {
+        "mean_diff": -8.0396395723025,
+        "ci95": [
+          -8.488724706570308,
+          -7.597642393410205
+        ]
+      }
+    },
+    "win5-13-g2@roadmap": {
+      "n": 12,
+      "delta_nll_mean": 0.37003753582636517,
+      "delta_nll_median": 0.3892124891281128,
+      "delta_nll_p90": 0.4160980463027954,
+      "kl_mean": 0.37258470555146533,
+      "top1_mean": 0.7008463541666666,
+      "critical_path": 24,
+      "missed_updates_total": 4,
+      "executed_blocks": 28,
+      "vs_serial": {
+        "mean_diff": 0.37003753582636517,
+        "ci95": [
+          0.33947875946760175,
+          0.3953247100114822
+        ]
+      }
+    }
+  },
+  "note": "Window scan: all five windows share depth 24 and 4 missed updates; only the position varies."
+}

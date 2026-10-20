@@ -1,0 +1,479 @@
+{
+  "n_samples": 64,
+  "variants": {
+    "del-w1": {
+      "n": 64,
+      "delta_nll_mean": 0.11016879230737686,
+      "delta_nll_median": 0.09455668926239014,
+      "delta_nll_p90": 0.15086405277252196,
+      "kl_mean": 0.12459309387486428,
+      "top1_mean": 0.79803466796875,
+      "critical_path": 27,
+      "window_level_sizes": null,
+      "missed_updates_in_window": 1,
+      "vs_serial_materialized": {
+        "mean_diff": 0.11016879230737686,
+        "ci95": [
+          0.09160613822750747,
+          0.13642957243137058
+        ]
+      },
+      "vs_g2_materialized": {
+        "mean_diff": -0.04045293293893337,
+        "ci95": [
+          -0.05218176641501486,
+          -0.02926419037394228
+        ]
+      }
+    },
+    "del-w2": {
+      "n": 64,
+      "delta_nll_mean": 0.2136446963995695,
+      "delta_nll_median": 0.19818150997161865,
+      "delta_nll_p90": 0.2993772506713867,
+      "kl_mean": 0.2337444785516709,
+      "top1_mean": 0.72686767578125,
+      "critical_path": 26,
+      "window_level_sizes": null,
+      "missed_updates_in_window": 2,
+      "vs_serial_materialized": {
+        "mean_diff": 0.2136446963995695,
+        "ci95": [
+          0.19094954165630043,
+          0.24155494347214698
+        ]
+      },
+      "vs_g2_materialized": {
+        "mean_diff": 0.06302297115325928,
+        "ci95": [
+          0.05030171610414982,
+          0.07537057353183625
+        ]
+      }
+    },
+    "del-w3": {
+      "n": 64,
+      "delta_nll_mean": 0.2615151610225439,
+      "delta_nll_median": 0.2454930543899536,
+      "delta_nll_p90": 0.3550691366195679,
+      "kl_mean": 0.2836401609238237,
+      "top1_mean": 0.7025146484375,
+      "critical_path": 25,
+      "window_level_sizes": null,
+      "missed_updates_in_window": 3,
+      "vs_serial_materialized": {
+        "mean_diff": 0.2615151610225439,
+        "ci95": [
+          0.23573540314100683,
+          0.29326858255080873
+        ]
+      },
+      "vs_g2_materialized": {
+        "mean_diff": 0.11089343577623367,
+        "ci95": [
+          0.09739320753142237,
+          0.12431246172636748
+        ]
+      }
+    },
+    "del-w4": {
+      "n": 64,
+      "delta_nll_mean": 0.432407571002841,
+      "delta_nll_median": 0.4177825450897217,
+      "delta_nll_p90": 0.5685131788253786,
+      "kl_mean": 0.45441091526299715,
+      "top1_mean": 0.63372802734375,
+      "critical_path": 24,
+      "window_level_sizes": null,
+      "missed_updates_in_window": 4,
+      "vs_serial_materialized": {
+        "mean_diff": 0.432407571002841,
+        "ci95": [
+          0.39838042412884533,
+          0.4724859979469329
+        ]
+      },
+      "vs_g2_materialized": {
+        "mean_diff": 0.28178584575653076,
+        "ci95": [
+          0.26111521385610104,
+          0.3036950820125639
+        ]
+      }
+    },
+    "g2@materialized": {
+      "n": 64,
+      "delta_nll_mean": 0.15062172524631023,
+      "delta_nll_median": 0.1350153684616089,
+      "delta_nll_p90": 0.21723902225494385,
+      "kl_mean": 0.15652863134164363,
+      "top1_mean": 0.7674560546875,
+      "critical_path": 24,
+      "window_level_sizes": [
+        2,
+        2,
+        2,
+        2
+      ],
+      "missed_updates_in_window": 4,
+      "vs_serial_materialized": {
+        "mean_diff": 0.15062172524631023,
+        "ci95": [
+          0.1301995685789734,
+          0.1788541182875633
+        ]
+      },
+      "vs_g2_materialized": null
+    },
+    "g2@roadmap": {
+      "n": 64,
+      "delta_nll_mean": 0.1507088616490364,
+      "delta_nll_median": 0.1335124969482422,
+      "delta_nll_p90": 0.22067222595214844,
+      "kl_mean": 0.1567852523876354,
+      "top1_mean": 0.7666015625,
+      "critical_path": 24,
+      "window_level_sizes": [
+        2,
+        2,
+        2,
+        2
+      ],
+      "missed_updates_in_window": 4,
+      "vs_serial_materialized": {
+        "mean_diff": 0.1507088616490364,
+        "ci95": [
+          0.12980187293142081,
+          0.1790450759232044
+        ]
+      }
+    },
+    "g4@materialized": {
+      "n": 64,
+      "delta_nll_mean": 0.4707812834531069,
+      "delta_nll_median": 0.4478647708892822,
+      "delta_nll_p90": 0.5986103057861328,
+      "kl_mean": 0.47599972458556294,
+      "top1_mean": 0.62017822265625,
+      "critical_path": 22,
+      "window_level_sizes": [
+        4,
+        4
+      ],
+      "missed_updates_in_window": 12,
+      "vs_serial_materialized": {
+        "mean_diff": 0.4707812834531069,
+        "ci95": [
+          0.44078531125560405,
+          0.5053713449276982
+        ]
+      },
+      "vs_g2_materialized": {
+        "mean_diff": 0.32015955820679665,
+        "ci95": [
+          0.3034690134227276,
+          0.3365070798434317
+        ]
+      }
+    },
+    "g4@roadmap": {
+      "n": 64,
+      "delta_nll_mean": 0.47020173259079456,
+      "delta_nll_median": 0.4474703073501587,
+      "delta_nll_p90": 0.5941843032836914,
+      "kl_mean": 0.476058641448617,
+      "top1_mean": 0.6217041015625,
+      "critical_path": 22,
+      "window_level_sizes": [
+        4,
+        4
+      ],
+      "missed_updates_in_window": 12,
+      "vs_serial_materialized": {
+        "mean_diff": 0.47020173259079456,
+        "ci95": [
+          0.44049174524843693,
+          0.5050263670738786
+        ]
+      }
+    },
+    "mix3@materialized": {
+      "n": 64,
+      "delta_nll_mean": 0.2840296421200037,
+      "delta_nll_median": 0.27624011039733887,
+      "delta_nll_p90": 0.38203125,
+      "kl_mean": 0.2896826278883964,
+      "top1_mean": 0.69378662109375,
+      "critical_path": 23,
+      "window_level_sizes": [
+        3,
+        3,
+        2
+      ],
+      "missed_updates_in_window": 7,
+      "vs_serial_materialized": {
+        "mean_diff": 0.2840296421200037,
+        "ci95": [
+          0.2574541799258441,
+          0.31483508395031096
+        ]
+      },
+      "vs_g2_materialized": {
+        "mean_diff": 0.13340791687369347,
+        "ci95": [
+          0.12074542017653585,
+          0.14553825762122866
+        ]
+      }
+    },
+    "mix3@roadmap": {
+      "n": 64,
+      "delta_nll_mean": 0.28419951908290386,
+      "delta_nll_median": 0.27634286880493164,
+      "delta_nll_p90": 0.38064122200012207,
+      "kl_mean": 0.2898308599833399,
+      "top1_mean": 0.69281005859375,
+      "critical_path": 23,
+      "window_level_sizes": [
+        3,
+        3,
+        2
+      ],
+      "missed_updates_in_window": 7,
+      "vs_serial_materialized": {
+        "mean_diff": 0.28419951908290386,
+        "ci95": [
+          0.2578678935300559,
+          0.31555187636986376
+        ]
+      }
+    },
+    "p2@materialized": {
+      "n": 64,
+      "delta_nll_mean": 0.06905223429203033,
+      "delta_nll_median": 0.062143683433532715,
+      "delta_nll_p90": 0.10025229454040528,
+      "kl_mean": 0.07597955473465845,
+      "top1_mean": 0.8404541015625,
+      "critical_path": 26,
+      "window_level_sizes": [
+        2,
+        2,
+        1,
+        1,
+        1,
+        1
+      ],
+      "missed_updates_in_window": 2,
+      "vs_serial_materialized": {
+        "mean_diff": 0.06905223429203033,
+        "ci95": [
+          0.053799604438245295,
+          0.09221896901726719
+        ]
+      },
+      "vs_g2_materialized": {
+        "mean_diff": -0.0815694909542799,
+        "ci95": [
+          -0.09039150476455689,
+          -0.0730787965003401
+        ]
+      }
+    },
+    "p2@roadmap": {
+      "n": 64,
+      "delta_nll_mean": 0.0688125230371952,
+      "delta_nll_median": 0.06191009283065796,
+      "delta_nll_p90": 0.09821715354919434,
+      "kl_mean": 0.0760982891661115,
+      "top1_mean": 0.83929443359375,
+      "critical_path": 26,
+      "window_level_sizes": [
+        2,
+        2,
+        1,
+        1,
+        1,
+        1
+      ],
+      "missed_updates_in_window": 2,
+      "vs_serial_materialized": {
+        "mean_diff": 0.0688125230371952,
+        "ci95": [
+          0.05366340512409806,
+          0.09237098102457818
+        ]
+      }
+    },
+    "p3@materialized": {
+      "n": 64,
+      "delta_nll_mean": 0.10722479410469532,
+      "delta_nll_median": 0.0974506139755249,
+      "delta_nll_p90": 0.15380167961120605,
+      "kl_mean": 0.11107095971237868,
+      "top1_mean": 0.8023681640625,
+      "critical_path": 25,
+      "window_level_sizes": [
+        2,
+        2,
+        2,
+        1,
+        1
+      ],
+      "missed_updates_in_window": 3,
+      "vs_serial_materialized": {
+        "mean_diff": 0.10722479410469532,
+        "ci95": [
+          0.08964768834412098,
+          0.13108082246035335
+        ]
+      },
+      "vs_g2_materialized": {
+        "mean_diff": -0.043396931141614914,
+        "ci95": [
+          -0.04940149709582329,
+          -0.03755633886903525
+        ]
+      }
+    },
+    "p3@roadmap": {
+      "n": 64,
+      "delta_nll_mean": 0.10682535357773304,
+      "delta_nll_median": 0.09776151180267334,
+      "delta_nll_p90": 0.152337646484375,
+      "kl_mean": 0.11123299458995461,
+      "top1_mean": 0.80328369140625,
+      "critical_path": 25,
+      "window_level_sizes": [
+        2,
+        2,
+        2,
+        1,
+        1
+      ],
+      "missed_updates_in_window": 3,
+      "vs_serial_materialized": {
+        "mean_diff": 0.10682535357773304,
+        "ci95": [
+          0.08950040196068584,
+          0.1317998556420207
+        ]
+      }
+    },
+    "pair-mid@materialized": {
+      "n": 64,
+      "delta_nll_mean": 0.024910390377044678,
+      "delta_nll_median": 0.01805102825164795,
+      "delta_nll_p90": 0.038807177543640145,
+      "kl_mean": 0.02797734533669427,
+      "top1_mean": 0.90460205078125,
+      "critical_path": 27,
+      "window_level_sizes": [
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1
+      ],
+      "missed_updates_in_window": 1,
+      "vs_serial_materialized": {
+        "mean_diff": 0.024910390377044678,
+        "ci95": [
+          0.015667271660640837,
+          0.04033017163164913
+        ]
+      },
+      "vs_g2_materialized": {
+        "mean_diff": -0.12571133486926556,
+        "ci95": [
+          -0.14051223830319942,
+          -0.11228653024882078
+        ]
+      }
+    },
+    "pair-mid@roadmap": {
+      "n": 64,
+      "delta_nll_mean": 0.02480129338800907,
+      "delta_nll_median": 0.018041133880615234,
+      "delta_nll_p90": 0.039146161079406744,
+      "kl_mean": 0.028107993537560105,
+      "top1_mean": 0.90240478515625,
+      "critical_path": 27,
+      "window_level_sizes": [
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1
+      ],
+      "missed_updates_in_window": 1,
+      "vs_serial_materialized": {
+        "mean_diff": 0.02480129338800907,
+        "ci95": [
+          0.01566882976330817,
+          0.04024038789793847
+        ]
+      }
+    },
+    "serial@materialized": {
+      "n": 64,
+      "delta_nll_mean": 0.0,
+      "delta_nll_median": 0.0,
+      "delta_nll_p90": 0.0,
+      "kl_mean": 0.0,
+      "top1_mean": 1.0,
+      "critical_path": 28,
+      "window_level_sizes": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "missed_updates_in_window": 0,
+      "vs_serial_materialized": null,
+      "vs_g2_materialized": {
+        "mean_diff": -0.15062172524631023,
+        "ci95": [
+          -0.17819197555072605,
+          -0.12978768255561593
+        ]
+      }
+    },
+    "serial@roadmap": {
+      "n": 64,
+      "delta_nll_mean": 0.0,
+      "delta_nll_median": 0.0,
+      "delta_nll_p90": 0.0,
+      "kl_mean": 0.0,
+      "top1_mean": 1.0,
+      "critical_path": 28,
+      "window_level_sizes": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "missed_updates_in_window": 0,
+      "vs_serial_materialized": {
+        "mean_diff": 0.0,
+        "ci95": [
+          0.0,
+          0.0
+        ]
+      }
+    }
+  },
+  "note": "missed_updates_in_window = sum over window blocks of (i - |P_i|): how many upstream updates the graph forgoes. Deletion controls execute fewer blocks; DAGs always run all 28."
+}

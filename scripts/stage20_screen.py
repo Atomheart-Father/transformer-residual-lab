@@ -56,7 +56,7 @@ LO, HI = 10, 18
 MODES = ("materialized", "roadmap")
 
 
-def levels_window(sizes):
+def levels_window(sizes, lo, hi):
     """sizes = blocks per level inside the window, contiguous, prefix-maximal.
 
     Every block of a level reads the merge of all strictly earlier levels
@@ -64,57 +64,59 @@ def levels_window(sizes):
     updates and contributes one dependency level.
     """
     p = {}
-    start = LO
+    start = lo
     for size in sizes:
         blocks = list(range(start, start + size))
         for b in blocks:
             p[b] = set(range(start))     # same anchor for the whole level
         start += size
-    assert start == HI, (sizes, start)
+    assert start == hi, (sizes, start)
     return p
 
 
-def candidates() -> dict[str, dict[int, set[int]]]:
+def candidates(lo: int, hi: int) -> dict[str, dict[int, set[int]]]:
     out: dict[str, dict[int, set[int]]] = {}
-    out["serial"] = {i: set(range(i)) for i in range(LO, HI)}
-    out["p1"] = levels_window([2, 1, 1, 1, 1, 1, 1])  # identical to pair-first
-    out["p2"] = levels_window([2, 2, 1, 1, 1, 1])
-    out["p3"] = levels_window([2, 2, 2, 1, 1])
-    out["g2"] = levels_window([2, 2, 2, 2])
-    out["g4"] = levels_window([4, 4])
-    out["mix3"] = levels_window([3, 3, 2])
-    out["mix4"] = levels_window([3, 2, 2, 1])
-    # pair-position controls at matched misses=1, depth=27 (p1 IS pair-first)
-    out["pair-mid"] = levels_window([1, 1, 2, 1, 1, 1, 1])
-    out["pair-last"] = levels_window([1, 1, 1, 1, 1, 1, 2])
-    # shifted pairing: (11,12)(13,14)(15,16)(17) - same miss count as g2,
-    # one level deeper
-    sh = {i: set(range(i)) for i in range(LO, HI)}
-    for a in (11, 13, 15):
+    out["serial"] = {i: set(range(i)) for i in range(lo, hi)}
+    out["p1"] = levels_window([2, 1, 1, 1, 1, 1, 1], lo, hi)  # identical to pair-first
+    out["p2"] = levels_window([2, 2, 1, 1, 1, 1], lo, hi)
+    out["p3"] = levels_window([2, 2, 2, 1, 1], lo, hi)
+    out["g2"] = levels_window([2, 2, 2, 2], lo, hi)
+    out["g4"] = levels_window([4, 4], lo, hi)
+    out["mix3"] = levels_window([3, 3, 2], lo, hi)
+    out["mix4"] = levels_window([3, 2, 2, 1], lo, hi)
+    # pair-position controls at matched misses=1 (p1 IS pair-first)
+    out["pair-mid"] = levels_window([1, 1, 2, 1, 1, 1, 1], lo, hi)
+    out["pair-last"] = levels_window([1, 1, 1, 1, 1, 1, 2], lo, hi)
+    # shifted pairing: (lo+1,lo+2)(lo+3,lo+4)(lo+5,lo+6) + serial lo, hi-1:
+    # same miss count as g2, one level deeper, pairs in the middle
+    sh = {i: set(range(i)) for i in range(lo, hi)}
+    for a in (lo + 1, lo + 3, lo + 5):
         sh[a] = set(range(a)); sh[a + 1] = set(range(a))
     out["hyp-shift"] = sh
     # non-contiguous alignment with the same level sizes as g2: levels are
-    # {10,12} {11,13} {14,16} {15,17}. Prefix-maximal predecessors force
-    # deeper waits for the out-of-order blocks, so the same depth costs
+    # {lo,lo+2} {lo+1,lo+3} {lo+4,lo+6} {lo+5,lo+7}. Prefix-maximal predecessors
+    # force deeper waits for the out-of-order blocks, so the same depth costs
     # more missed updates than the contiguous pairing.
-    nc = {i: set(range(i)) for i in range(LO, HI)}
-    nc[10] = set(range(10)); nc[12] = set(range(10))
-    nc[11] = set(range(11)); nc[13] = set(range(11)) | {12}
-    nc[14] = set(range(14)); nc[16] = set(range(14))
-    nc[15] = set(range(15)); nc[17] = set(range(15)) | {16}
+    nc = {i: set(range(i)) for i in range(lo, hi)}
+    nc[lo] = set(range(lo)); nc[lo + 2] = set(range(lo))
+    nc[lo + 1] = set(range(lo + 1)); nc[lo + 3] = set(range(lo + 1)) | {lo + 2}
+    nc[lo + 4] = set(range(lo + 4)); nc[lo + 6] = set(range(lo + 4))
+    nc[lo + 5] = set(range(lo + 5)); nc[lo + 7] = set(range(lo + 5)) | {lo + 6}
     out["noncontig"] = nc
-    # the sparse multi-predecessor graph used in the bench
+    # the sparse multi-predecessor graph used in the bench, shifted to the window
     out["sparse-x1"] = {
-        10: set(range(10)), 11: set(range(10)), 12: {10}, 13: {11},
-        14: {10, 12}, 15: {11, 13}, 16: {14}, 17: {15},
+        lo: set(range(lo)), lo + 1: set(range(lo)),
+        lo + 2: {lo}, lo + 3: {lo + 1},
+        lo + 4: {lo, lo + 2}, lo + 5: {lo + 1, lo + 3},
+        lo + 6: {lo + 4}, lo + 7: {lo + 5},
     }
     return out
 
 
-def window_dag(name: str, n: int, pw: dict[int, set[int]]) -> Dag:
-    preds = tuple(frozenset(range(i)) if not (LO <= i < HI) else frozenset(pw[i])
+def window_dag(name: str, n: int, pw: dict[int, set[int]], lo: int, hi: int) -> Dag:
+    preds = tuple(frozenset(range(i)) if not (lo <= i < hi) else frozenset(pw[i])
                   for i in range(n))
-    return Dag(name, n, preds, note=f"window [{LO},{HI}) candidate")
+    return Dag(name, n, preds, note=f"window [{lo},{hi}) candidate")
 
 
 def deletion_plan(name: str, n: int, deleted: list[int]) -> Plan:
@@ -129,7 +131,19 @@ def main() -> None:
     ap.add_argument("--input", type=Path, default=Path("data257/s20_cal.jsonl"))
     ap.add_argument("--max-samples", type=int, default=12)
     ap.add_argument("--output", type=Path, default=Path("results/stage2_0/screen"))
+    ap.add_argument("--role", default="calibration",
+                    choices=["calibration", "validation", "blind"],
+                    help="data role; only changes manifest wording and the "
+                         "print header, never the measurement")
+    ap.add_argument("--only", default="",
+                    help="comma-separated candidate names to run (default: all)")
+    ap.add_argument("--lo", type=int, default=LO,
+                    help="first block of the parallel window (inclusive)")
+    ap.add_argument("--hi", type=int, default=HI,
+                    help="end of the parallel window (exclusive); must be 8 wide")
     args = ap.parse_args()
+    if args.hi - args.lo != 8:
+        raise SystemExit("the candidate family assumes an 8-wide window")
 
     import mlx.core as mx
     from mlx_lm import load
@@ -140,19 +154,27 @@ def main() -> None:
     model.eval()
     n = len(model.model.layers)
 
-    cands = candidates()
-    dags = {k: window_dag(k, n, v) for k, v in cands.items()}
-    dels = {f"del-w{k}": deletion_plan(f"del-w{k}", n, [10 + 2 * t for t in range(k)])
+    cands = candidates(args.lo, args.hi)
+    only = {s.strip() for s in args.only.split(",") if s.strip()}
+    all_names = set(cands) | {f"del-w{k}" for k in (1, 2, 3, 4)}
+    if only:
+        missing = only - all_names
+        if missing:
+            raise SystemExit(f"unknown candidates: {sorted(missing)}")
+        cands = {k: v for k, v in cands.items() if k in only}
+    dags = {k: window_dag(k, n, v, args.lo, args.hi) for k, v in cands.items()}
+    dels = {f"del-w{k}": deletion_plan(f"del-w{k}", n,
+                                       [args.lo + 2 * t for t in range(k)])
             for k in (1, 2, 3, 4)}
 
     def stat(d: Dag) -> dict:
         sizes: list[int] = []
         lvl = d.levels()
         for L in range(max(lvl) + 1):
-            cnt = sum(1 for i in range(LO, HI) if lvl[i] == L)
-            if cnt and L >= 10:
+            cnt = sum(1 for i in range(args.lo, args.hi) if lvl[i] == L)
+            if cnt and L >= args.lo:
                 sizes.append(cnt)
-        misses = sum(i - len(d.preds[i]) for i in range(LO, HI))
+        misses = sum(i - len(d.preds[i]) for i in range(args.lo, args.hi))
         return {"critical_path": d.critical_path, "window_level_sizes": sizes,
                 "missed_updates_in_window": misses}
 
@@ -165,11 +187,12 @@ def main() -> None:
     args.output.mkdir(parents=True, exist_ok=True)
     manifest = {
         "status": "RUNNING",
-        "stage": "2.0 experiment C part 1 (free-running screening, calibration)",
+        "stage": f"2.0 experiment C ({args.role}: free-running measurement)",
+        "role": args.role,
         "model": PINNED_MODEL_REPO,
         "model_revision": PINNED_MODEL_REVISION,
         "n_layers": n,
-        "window": [LO, HI],
+        "window": [args.lo, args.hi],
         "merge_modes": list(MODES),
         "input": str(args.input),
         "max_samples": args.max_samples,
@@ -181,8 +204,8 @@ def main() -> None:
                       for k, p in dels.items()}},
         "graph_stats": graph_stats,
         "git_commit": git_sha(),
-        "note": ("Calibration screening only; selection happens on s20_val and "
-                 "the blind splits run exactly once."),
+        "note": ("Selection happens on s20_val (or the designated validation "
+                 "split) and each blind split runs exactly once."),
     }
     (args.output / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
@@ -241,10 +264,10 @@ def main() -> None:
                   "kl_mean": float(kl.mean()), "top1_mean": float(t1.mean()),
                   **graph_stats.get(v.split("@")[0], {})}
 
-    # paired bootstrap vs g2 and vs serial (same samples)
+    # paired bootstrap vs serial and vs g2 (same samples)
     rng = np.random.default_rng(20261020)
     def paired(v, ref):
-        if v == ref:
+        if v == ref or ref not in {k for r in rows for k in r["variants"]}:
             return None
         d = np.array([r["variants"][v]["delta_nll"] - r["variants"][ref]["delta_nll"]
                       for r in rows])
@@ -283,7 +306,7 @@ def main() -> None:
         return (f"  {v:24s} dNLL={a['delta_nll_mean']:7.4f} KL={a['kl_mean']:7.4f} "
                 f"top1={a['top1_mean']:.4f} depth={a.get('critical_path')} "
                 f"miss={a.get('missed_updates_in_window')}{cs}{cgs}")
-    print("\n== free-running on s20_cal (mean over samples) ==")
+    print(f"\n== free-running on {args.input} ({args.role}, mean over samples) ==")
     for v in variants:
         print(line(v))
     print(f"saved -> {args.output / 'screen.json'}")
