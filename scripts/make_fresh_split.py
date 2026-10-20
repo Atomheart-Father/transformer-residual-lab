@@ -56,6 +56,10 @@ def main() -> None:
     ap.add_argument("--source", default="wikitext2",
                     help="prefix for sample_id and the manifest source field")
     ap.add_argument("--purpose", default=None)
+    ap.add_argument("--stream", type=int, default=None,
+                    help="load the split in streaming mode and keep only the "
+                         "first N documents; needed for very large corpora "
+                         "(e.g. C4) that must not be materialized in full")
     args = ap.parse_args()
 
     from datasets import load_dataset
@@ -67,7 +71,10 @@ def main() -> None:
     ds_rev = api.dataset_info(args.dataset).sha
 
     tok = AutoTokenizer.from_pretrained(args.model, revision=model_rev, use_fast=True)
-    rows = load_dataset(args.dataset, args.config, split=args.split, revision=ds_rev)
+    rows = load_dataset(args.dataset, args.config, split=args.split,
+                        revision=ds_rev, streaming=bool(args.stream))
+    if args.stream:
+        rows = list(rows.take(args.stream))
     text = "\n\n".join(r[args.text_field] for r in rows
                        if r[args.text_field].strip())
     ids = tok.encode(text, add_special_tokens=False)
@@ -132,6 +139,7 @@ def main() -> None:
         "seq_len": args.seq_len,
         "n_windows": len(windows),
         "n_corpus_tokens": len(ids),
+        "n_streamed_docs": args.stream,
         "seed": args.seed,
         "excluded_files": [str(p) for p in args.exclude],
         "n_excluded_offsets": len(excluded_offsets),

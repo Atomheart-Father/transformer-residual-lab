@@ -1,0 +1,73 @@
+{
+  "n_samples": 8,
+  "checks": {
+    "G0.1a_chain_bit_exact": {
+      "metric": {
+        "max_abs_delta_nll": 0.0,
+        "min_top1": 1.0,
+        "max_state_abs": 0.0
+      },
+      "tolerance": {
+        "delta_nll": 1e-09,
+        "top1_min": 1.0,
+        "max_abs": 0.0
+      },
+      "pass": true
+    },
+    "G0.1b_merge_noise": {
+      "metric": {
+        "max_rel_rms": 0.015872767318955296,
+        "max_abs_delta_nll": 0.005650043487548828
+      },
+      "tolerance": {
+        "rel_rms": 0.02,
+        "delta_nll": 0.05
+      },
+      "pass": true
+    },
+    "G0.2a_g2dag_vs_production": {
+      "metric": {
+        "max_abs": 0.0
+      },
+      "tolerance": {
+        "max_abs": 0.0
+      },
+      "pass": true
+    },
+    "G0.2b_production_vs_run_plan": {
+      "metric": {
+        "max_abs": 0.0
+      },
+      "tolerance": {
+        "max_abs": 0.0
+      },
+      "pass": true
+    },
+    "G0.2c_prefix_vs_stored": {
+      "metric": {
+        "max_abs_delta_nll_diff": 0.0,
+        "n_compared": 56
+      },
+      "tolerance": {
+        "delta_nll": 0.01
+      },
+      "pass": true
+    },
+    "G0.2d_windowdag_vs_run_plan": {
+      "metric": {
+        "max_abs": 0.0,
+        "max_abs_delta_nll_diff": 0.0
+      },
+      "tolerance": {
+        "max_abs": 0.0
+      },
+      "pass": true
+    }
+  },
+  "informational": {
+    "g02e_g2dag_vs_monolithic_fp32_max_rel_rms": 0.03660250886833458,
+    "note": "merge-point materialization vs one fp32 sum: both valid bf16 schedules; the executor pins the production one"
+  },
+  "overall_pass": true,
+  "gate": "PASS: executor may be used for dependency experiments"
+}

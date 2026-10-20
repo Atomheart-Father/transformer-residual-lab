@@ -117,5 +117,53 @@
    ],
    "n_exact_window_overlap_with_any_other_split": 0
   }
+ },
+ "splits_s20": {
+  "s20_cal.jsonl": {
+   "role": "measurement",
+   "source": "wikitext-2 test (fresh offsets)",
+   "split_name": "cal_s20",
+   "seed": 20261020,
+   "n_windows": 64,
+   "sha256": "768ae1bc134a4053dec0e5feeef032a082552de978ddcfeddf60a8e565851f6c",
+   "purpose": "dependency probes and candidate screening only",
+   "n_exact_window_overlap_with_any_other_split": 0
+  },
+  "s20_val.jsonl": {
+   "role": "selection",
+   "source": "wikitext-2 test (fresh offsets)",
+   "split_name": "val_s20",
+   "seed": 20261021,
+   "n_windows": 32,
+   "sha256": "a28dbec7f72460ffbd602ae91fb9e763e761026428eb08d0995a7ed146a34825",
+   "purpose": "candidate selection only; never used to fit anything",
+   "n_exact_window_overlap_with_any_other_split": 0
+  },
+  "s20_test.jsonl": {
+   "role": "blind test",
+   "source": "wikitext-2 test (fresh offsets)",
+   "split_name": "test_s20",
+   "seed": 20261022,
+   "n_windows": 64,
+   "sha256": "346148a9cc06077dd4dddff7ef844d0b4abedecc66a4c95a808b0392b4711654",
+   "purpose": "final one-shot evaluation of frozen candidates; never used for selection",
+   "n_exact_window_overlap_with_any_other_split": 0
+  },
+  "s20_ood_c4.jsonl": {
+   "role": "ood test",
+   "source": "C4 en validation (streamed 400 docs)",
+   "split_name": "ood_c4_s20",
+   "seed": 20261023,
+   "n_windows": 64,
+   "sha256": "9c7744d5bf22bd7f62855e66c16f34cdc0858a1480a0a1f0885ab161e579598d",
+   "purpose": "distribution-shift check for frozen candidates; different corpus, impossible to overlap by construction",
+   "n_exact_window_overlap_with_any_other_split": 0
+  }
+ },
+ "splits_s20_disjointness": {
+  "method": "pairwise sample_id / start_offset / token-window sha256 over all 15 split files in this directory",
+  "n_pairs_checked": 105,
+  "n_overlapping_pairs": 0,
+  "note": "s20_test and s20_ood_c4 have never been used by any earlier stage"
  }
 }

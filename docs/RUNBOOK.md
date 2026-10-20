@@ -392,3 +392,39 @@ python scripts/make_figures.py --stage18 results/stage1_8 --figdir results/stage
   "Sequential execution. No end-to-end speedup is claimed."
 - **cl_ood 上最佳变体是 f_trunk 而非 f_a3z**（3.1018 vs 3.1055），配对 CI 不含方向的显著结论。
   不要只引用对自己有利的那个 split。
+
+## Stage 2.0：冻结权重稀疏依赖 DAG（进行中）
+
+引擎 `scripts/dag_exec.py`（DAG 对象 + spec 解析 + 深度 + 前向）、`scripts/stage20_eq.py`
+（门槛 0 等价性）、`scripts/stage20_bench.py`（真实并发延迟）。
+
+```bash
+# 数据（先用 --exclude 排除所有既有 split；s20_* 已入库并两两断言零重叠）
+python scripts/make_fresh_split.py --out data257 --name s20_cal --count 64 --seq-len 257 \
+  --seed 20261020 --exclude data257/calibration.jsonl # ...其余 10 个 split 逐个 --exclude
+
+# 门槛 0：执行器等价性（G0.1a/1b、G0.2a/b/c/d/e）
+python scripts/stage20_eq.py --input data/calibration.jsonl --max-samples 8 \
+  --output results/stage2_0/equivalence
+
+# 真实并发：理论深度 vs 实测 wall-clock
+python scripts/stage20_bench.py --reps 15 --warmup 3 --output results/stage2_0/bench
+
+# 代数与 merge 规则测试（含 toy block，MLX CPU 流）
+python -m pytest tests/test_dag_semantics.py -q
+```
+
+DAG spec 三种形式：`chain`；`名字:p0|p1|...|p27`（每块一部分，逗号列表，支持 `10-12` 区间）；
+`名字@lo-hi:q0|...|qk`（窗口 spec，窗口外全部串行）。
+
+**Stage 2.0 的已知事项**
+
+- **门槛 0 未过之前不做任何搜索。** 当前六项检查全过，其中三项逐位等价（G0.1a 链式复现原
+  模型、G0.2a g2 DAG == 生产 g2、G0.2d 窗口 DAG == run_plan），prefix-k ΔNLL 与 Stage 1.5
+  历史数字完全一致。merge 机制去掉串行捷径后只剩 bf16 双舍入噪声（rel ≤ 0.0159）。
+- **理论深度不等于延迟。** 257 token prefill 下 g4（深度 7）比串行逐块 eval 还慢；DAG 的
+  merge 记账（合并点数量决定）要付 6%–21%。窗口实验只在中窗做、合并点越少越接近串行成本。
+- **深度必须按最长依赖链算**，不能用分组数冒充；窗口外串行意味着总深度 = 10 + 窗口深度 + 10。
+- **`delta_override` 探针只筛候选**；教师入口 anchor 上的局部干预是 triage，最终判定必须是
+  完整自由运行的 ΔNLL / KL / top1。
+- **测量与筛选用 s20_cal、选型用 s20_val、盲测 s20_test / s20_ood_c4 只跑一次。**
