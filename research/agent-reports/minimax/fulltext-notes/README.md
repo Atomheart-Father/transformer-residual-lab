@@ -7,6 +7,8 @@
 |---|---|---|
 | `A-extreme-lowbit.md` | 家族 A：极低位宽权重表示 | QTIP `2406.11235`、Proteus（ICML'26）、CurveTQ `2610.09212`、XOR-Trellis `2610.00432`、OSAQ `2605.04738`、YAQA `2505.22988`、GSQ `2604.18556`、RCO `2605.00649`、ParetoQ `2502.02631`、BCJR-QAT `2605.10655`、QTEA `2609.00224`、FastKron `2608.06291` 等 |
 | `B-dynamic-sparse-ffn.md` | 家族 B：冻结权重的 FFN 动态稀疏 | Prox `2607.27591`、SpQt `2511.04477` **全文通读**（LaTeXML HTML + PDF 表格），条目可回溯到章节号；另含 TEAL / CATS / M-COUNTDOWN / R-Sparse / WiSparse / DAWS / SVD-CSP / SparseInfer / GRASP / SkipDecode / Loki 等邻近工作 |
+| `R3-U-uzu-trellis.md` | **R3 焦点一**：`trymirai/uzu` 的 Metal Trellis 实现 | **报告作者本人逐文件一手阅读**（`gemm_trellis.metal` / `trellis.rs` / `quantized/trellis.h` / `selection.rs` / `gemm/kernel.rs` / `gemv/kernel.rs` / `matmul_metal_kernel.rs` / `device_extensions.rs` / `quantization_method.rs` / `matmul_b.rs` / `simdgroup_multiply_accumulate.h` / `trellis_gemm_test.rs` / `BENCHMARKS.md` / `README.md`），锁定 commit `2968097a` |
+| `R3-S-spqt-bandwidth-prox.md` | **R3 焦点三 + 四** | SpQt `2511.04477` 的 Table 1 / Table 2 逐格复核（PDF `pdftotext -layout` + 直接拉 SVG）+ Apple 官方带宽对账；Prox `2607.27591` 的 "+12 %" 分母重建与 27B Q4 字节上/下界 |
 
 ## 阅读约定
 
