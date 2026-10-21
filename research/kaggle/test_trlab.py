@@ -15,6 +15,7 @@
 
 import json
 import os
+import shutil
 import struct
 import sys
 import tempfile
@@ -803,7 +804,8 @@ def test_default_stages_complete(ns):
     assert rp.exists() and rp.stat().st_size > 1000, f"报告没写出来：{rp}"
     md = rp.read_text(encoding="utf-8")
     for must in ("# transformer-residual-lab · Kaggle 运行报告",
-                 "## 2. Smoke test", "## 8. 结论边界",
+                 "## 2. 工具链（S2_BUILD）", "## 3. Smoke test",
+                 "## 9. 结论边界",
                  "SMOKE_OK = **True**"):
         assert must in md, f"报告缺少必要内容：{must!r}"
 
@@ -1060,6 +1062,370 @@ def test_s2_commit_fallback(ns):
         clear_bins()
 
 
+# ---------------------------------------------------------------- v0.3 S2 一键取源码
+
+def _make_source_tarball(tmp, dirname=None, marker=b"# fake llama.cpp\n"):
+    """造一个"合法"的 llama.cpp 源码 tarball，返回 (tar_path, dirname)。
+
+    sha256 / bytes / 顶层目录名全部按真实文件算，测试里再把 ns["S2_PINNED"]
+    指过去 —— 这样走的是真代码路径，只是把"从 GitHub 下载"换成"本地复制"。
+    """
+    import tarfile as _tf
+    import hashlib as _hl
+
+    dirname = dirname or ("llama.cpp-" + "a" * 40)
+    tar_path = Path(tmp) / f"{dirname}.tar.gz"
+    stage = Path(tmp) / f".stage-{dirname}"
+    if stage.exists():
+        shutil.rmtree(stage, ignore_errors=True)
+    (stage / dirname / "tools" / "quantize").mkdir(parents=True, exist_ok=True)
+    (stage / dirname / "CMakeLists.txt").write_bytes(marker)
+    (stage / dirname / "tools" / "quantize" / "quantize.cpp").write_bytes(b"// fake\n")
+    with _tf.open(tar_path, "w:gz") as tf:
+        for p in sorted((stage / dirname).rglob("*")):
+            tf.add(p, arcname=str(p.relative_to(stage)), recursive=False)
+    shutil.rmtree(stage, ignore_errors=True)
+    return tar_path, dirname
+
+
+def _pin_to(ns, tar_path, dirname, commit="a" * 40):
+    """把 ns["S2_PINNED"] 临时指向本地 tarball，返回 (pin, restore)。"""
+    import hashlib as _hl
+
+    sha = _hl.sha256(tar_path.read_bytes()).hexdigest()
+    pin = {"commit": commit,
+           "url": "https://example.invalid/llama.cpp.tar.gz",
+           "sha256": sha, "bytes": tar_path.stat().st_size, "dir": dirname}
+    orig = ns["S2_PINNED"]
+    ns["S2_PINNED"] = pin
+    return pin, (lambda: ns.__setitem__("S2_PINNED", orig))
+
+
+def _fake_downloader(src_file):
+    """假装成 _http_download：把本地文件复制到 dst，返回与真函数同形的字典。"""
+    import hashlib as _hl
+
+    state = {"calls": 0}
+
+    def fake(url, dst, deadline, expect_bytes=None, timeout=60, chunk=1 << 20):
+        state["calls"] += 1
+        dst = Path(dst)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        data = Path(src_file).read_bytes()
+        dst.write_bytes(data)
+        return {"bytes": len(data), "sha256": _hl.sha256(data).hexdigest(),
+                "path": str(dst), "seconds": 0.0}
+
+    fake.state = state
+    return fake
+
+
+def test_s2_default_off_no_network(ns):
+    """默认 RUN_S2=False：一个字段都不改，也不许联网。
+
+    Kaggle 上"Run All"不应该因为导入 notebook 就悄悄下载。想下载必须显式把
+    RUN_S2 改成 True —— 这一点由 _apply_run_switches 的早退保证。
+    """
+    assert ns["RUN_S2"] is False, "默认值必须是 False"
+    before_stages = dict(ns["STAGES"])
+    before_cfg = {k: ns["CFG"][k] for k in ("S2_AUTO_FETCH_SOURCE", "LLAMA_COMMIT",
+                                           "CUDA_ARCH", "BUILD_JOBS", "BUILD_CUDA")}
+    out = ns["_apply_run_switches"]()
+    assert out == {"run_s2": False}, out
+    assert ns["STAGES"] == before_stages, "RUN_S2=False 时不许改 STAGES"
+    for k, v in before_cfg.items():
+        assert ns["CFG"][k] == v, f"RUN_S2=False 时不许改 CFG['{k}']"
+
+    # 没有手动源码 + 没开自动获取 → GuardError，且消息里要提到 RUN_S2
+    CFG = ns["CFG"]
+    snap = dict(CFG)
+    orig_fetch = ns["_fetch_pinned_source"]
+
+    def boom(deadline):
+        raise AssertionError("RUN_S2=False 时不允许触发下载")
+
+    ns["_fetch_pinned_source"] = boom
+    try:
+        CFG.update(LLAMA_SRC="", S2_AUTO_FETCH_SOURCE=False)
+        try:
+            ns["_find_llama_src"](__import__("time").time() + 30)
+            raise AssertionError("没有拦住")
+        except ns["GuardError"] as e:
+            assert "RUN_S2" in str(e), e
+            assert "Internet" in str(e), e
+    finally:
+        ns["_fetch_pinned_source"] = orig_fetch
+        CFG.update(snap)
+
+
+def test_s2_run_switch_only_turns_on_s2(ns):
+    """RUN_S2=True 只开 S2；S3–S8 必须保持 False（本任务不授权自动跑实验）。"""
+    STAGES, CFG = ns["STAGES"], ns["CFG"]
+    snap_s = dict(STAGES)
+    snap_c = {k: CFG[k] for k in ("S2_AUTO_FETCH_SOURCE", "LLAMA_COMMIT",
+                                  "CUDA_ARCH", "BUILD_JOBS", "BUILD_CUDA")}
+    orig = ns["RUN_S2"]
+    try:
+        ns["RUN_S2"] = True
+        out = ns["_apply_run_switches"]()
+        assert out["run_s2"] is True
+        assert STAGES["S2_BUILD"] is True
+        for k in ("S3_IMATRIX", "S4_QUANT", "S5_BYTES", "S6_NLL",
+                  "S7_QUALITY", "S8_BF16_ANCHOR", "SX_EXPLORE"):
+            assert STAGES[k] is False, f"{k} 被 RUN_S2 顺手打开了"
+        assert CFG["S2_AUTO_FETCH_SOURCE"] is True
+        assert CFG["LLAMA_COMMIT"] == ns["S2_PINNED"]["commit"]
+        assert CFG["CUDA_ARCH"] == "75"
+        assert CFG["BUILD_JOBS"] == 4
+        assert CFG["BUILD_CUDA"] is True
+        assert out["commit"] == ns["S2_PINNED"]["commit"]
+        assert out["stages"] == [k for k, v in STAGES.items() if v]
+    finally:
+        ns["RUN_S2"] = orig
+        ns["_apply_run_switches"]()
+        STAGES.clear(); STAGES.update(snap_s)
+        CFG.update(snap_c)
+
+
+def test_s2_download_checksum_mismatch(ns):
+    """digest 与预登记值不符 → 拒绝解压、删掉半成品、不留源码目录。"""
+    import tempfile as _tf
+
+    SRC_CACHE, DL_DIR = Path(ns["SRC_CACHE"]), Path(ns["DL_DIR"])
+    tmp = _tf.mkdtemp(prefix="trlab_s2_ck_")
+    tar_path, dirname = _make_source_tarball(tmp)
+    pin, restore = _pin_to(ns, tar_path, dirname)
+    pin["sha256"] = "0" * 64                      # 故意对不上
+
+    orig_dl = ns["_http_download"]
+    dl = _fake_downloader(tar_path)
+    ns["_http_download"] = dl
+    orig_cfg = dict(ns["CFG"])
+    try:
+        ns["CFG"]["S2_AUTO_FETCH_SOURCE"] = True
+        try:
+            ns["_fetch_pinned_source"](__import__("time").time() + 60)
+            raise AssertionError("sha256 不符却没有拦住")
+        except ns["GuardError"] as e:
+            assert "sha256" in str(e), e
+        assert dl.state["calls"] == 1
+        # 下载到的包必须被删掉，不能留着下次误用
+        expect_tar = DL_DIR / f"llama.cpp-{pin['commit'][:12]}.tar.gz"
+        assert not expect_tar.exists(), "digest 不符的包必须删除"
+        assert not (SRC_CACHE / pin["dir"]).exists(), "不许解压"
+    finally:
+        ns["_http_download"] = orig_dl
+        ns["CFG"].update(orig_cfg)
+        restore()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s2_extract_rejects_traversal(ns):
+    """归档里有 `..` / 绝对路径 / 链接 → 拒绝解压，不"尽量解压"。"""
+    import tarfile as _tf
+    import tempfile as _tf2
+
+    tmp = _tf2.mkdtemp(prefix="trlab_s2_trav_")
+    bad = Path(tmp) / "bad.tar.gz"
+    with _tf.open(bad, "w:gz") as tf:
+        info = _tf.TarInfo("../../evil.txt")
+        data = b"pwned\n"
+        info.size = len(data)
+        tf.addfile(info, __import__("io").BytesIO(data))
+    try:
+        ns["_safe_extract"](bad, Path(tmp) / "out")
+        raise AssertionError("没有拦截 ../ 越界条目")
+    except ns["GuardError"] as e:
+        assert "evil.txt" in str(e), e
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s2_repeat_run_uses_cache(ns):
+    """重复 Run All：第二次完全离线复用；包在只解压；包被改坏就重下。"""
+    import tempfile as _tf
+
+    SRC_CACHE, DL_DIR = Path(ns["SRC_CACHE"]), Path(ns["DL_DIR"])
+    tmp = _tf.mkdtemp(prefix="trlab_s2_cache_")
+    tar_path, dirname = _make_source_tarball(tmp)
+    pin, restore = _pin_to(ns, tar_path, dirname)
+
+    orig_dl = ns["_http_download"]
+    dl = _fake_downloader(tar_path)
+    ns["_http_download"] = dl
+    orig_cfg = dict(ns["CFG"])
+    deadline = __import__("time").time() + 120
+    try:
+        ns["CFG"]["S2_AUTO_FETCH_SOURCE"] = True
+
+        src1, m1 = ns["_fetch_pinned_source"](deadline)
+        assert m1["origin"] == "downloaded" and m1["sha256_ok"] is True
+        assert Path(src1) == SRC_CACHE / pin["dir"], f"源码必须落在固定目录：{src1}"
+        assert (Path(src1) / "CMakeLists.txt").exists()
+        assert dl.state["calls"] == 1
+
+        # 2) 源码目录 + stamp 都在 → 离线复用，零下载
+        src2, m2 = ns["_fetch_pinned_source"](deadline)
+        assert m2["origin"] == "cache" and m2["archive_cached"] is True
+        assert Path(src2) == Path(src1)
+        assert dl.state["calls"] == 1, "缓存命中时不该再下载"
+
+        # 3) 删掉源码目录、保留 tarball → 只解压，不重下
+        shutil.rmtree(SRC_CACHE / pin["dir"], ignore_errors=True)
+        src3, m3 = ns["_fetch_pinned_source"](deadline)
+        assert m3["origin"] == "cached_archive", m3
+        assert dl.state["calls"] == 1, "tarball digest 一致时不该重下"
+        assert (Path(src3) / "CMakeLists.txt").exists()
+
+        # 4) tarball 被改坏（同尺寸）→ digest 不符，删掉重下
+        expect_tar = DL_DIR / f"llama.cpp-{pin['commit'][:12]}.tar.gz"
+        raw = bytearray(expect_tar.read_bytes())
+        raw[-1] ^= 0xFF
+        expect_tar.write_bytes(bytes(raw))
+        shutil.rmtree(SRC_CACHE / pin["dir"], ignore_errors=True)
+        src4, m4 = ns["_fetch_pinned_source"](deadline)
+        assert m4["origin"] == "downloaded", m4
+        assert dl.state["calls"] == 2, "包坏了必须重下"
+        assert (Path(src4) / "CMakeLists.txt").exists()
+    finally:
+        ns["_http_download"] = orig_dl
+        ns["CFG"].update(orig_cfg)
+        restore()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s2_dir_name_mismatch_fails(ns):
+    """digest 对得上但顶层目录名与预登记不符 → 拒绝，说明 pin 信息本身有问题。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_s2_dir_")
+    tar_path, real_dir = _make_source_tarball(tmp)
+    pin, restore = _pin_to(ns, tar_path, real_dir)
+    pin["dir"] = "llama.cpp-" + "b" * 40          # 声明的目录名与归档不符
+
+    orig_dl = ns["_http_download"]
+    ns["_http_download"] = _fake_downloader(tar_path)
+    orig_cfg = dict(ns["CFG"])
+    try:
+        ns["CFG"]["S2_AUTO_FETCH_SOURCE"] = True
+        try:
+            ns["_fetch_pinned_source"](__import__("time").time() + 60)
+            raise AssertionError("目录名不符却没有拦住")
+        except ns["GuardError"] as e:
+            assert "顶层目录" in str(e), e
+    finally:
+        ns["_http_download"] = orig_dl
+        ns["CFG"].update(orig_cfg)
+        restore()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s2_commit_from_pinned_tarball(ns):
+    """tarball 来源：没有 .git，但归档 digest 已校验 → pinned_tarball（不是 declared）。"""
+    import tempfile as _tf
+
+    SRC_CACHE = Path(ns["SRC_CACHE"])
+    tmp = _tf.mkdtemp(prefix="trlab_s2_commit_")
+    tar_path, dirname = _make_source_tarball(tmp)
+    pin, restore = _pin_to(ns, tar_path, dirname)
+
+    orig_dl, orig_git = ns["_http_download"], ns["_git_commit"]
+    ns["_http_download"] = _fake_downloader(tar_path)
+    orig_cfg = dict(ns["CFG"])
+    orig_run, orig_tc = ns["run_cmd"], ns["_toolchain_report"]
+    BUILD = Path(ns["BUILD"])
+
+    def fake_run(cmd, log_path, deadline, cwd=None, env=None):
+        if "--build" in cmd:
+            for t in ("llama-imatrix", "llama-quantize", "llama-perplexity", "llama-cli"):
+                p = BUILD / "bin" / t
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                os.chmod(p, 0o755)
+        return 0, ""
+
+    ns["run_cmd"] = fake_run
+    ns["_toolchain_report"] = lambda: {"cmake": "cmake version 3.31.0",
+                                       "nvcc": "Cuda compilation tools, release 12.8",
+                                       "gxx": "11", "gcc": "11"}
+    try:
+        ns["CFG"].update(LLAMA_SRC="", LLAMA_BIN="", S2_AUTO_FETCH_SOURCE=True,
+                        LLAMA_COMMIT="", BUILD_CUDA=False, CUDA_ARCH="",
+                        BUILD_JOBS=4, FORCE_RERUN=True)
+        ns["_git_commit"] = lambda p: None
+        r = ns["stage_s2_build"](__import__("time").time() + 120)
+        assert r["commit"] == pin["commit"], r["commit"]
+        assert r["commit_source"] == "pinned_tarball", r["commit_source"]
+        assert r["commit_verified"] is True, r
+        assert r["source"]["origin"] == "downloaded"
+        assert r["source"]["archive_sha256"] == pin["sha256"]
+        assert r["bins"]["llama-quantize"].endswith("llama-quantize")
+        assert r["disk_free_gb"] > 0
+
+        # 有 git 且与 pin 一致 → 走 git 来源
+        ns["_git_commit"] = lambda p: pin["commit"]
+        ns["CFG"]["LLAMA_COMMIT"] = pin["commit"]
+        r2 = ns["stage_s2_build"](__import__("time").time() + 120)
+        assert r2["commit_source"] == "git" and r2["commit_verified"] is True
+
+        # 有 git 但与 pin 不符 → 必须拒绝
+        ns["_git_commit"] = lambda p: "c" * 40
+        try:
+            ns["stage_s2_build"](__import__("time").time() + 120)
+            raise AssertionError("commit 不符却没有拦住")
+        except ns["GuardError"] as e:
+            assert "不符" in str(e), e
+    finally:
+        ns["run_cmd"], ns["_toolchain_report"] = orig_run, orig_tc
+        ns["_git_commit"] = orig_git
+        ns["_http_download"] = orig_dl
+        ns["CFG"].update(orig_cfg)
+        restore()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s2_failure_message_actionable(ns):
+    """编译失败要给"症状 → 处置"，不能把几十行 cmake 输出原样丢给人。"""
+    f = ns["_explain_s2_failure"]
+    CF = ns["CommandFailed"]
+
+    def mk(tail):
+        return CF(["cmake", "--build", "x"], 2, tail, "/tmp/s2_build.log")
+
+    r = f(mk("error: unsupported gnu version! gcc versions later than 13 are not supported"))
+    assert "BUILD_CUDA" in r and "False" in r, r
+    assert "/tmp/s2_build.log" in r
+    r = f(mk("nvcc fatal   : Could not find nvcc"))
+    assert "BUILD_CUDA" in r, r
+    r = f(mk("cmake error at ggml/CMakeLists.txt:100"))
+    assert "CMakeLists.txt" in r or "配置阶段" in r, r
+    r = f(mk("No space left on device"))
+    assert "磁盘" in r, r
+    r = f(mk("c++: internal compiler error: Killed (program cc1plus)"))
+    assert "BUILD_JOBS" in r, r
+    r = f(mk("some totally unknown failure"))
+    assert "日志" in r, r
+
+
+def test_s2_network_failure_message(ns):
+    """真的连不上时给一句人话，且不留下 .partial。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_s2_net_")
+    dst = Path(tmp) / "llama.tar.gz"
+    try:
+        try:
+            # 127.0.0.1:9 必然拒绝连接；不碰外网
+            ns["_http_download"]("http://127.0.0.1:9/llama.cpp.tar.gz", dst,
+                                 __import__("time").time() + 30)
+            raise AssertionError("连不上却没有报错")
+        except ns["GuardError"] as e:
+            assert "Internet" in str(e), e
+        assert not dst.exists(), "不许留下半成品"
+        assert not dst.with_name(dst.name + ".partial").exists()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ---------------------------------------------------------------- T4 mock 端到端
 
 T4_BENCH = {
@@ -1158,6 +1524,15 @@ TESTS = [
     test_toolchain_report,
     test_s2_cmake_flags,
     test_s2_commit_fallback,
+    test_s2_default_off_no_network,
+    test_s2_run_switch_only_turns_on_s2,
+    test_s2_download_checksum_mismatch,
+    test_s2_extract_rejects_traversal,
+    test_s2_repeat_run_uses_cache,
+    test_s2_dir_name_mismatch_fails,
+    test_s2_commit_from_pinned_tarball,
+    test_s2_failure_message_actionable,
+    test_s2_network_failure_message,
     test_paired_bootstrap_edges,
     test_ggml_type_table,
     test_default_stages_complete,

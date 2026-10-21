@@ -4,6 +4,8 @@
 
 这份文档只解决一件事：在你已有的 Kaggle GPU Notebook 里，**分两步**把 `llama-imatrix` 编译出来、并生成 `imatrix.gguf`，每一步都有明确的成功标志和停机点。S4 及之后不在本阶段执行，只在第六节给出容量预算。
 
+v0.3.0 起 S2 **不需要你准备任何输入**：把 `RUN_S2` 改成 `True`、`Internet` 设 On，notebook 自己下载固定 commit 的 36.6 MiB 源码并校验 sha256。第三节只讲 S3 需要的模型与语料。
+
 所有数字分三类，全文统一标注：
 
 | 标记 | 含义 |
@@ -23,8 +25,8 @@
 | RAM | 31.35 GiB（可用 ≈ **29.67 GiB**） | S2 编译够用；S4 量化要看实际缓冲（第六节） |
 | `/kaggle/working` | 剩余 **19.5 GiB** | 装不下 15.26 GiB 的 BF16 加产物（第六节算账） |
 | CUDA | 12.8，`nvcc` / `cmake` / `g++` 都在 | 决定了 CUDA 架构默认列表（见 S2） |
-| Internet | **Off** | 不能 clone、不能 pip、不能 `file(DOWNLOAD)` |
-| `/kaggle/input` | 空 | 所以第一步是准备输入（第三节） |
+| Internet | **Off**（v0.3 起 S2 需临时设为 **On**，只下载 36.6 MiB 源码 tarball） | 不能 pip、不能 `file(DOWNLOAD)`；GitHub 直连**未验证** |
+| `/kaggle/input` | 空 | S2 不需要输入；S3 起需要（第三节） |
 
 BF16 1.55 TFLOP/s 是微基准，不能当 LLM 解码性能用；本阶段也不需要它。
 
@@ -34,7 +36,9 @@ BF16 1.55 TFLOP/s 是微基准，不能当 LLM 解码性能用；本阶段也不
 
 **做**：编译四个工具 → 用 Q8_0 算 imatrix → 停在 S3。
 
-**不做**：S4 量化（只做容量预算）、S5–S8、任何下载/安装/联网操作。
+**不做**：S4 量化（只做容量预算）、S5–S8、下载模型权重、`pip install`、租付费 GPU。
+
+**联网边界（v0.3.0）**：S2 在 `RUN_S2=True` 时会下载**一个** 36.6 MiB 的 llama.cpp 源码 tarball（sha256 预登记并强制校验），这是整个 notebook 唯一的联网动作，且必须用户显式改开关。模型权重、语料、imatrix 全部走 `/kaggle/input` 只读挂载，notebook 不会替你去下载。
 
 **为什么停在 S3**：S4 需要 15.26 GiB 的 BF16 作为**只读输入**，而 `/kaggle/working` 只有 19.5 GiB —— 输入一旦落进 working，加上两个产物就必然爆盘。这个前提必须先满足（第三节路径 A），否则 S4 一定失败。
 
@@ -134,60 +138,40 @@ test 那份同理写成 `eval.txt`。两个文件都上传成一个小的 Kaggle
 
 ## 四、S2：编译（单阶段，约 15–30 分钟，**估算**）
 
-### 4.1 前置
+### 4.1 前置（v0.3.0：只需要改一个开关）
 
-1. 主 notebook 里 `Add Input` 挂上 llama.cpp 源码。需要**固定 commit** 的源码目录（含 `CMakeLists.txt`）。
+**S2 不需要任何输入文件。** 源码由 notebook 自己下载 —— 固定 commit 的 tarball，36.6 MiB，sha256 预登记并强制校验。
 
-   **推荐做法：下载固定 commit 的 tarball，上传成一个 Dataset（36.6 MiB，网页上传几秒）**
+| 项 | 值 |
+|---|---|
+| commit | `d454a204ef2b63af357744809c05af897611a72e`（2026-10-21） |
+| URL | `https://github.com/ggml-org/llama.cpp/archive/d454a204ef2b63af357744809c05af897611a72e.tar.gz` |
+| 大小 | **38,419,835 B**（36.6 MiB，**实测**） |
+| sha256 | `f565ee976503e0b66997a05554d4881a252ced7687811f2a41df771203b54d7f`（**实测**） |
 
-   | 项 | 值 |
-   |---|---|
-   | commit | `d454a204ef2b63af357744809c05af897611a72e`（2026-10-21） |
-   | URL | `https://github.com/ggml-org/llama.cpp/archive/d454a204ef2b63af357744809c05af897611a72e.tar.gz` |
-   | 大小 | **38,419,835 B**（36.6 MiB，**实测**） |
-   | sha256 | `f565ee976503e0b66997a05554d4881a252ced7687811f2a41df771203b54d7f`（**实测**） |
+网页上做三件事：
 
-   在 Mac 上：
+1. 右上角 `Edit` → 找到 `RUN_S2 = False`，改成 `RUN_S2 = True`
+2. 右侧 `Settings` → `Internet` = **On**（只此一个阶段需要联网）
+3. `Run` → `Run all`
 
-   ```bash
-   curl -L -o llama_src.tar.gz \
-     https://github.com/ggml-org/llama.cpp/archive/d454a204ef2b63af357744809c05af897611a72e.tar.gz
-   shasum -a 256 llama_src.tar.gz    # 必须等于上面那个 sha256
-   tar xzf llama_src.tar.gz          # 得到 llama.cpp-d454a204.../ 目录
-   ```
+`RUN_S2 = True` 会自动把 `STAGES["S2_BUILD"]` 打开，并一次填好 `S2_AUTO_FETCH_SOURCE=True` / `LLAMA_COMMIT=<pin>` / `CUDA_ARCH="75"` / `BUILD_CUDA=True` / `BUILD_JOBS=4`。`S3`–`S8` **不会**被打开。默认值是 `False`，此时 `_apply_run_switches()` 一个字段都不改 —— 导入 notebook 或误点 `Run All` 都不会联网。
 
-   把这个目录（不是 tarball）上传成 Kaggle Dataset，挂载后路径形如 `/kaggle/input/llama-src/llama.cpp-d454a204ef2b63af357744809c05af897611a72e/`。`CFG["LLAMA_SRC"]` 指到**含 `CMakeLists.txt` 的那一层**。
+S2 内部顺序：下载 tarball → 比对 sha256（不符就删包报错）→ 安全解压到 `/kaggle/working/trlab/src/llama.cpp-<commit>/`（拒绝 `..`、绝对路径、符号链接）→ 校验顶层目录名与 pin 一致 → `cmake` → `cmake --build`。重复 `Run All` 不会重下：已解压目录 + `src/pinned_source.json` 的 sha256 与 pin 一致就离线复用。
 
-   选这个 commit 的理由：本文所有行号、CMake 选项名、默认架构列表都是对着它核对过的（见 4.2）。换 commit 不影响流程，但**引用行号前请自己复核**。
+**断网备选（不想开 Internet 时）**：在 Mac 上
 
-   **注意：tarball 解出来的目录没有 `.git`。** `git rev-parse` 拿不到 commit，S2 会把 `CFG["LLAMA_COMMIT"]` 记成声明值并标 `commit_source="declared"`（v0.2.2 起，不再是 `null`）。想拿到真正可校验的 commit，只有两条路：`CFG["ALLOW_NETWORK"]=True` 让它 `git clone`，或把 `.git` 目录一起打包（体积会涨到几百 MB，不推荐）。
-
-   **有没有现成的 Kaggle Dataset（**待核**）**：我在 Kaggle 公开检索 API 查了 `llama.cpp` / `llama-cpp` / `llamacpp` 三组关键词（2026-10-21），命中的大多是**预编译二进制**而不是源码，例如 `nixty2/llama-cpp-turing-sm75-b11342`（132.5 MB）、`chaosong319/llamacpp-t4-full-engine`（148.0 MB）、`smartmichaelma/llamacpp-build-latest`（195.3 MB）。这类数据集的问题是：**commit 不可知、不可 pin**，而且 `-DCMAKE_CUDA_ARCHITECTURES` 已经由别人定死，你没法验证它到底编了哪些架构。文件清单需要登录才能看（API 返回空），所以我**没有**验证它们是否含源码。**不要图省事用它们**：36.6 MiB 的 tarball 自己传一次，换来的是可复现的 commit。
-   - 把 `CFG["LLAMA_COMMIT"]` 填成上面那 40 位 sha，S2 会校验；不匹配直接报错，避免"同一份报告混用两个 llama.cpp 版本"。
-2. 打开 `STAGES`，**只改 S2 这一项**：
-
-```python
-STAGES = {
-    "S0_ENV": True, "S1_SMOKE": True,          # 便宜，留着当环境快照
-    "S2_BUILD": True,                           # ← 只打开这个
-    "S3_IMATRIX": False, "S4_QUANT": False, "S5_BYTES": False,
-    "S6_NLL": False, "S7_QUALITY": False, "S8_BF16_ANCHOR": False,
-    "S9_REPORT": True,
-    "SX_EXPLORE": False,
-}
+```bash
+curl -L -o llama_src.tar.gz \
+  https://github.com/ggml-org/llama.cpp/archive/d454a204ef2b63af357744809c05af897611a72e.tar.gz
+shasum -a 256 llama_src.tar.gz    # 必须等于上面那个 sha256
 ```
+
+把这个 tarball（**不要解压**）上传成 Kaggle Dataset 并 `Add Input`，然后把 `CFG["LLAMA_SRC"]` 指到含 `CMakeLists.txt` 的那一层。注意这条路径下 S2 拿不到归档 digest，`commit_source` 只能是 `declared`（未校验）；想拿到 `pinned_tarball` 档就用自动下载。
+
+**有没有现成的 Kaggle Dataset（**待核**）**：我在 Kaggle 公开检索 API 查了 `llama.cpp` / `llama-cpp` / `llamacpp` 三组关键词（2026-10-21），命中的大多是**预编译二进制**而不是源码，例如 `nixty2/llama-cpp-turing-sm75-b11342`（132.5 MB）、`chaosong319/llamacpp-t4-full-engine`（148.0 MB）、`smartmichaelma/llamacpp-build-latest`（195.3 MB）。这类数据集的问题是：**commit 不可知、不可 pin**，而且 `-DCMAKE_CUDA_ARCHITECTURES` 已经由别人定死，你没法验证它到底编了哪些架构。文件清单需要登录才能看（API 返回空），所以我**没有**验证它们是否含源码。**不要图省事用它们**：让 notebook 自己下 36.6 MiB，换来的是可复现的 commit。
 
 改 `STAGES` **不会**让 S2 的断点失效（`STAGES` 不进指纹），所以第二次跑会正常 RESUME。
-
-3. 配置：
-
-```python
-CFG["LLAMA_SRC"]    = "/kaggle/input/<源码 slug>/llama.cpp"   # 含 CMakeLists.txt 的那层
-CFG["LLAMA_COMMIT"] = "<12 位 commit>"
-CFG["BUILD_CUDA"]   = True
-CFG["CUDA_ARCH"]    = "75"      # T4 = sm_75
-CFG["BUILD_JOBS"]   = 4
-```
 
 ### 4.2 为什么是这几个参数（都能在上游源码里查到）
 
@@ -232,11 +216,13 @@ S2 会先跑一次工具链预检（`cmake --version` / `nvcc --version` / `g++ 
 - [ ] 结果里 `bins` 四项都非空，`version` 不是空串
 - [ ] 结果里 `cmake_args` 含 `-DLLAMA_USE_PREBUILT_UI=OFF` 和 `-DCMAKE_CUDA_ARCHITECTURES=75`
 - [ ] `toolchain.nvcc` 记录了实际版本（不是"不可用"）
-- [ ] `commit` 非空，且 `commit_source` 是 `git` 或 `declared`；如果是 `declared`，**报告里必须写"commit 为声明值、未校验"**
+- [ ] `source.origin` 是 `downloaded` / `cache` / `cached_archive` / `manual` 之一；`source.archive_sha256` 与本文 4.1 表格里的值**逐字符相同**
+- [ ] `commit` 非空，且 `commit_source` ∈ {`git`, `pinned_tarball`, `declared`}；自动下载应得到 `pinned_tarball` + `commit_verified=true`；如果是 `declared`，**报告里必须写"commit 为声明值、未校验"**
+- [ ] 报告第 2 节（工具链）写出了源码目录、归档 sha256、四个二进制路径、磁盘剩余
 - [ ] 日志 `trlab/logs/s2_cmake.log` 末尾有 `Configuring done` / `Generating done`；`s2_build.log` 末尾有 `Built target llama-cli`
 - [ ] 日志里如果有 `UI: no assets available`，**可以忽略**（我们不构建 server UI）
 - [ ] `df -h /kaggle/working` 剩余 ≥ 12 GiB
-- [ ] **Save Version（Quick Save）**，把 build 存进版本
+- [ ] **Save Version（Quick Save）**，把 build 与解压的源码存进版本
 
 ---
 
@@ -348,9 +334,14 @@ CFG["ALLOW_REQUANTIZE"] = False
 
 | 现象 | 去哪看 | 处置 |
 |---|---|---|
-| `GuardError: 找不到 llama.cpp 源码` | `out/S2_BUILD.json` 的 `error` | `Add Input` 挂源码，或 `CFG["LLAMA_SRC"]` 指到含 `CMakeLists.txt` 的那层 |
+| `GuardError: 下载源码失败 ... 检查 Settings → Internet = On` | `out/S2_BUILD.json` 的 `error` | Internet 没开，或 Kaggle 网络策略拦了 GitHub。开 Internet 重试；仍不行就走 4.1 的断网备选（Mac 下载 → Dataset → `CFG["LLAMA_SRC"]`） |
+| `GuardError: 源码包 sha256 不匹配，拒绝解压` | 同上 | 上游文件被替换，或网络返回了错误页面。核对报错里那两个 sha256；不要手动放行 |
+| `GuardError: 归档里有可疑路径/链接，拒绝解压` | 同上 | 包被动过。重新下载，或走断网备选 |
+| `GuardError: 归档顶层目录不是预期的 ...` | 同上 | digest 对但目录名不符 → 预登记信息本身有问题，升级 notebook 版本 |
+| `GuardError: 找不到 llama.cpp 源码，且没有打开自动获取` | 同上 | 把 `RUN_S2` 改成 `True`（需 Internet=On），或设 `CFG["LLAMA_SRC"]` 走手动源码 |
 | `源码 commit ... 与预注册的 ... 不符` | 同上 | 改 `LLAMA_COMMIT`，或换回你打包的那个 commit |
 | `GuardError: BUILD_CUDA=True 但 nvcc 不可用` | 同上 | `CFG["BUILD_CUDA"]=False` |
+| `S2 编译失败（rc=N）` + 一句"症状 → 处置" | `logs/s2_build.log` / `s2_cmake.log` 尾部 | S2 已把常见症状翻译成一句话（host g++ 不兼容 / 找不到 nvcc / 磁盘满 / 内存不足 / cmake 配置阶段），按那句话做 |
 | `CommandFailed rc=1` + `CMake Error` | `logs/s2_cmake.log` | 看最后一屏；`unsupported GNU version` → 关 CUDA；缺 `CUDAToolkit` → 同上 |
 | `BudgetExceeded: 命令超预算被杀` | `out/S2_BUILD.json` | 把 `STAGE_BUDGET_SEC["S2_BUILD"]` 调到 5400，`FORCE_RERUN=True` |
 | `编译结束但缺少可执行文件: ['llama-cli']` | `logs/s2_build.log` | 大概率有人关了 `LLAMA_BUILD_SERVER`；恢复默认 |
@@ -373,7 +364,9 @@ CFG["ALLOW_REQUANTIZE"] = False
 6. **Kaggle 上那些 llama.cpp 数据集到底装了什么，没有验证**。公开检索 API 返回的 `resources` 是空的（要登录才给文件清单），我只能从体积和标题判断它们多半是预编译二进制。**不要**把它们当源码用。
 7. **31 GiB RAM 跑 15.26 GiB 输入的量化为未实测**（6.3 节）。`--max-buffer-size` 默认 8192 MiB 是从帮助文本读到的，实际峰值没有观测。
 8. **`_base_consistency()` 只能排除形状不符**，不能证明同一 checkpoint —— 三个仓库的 Q8_0 字节数不同就是证据。
-9. **tarball 源码的 commit 是"声明值"**（`commit_source="declared"`），不是校验值。
+9. **自动下载路径没有端到端跑过**：Kaggle 能否直连 `github.com`、`urllib` 在 Kaggle 网络策略下的行为、下载实际耗时，都未验证。sha256 校验逻辑本身有 mock 测试覆盖（digest 不符 / 目录名不符 / 包被改坏各一条），但那是本地造的包。
+10. **tarball 源码没有 `.git`**，自动下载路径记 `commit_source="pinned_tarball"` + `commit_verified=true` —— 它证明"这份 tar.gz 的 sha256 与预登记值一致"，**不等于** git 校验。手动挂载源码时只能是 `declared`。
+11. **预登记 sha256 本身是自证的**：它写在 notebook 里，防不了"notebook 里的值被改坏"。首次使用请在 S2 结果里核对那串 sha256 与 4.1 表格一致。
 
 ---
 
@@ -385,6 +378,6 @@ Kaggle 的每日 GPU 配额、单会话时长上限、并发会话数、存储�
 
 ## 十、下一步
 
-按第四节跑 S2 → 核对 4.4 清单 → 停下。确认无误后再按第五节跑 S3。
+按第四节跑 S2（改 `RUN_S2` → `Internet=On` → `Run all`）→ 核对 4.4 清单 → 停下。确认无误后再按第五节跑 S3。
 
-**不要点 `Run All`。** 默认开关下 S4–S8 是关的，`Run All` 不会真的跑量化，但它会一路执行到 S9 并重新生成报告 —— 报告里那些"未运行"的段落很容易被误读成"全部跑完了"。逐段执行，每段对着清单看一眼。
+**不要反复点 `Run All` 去"推进"。** 默认开关下 S4–S8 是关的，`Run All` 不会真的跑量化，但它会一路执行到 S9 并重新生成报告 —— 报告里那些"未运行"的段落很容易被误读成"全部跑完了"。逐段执行，每段对着清单看一眼。S2 成功后建议 **Save Version**，这样下次开会话 build 和解压的源码都还在，不会重下重编。

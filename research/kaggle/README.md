@@ -2,9 +2,9 @@
 
 `trlab_kaggle.ipynb` —— 一个**可直接上传到 Kaggle** 的独立 Notebook，用来在同一份 `Qwen/Qwen3-8B` 上产出 `IQ2_XS` 与 `IQ4_XS`，并比较**真实文件字节**、**配对 NLL**、**有限配对质量**。
 
-当前版本 **v0.2.2**。首版（v0.1）只做环境检查与短时 smoke test；v0.2 修掉了一轮逐 cell 审查提出的 3 个 P0 + 4 个 P1；v0.2.1 又修了 S4 的两个 P0（二次量化门槛、产物复用不看指纹）和 S9 的 rho 符号；v0.2.2 修了 `--allow-requantize` 参数位置（放在位置参数之后等于没传）、S9 快照里 `status=null` 的自相矛盾，并给 S2 加了工具链预检与两个编译期开关。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
+当前版本 **v0.3.0**。首版（v0.1）只做环境检查与短时 smoke test；v0.2 修掉了一轮逐 cell 审查提出的 3 个 P0 + 4 个 P1；v0.2.1 修了 S4 的两个 P0（二次量化门槛、产物复用不看指纹）和 S9 的 rho 符号；v0.2.2 修了 `--allow-requantize` 参数位置（放在位置参数之后等于没传）、S9 快照里 `status=null` 的自相矛盾，并给 S2 加了工具链预检与两个编译期开关；**v0.3.0 把 S2 收敛成一个开关**：`RUN_S2 = True` 之后，源码由 notebook 自己下载（固定 commit 的 tarball，sha256 预登记并强制校验），用户不再需要在 Mac 上下载、解压、传 Dataset、填绝对路径。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
 
-S2 → S3 的分步操作清单在 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md)：数据从哪来、每步按哪个按钮、什么时候算成功、失败了看哪个日志、S4 的容量预算。本文件讲"为什么"，那份讲"怎么做"。
+S2 → S3 的分步操作清单在 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md)：现在以**一页三步网页操作**开头（改一个开关 → Internet=On → Run All），手工 tar / Dataset 路线降级为断网备选。本文件讲"为什么"，那份讲"怎么做"。
 
 ---
 
@@ -14,7 +14,7 @@ S2 → S3 的分步操作清单在 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RU
 
 | 不做 | 机制 |
 |---|---|
-| 自动下载大模型 | `CFG["ALLOW_NETWORK"] = False`；S3 起全部用 `need()` 检查本地路径，缺失即 `GuardError` |
+| 自动下载大模型 | S3 起全部用 `need()` 检查本地路径，缺失即 `GuardError`。**唯一的联网路径**是 `RUN_S2 = True` 时下载 36.6 MiB 的 llama.cpp 源码 tarball（sha256 预登记并强制校验）；`RUN_S2` 默认 `False` |
 | 自动 `pip install` | 只用 Kaggle 镜像自带的包；llama.cpp 从源码编译；GGUF 解析器是纯 Python，无第三方依赖 |
 | 自动租 GPU / 跑实验 | 阶段开关默认全关；用户手动改 `STAGES` 后在网页上逐段执行 |
 | 上传私有项目文件 | Notebook 不引用 `transformer-residual-lab` 的任何本地数据或脚本 |
@@ -39,10 +39,16 @@ research/kaggle/
 ## 三、三步上手
 
 1. Kaggle → `File` → `Import Notebook` → 上传 `trlab_kaggle.ipynb`
-2. 右侧 `Settings`：
-   - `Accelerator` = **GPU T4 ×2**（Notebook 只用第 0 张，第二张不会自动用上）
-   - `Internet` = **Off**（默认不需要联网）
-3. 直接 `Run All`。默认只跑 `S0_ENV` / `S1_SMOKE` / `S9_REPORT`，约 2–4 分钟，**不碰任何大文件**。
+2. 右侧 `Settings`：`Accelerator` = **GPU T4 ×2**（Notebook 只用第 0 张，第二张不会自动用上）；`Internet` = **Off**（默认不需要联网）
+3. 直接 `Run All`。默认只跑 `S0_ENV` / `S1_SMOKE` / `S9_REPORT`，约 2–4 分钟，**不碰任何大文件、不联网**。
+
+**要连 llama.cpp 一起编好**（v0.3.0 起只改一个开关）：
+
+1. 右上角 `Edit` → 找到 `RUN_S2 = False` 这一行，改成 `RUN_S2 = True`
+2. 右侧 `Settings` → `Internet` = **On**
+3. `Run` → `Run all`。S2 会自己下载固定 commit 的源码（36.6 MiB）、校验 sha256、解压到 `WORK/src/`、编译出四个二进制。约 15–30 分钟（含编译，**估算值**）。
+
+`RUN_S2 = False` 是默认值，且 `_apply_run_switches()` 在它为 `False` 时**一个字段都不改** —— 导入 notebook 或误点 `Run All` 都不会悄悄联网。想下载必须显式改这一行，并由 `test_s2_default_off_no_network` 钉住。打开 `RUN_S2` 也**只**开 `S2_BUILD`，`S3`–`S8` 保持 `False`（`test_s2_run_switch_only_turns_on_s2` 钉住）。
 
 跑完后读 `S0_ENV` 的输出，它会列出 `/kaggle/input` 下每个 Dataset 的文件数、大小、以及**所有 `.gguf` 的完整路径**。把这些路径抄进配置 cell 的 `CFG`，再把要跑的阶段改成 `True`，从上到下逐段执行。
 
@@ -54,7 +60,7 @@ research/kaggle/
 |---|---|---|---|---|---|
 | `S0_ENV` | **开** | — | 120 s | GPU / CPU / RAM / 磁盘 / 工具链 / input 清单 | 这台机器能干什么 |
 | `S1_SMOKE` | **开** | — | 240 s | 合成 GGUF 往返、fp16 vs bf16 TFLOP/s、拷贝带宽、磁盘写速 | 解析器和预算算术对不对 |
-| `S2_BUILD` | 关 | llama.cpp 源码 | 2400 s | `llama-imatrix` / `llama-quantize` / `llama-perplexity` / `llama-cli` | 工具链能否就位 |
+| `S2_BUILD` | 关（`RUN_S2=True` 时自动开） | **不需要任何输入**：源码由 S2 自己下载 | 2400 s | `llama-imatrix` / `llama-quantize` / `llama-perplexity` / `llama-cli` | 工具链能否就位 |
 | `S3_IMATRIX` | 关 | S2 + `IMATRIX_BASE` + 校准语料 | 3600 s | `imatrix.gguf` + sha256 | 校准信息是否对等 |
 | `S4_QUANT` | 关 | S2 + S3 + `BASE_GGUF`（f16/bf16） | 1800 s | 两个 GGUF + provenance + 逐文件 bpw | 能否编码、字节多少 |
 | `S5_BYTES` | 关 | S4（或任意 GGUF） | 300 s | 逐张量类型字节、按 attn/ffn/embed 分类 | 哪些张量没被低位量化 |
@@ -66,7 +72,7 @@ research/kaggle/
 
 **钉死一个 commit**
 
-上游没有 tag 可用（llama.cpp 只有 build number），所以必须按 commit 固定。本文所有行号、CMake 选项名、默认架构列表都对着下面这个 commit 核对过：
+上游没有 tag 可用（llama.cpp 只有 build number），所以必须按 commit 固定。本文所有行号、CMake 选项名、默认架构列表都对着下面这个 commit 核对过；`S2_PINNED` 把同一个 commit 连同 tarball 的 sha256、字节数、解压目录名一起写死在 notebook 里：
 
 ```
 commit  d454a204ef2b63af357744809c05af897611a72e   (2026-10-21)
@@ -75,18 +81,35 @@ tarball https://github.com/ggml-org/llama.cpp/archive/d454a204ef2b63af357744809c
 sha256  f565ee976503e0b66997a05554d4881a252ced7687811f2a41df771203b54d7f
 ```
 
-36.6 MiB 从 Mac 上传到 Kaggle Dataset 毫无压力，比传 15 GiB 的权重现实得多。tarball 解出来的目录**没有 `.git`**，所以 `git rev-parse` 拿不到 commit；此时 S2 会把 `CFG["LLAMA_COMMIT"]` 记成**声明值**并标 `commit_source="declared"`（不是静默记 `None`）。这一点很重要：否则 S4 的 provenance 里 `llama_commit` 会是空，事后分不清"没记录"还是"记录了但没校验"。
+v0.3.0 起 S2 的联网路径**只有一条**：下载这个 tarball → 比对 sha256 → 安全解压（拒绝 `..`、绝对路径、符号链接）→ 校验顶层目录名与 pin 一致 → 编译。**没有** `git clone` 分支 —— 旧版 `ALLOW_NETWORK=True` 走 `git clone --depth 1`，拿的是当时的 HEAD，与"固定 commit"直接冲突，等于让"固定版本"这句话失效，那是设计错误而不是缺功能。
 
-**S2 的四个编译开关（v0.2.2 新增，都在 `CFG` 里）**
+commit 的校验强度分三档，写进结果的 `commit_source` / `commit_verified`：
 
-| 键 | 默认 | 为什么 |
-|---|---|---|
-| `BUILD_CUDA` | `True` | `False` 只构建 CPU 版。三个工具（imatrix / quantize / perplexity）都有 CPU 路径，只是慢；nvcc 不可用时预检会直接建议改这个 |
-| `CUDA_ARCH` | `"75"` | T4 = sm_75。留空则用上游默认，而 `ggml/src/ggml-cuda/CMakeLists.txt` 的默认值是 `50-virtual 61-virtual 70-virtual 75-virtual 80-virtual 86-real 89-real 90-virtual 120a-real`（CUDA ≥12.9 再加 `121a-real`）—— **九套架构**，4 核上编译量翻几倍 |
-| `BUILD_JOBS` | `4` | Kaggle 只有 4 核 |
-| （硬编码） | `-DLLAMA_USE_PREBUILT_UI=OFF` | 这个 option 在顶层 `CMakeLists.txt:138` 声明、默认 `ON`，经 `tools/ui/CMakeLists.txt` 转成 `HF_ENABLED` 传给 `scripts/ui-assets.cmake`。`llama-ui-assets` 是 `ALL` target，只要 `LLAMA_BUILD_SERVER=ON`（默认）就会在**构建期**执行；本地没有 `dist/` 又没走 npm 构建时，会 `file(DOWNLOAD)` 去 HF bucket 取 `dist.tar.gz`（sha256 那次 `TIMEOUT 30`，包体那次 `TIMEOUT 300`）。Internet Off 时**不会** FATAL_ERROR，只 `message(WARNING)` 然后生成空资产表，但会白等 |
+| 来源 | `commit_source` | `commit_verified` | 证明力 |
+|---|---|---|---|
+| 目录里有 `.git` 且 `git rev-parse` 与 pin 一致 | `git` | `True` | 最强 |
+| tarball digest 与预登记 sha256 一致（v0.3.0 自动路径） | `pinned_tarball` | `True` | 证明"这份 tar.gz 就是当初 pin 的那份"；不等于 git 校验 |
+| 只有 `CFG["LLAMA_COMMIT"]`，既无 `.git` 也无 digest（手动挂载的源码） | `declared` | `False` | 只证明"我声称" |
+
+三档都可能在 S9 报告第 2 节看到原文。digest 不符时 S2 **拒绝解压并删掉下载的包**，不会"先解压看看"。
+
+**S2 的开关与编译参数（v0.3.0：一个开关 `RUN_S2`，其余自动）**
+
+| 键 | 默认 | 谁设 | 为什么 |
+|---|---|---|---|
+| `RUN_S2` | `False` | **用户** | 唯一需要手改的开关。`True` 时 `_apply_run_switches()` 一次填好下面全部；`False` 时一个字段都不改 |
+| `S2_AUTO_FETCH_SOURCE` | `False` | `RUN_S2` | `True` 才允许联网下载源码 |
+| `LLAMA_COMMIT` | `""` | `RUN_S2` | 自动填成 `S2_PINNED["commit"]` |
+| `BUILD_CUDA` | `True` | `RUN_S2` | `False` 只构建 CPU 版。三个工具（imatrix / quantize / perplexity）都有 CPU 路径，只是慢；nvcc 不可用时预检会直接建议改这个 |
+| `CUDA_ARCH` | `"75"` | `RUN_S2` | T4 = sm_75。留空则用上游默认，而 `ggml/src/ggml-cuda/CMakeLists.txt` 的默认值是 `50-virtual 61-virtual 70-virtual 75-virtual 80-virtual 86-real 89-real 90-virtual 120a-real`（CUDA ≥12.9 再加 `121a-real`）—— **九套架构**，4 核上编译量翻几倍 |
+| `BUILD_JOBS` | `4` | `RUN_S2` | Kaggle 只有 4 核 |
+| （硬编码） | `-DLLAMA_USE_PREBUILT_UI=OFF` | — | 这个 option 在顶层 `CMakeLists.txt:138` 声明、默认 `ON`，经 `tools/ui/CMakeLists.txt` 转成 `HF_ENABLED` 传给 `scripts/ui-assets.cmake`。`llama-ui-assets` 是 `ALL` target，只要 `LLAMA_BUILD_SERVER=ON`（默认）就会在**构建期**执行；本地没有 `dist/` 又没走 npm 构建时，会 `file(DOWNLOAD)` 去 HF bucket 取 `dist.tar.gz`（sha256 那次 `TIMEOUT 30`，包体那次 `TIMEOUT 300`）。Internet Off 时**不会** FATAL_ERROR，只 `message(WARNING)` 然后生成空资产表，但会白等 |
 
 `S2_BUILD` 在调 cmake 之前先跑 `_toolchain_report()`（`cmake --version` / `nvcc --version` / `g++ -dumpversion` / `gcc -dumpversion`，各 20 s 超时，拿不到就写"不可用"而不是抛），再由 `_cuda_preflight()` 判定：`BUILD_CUDA=True` 但 nvcc 不可用时直接 `GuardError`，不让 cmake 在 `FATAL_ERROR` 的几十行输出里把它淹掉。
+
+**重复 `Run All` 不会重下**：`WORK/src/` 里已解压的目录 + `src/pinned_source.json` 的 sha256 与当前 pin 一致就完全离线复用；tarball 还在且 digest 一致就只重新解压；包被改坏（哪怕只差一个字节）就删掉重下。三级缓存由 `test_s2_repeat_run_uses_cache` 钉住。
+
+**失败时不让人读编译错误**：`_explain_s2_failure()` 把 `CommandFailed` 的日志尾部翻译成"症状 → 处置"一句话（nvcc 与 host g++ 不兼容 / 找不到 nvcc / 磁盘满 / 内存不足 / cmake 配置阶段 / 其他），并给出日志路径；S9 报告第 2 节单独记 S2 的状态与四个二进制路径。`test_s2_failure_message_actionable` 钉住六种症状。
 
 **一个容易踩的坑**：不要为了省编译时间去关 `LLAMA_BUILD_SERVER`。上游 `tools/CMakeLists.txt` 里 `add_subdirectory(cli)` 写在 `if (LLAMA_BUILD_SERVER)` 内部，关了就连 `llama-cli` 都没有（S7 要用）。
 
@@ -101,7 +124,7 @@ sha256  f565ee976503e0b66997a05554d4881a252ced7687811f2a41df771203b54d7f
 | 1 | **base GGUF** | `Qwen3-8B` 的 f16 或 Q8_0 | f16 = 15.25 GiB；Q8_0 ≈ 8.1 GiB | S3 / S4 / S8 |
 | 2 | **校准语料** `calib.txt` | wikitext-2-raw 的 **train** split | ≥ 200 KB（S3 会警告过短） | S3 |
 | 3 | **评测语料** `eval.txt` | wikitext-2-raw 的 **test** split | 几十 KB 起 | S6 / S7 / S8 |
-| 4 | **llama.cpp 源码** | 任意近期 master | ~50 MB | S2 |
+| 4 | **llama.cpp 源码** | **不需要**（v0.3.0：`RUN_S2=True` 时 notebook 自己下载） | 断网备选：把源码挂上来，设 `CFG["LLAMA_SRC"]` | ~36 MB | S2 |
 | 5 | （可选）第三方量化 GGUF | 别人的 IQ2_XS / IQ4_XS | 2–5 GiB | SX |
 
 **两个 base 不是同一个东西（v0.2.1）**
@@ -486,13 +509,34 @@ if CFG["LLAMA_COMMIT"] and git_commit is None:
 
 ---
 
+## 九之四、v0.3.0 修了什么（S2 一键）
+
+| ID | 问题 | 修法 |
+|---|---|---|
+| **B-1** | 用户要在 Mac 上下载源码、解压、传 36.6 MiB Dataset、填绝对路径 —— 纯人工负担 | 新增 `RUN_S2` 一个开关：自动下载 pinned commit 的 tarball → 校验 sha256 → 安全解压到 `WORK/src/` → 编译。用户不碰本地 |
+| **B-2** | 旧 `ALLOW_NETWORK=True` 走 `git clone --depth 1`（HEAD），与固定 `LLAMA_COMMIT` 直接冲突 —— "固定版本"这句话失效 | **删掉该分支**。联网只有一条路径：pinned tarball + 预登记 sha256 |
+| **B-3** | 默认行为不明确：既想"一键"又不想"导入就下载" | `RUN_S2 = False` 是默认值；`_apply_run_switches()` 在 `False` 时**一个字段都不改**，`test_s2_default_off_no_network` 钉住；`test_s2_run_switch_only_turns_on_s2` 钉住"只开 S2，不碰 S3–S8" |
+| **B-4** | S2 失败时用户面对几十行 cmake 输出 | `_explain_s2_failure()` 给"症状 → 处置"一句话 + 日志路径；S9 报告第 2 节单独记 S2 状态、四个二进制、磁盘剩余 |
+
+### B-2 的细节：为什么不许 `git clone`
+
+`git clone --depth 1` 拿到的是**克隆那一刻的 HEAD**。同一份报告里 `LLAMA_COMMIT` 写着 `d454a204…`，实际编译的却是三天后的一次提交 —— 行号、CMake 选项、默认架构列表全部可能对不上，而报告里看不出来。所以 v0.3.0 把这条路径整个删掉，只留"下载一个字节数已知的 tarball 并校验 sha256"。
+
+`commit_source` 因此从两档变三档：`git`（有 `.git` 且相符）/ `pinned_tarball`（digest 已校验，v0.3.0 自动路径的默认结果）/ `declared`（只有声明值，手动挂载源码时）。三档都如实写进 S9 报告，**不把 `pinned_tarball` 说成 git 校验，也不把 `declared` 说成已验证**。
+
+### B-1 的细节：三级缓存与四个"拒绝"
+
+`_fetch_pinned_source()` 的顺序是：已解压目录 + stamp 一致 → 完全离线复用；tarball 在且 digest 一致 → 只解压；否则才下载。四种情况**拒绝继续**而不是"尽量解压"：sha256 不符、Content-Length 与预登记字节数不符、归档里有 `..`/绝对路径/符号链接/非普通文件、顶层目录名与 pin 不符。
+
+---
+
 ## 十、怎么跑测试
 
 ```bash
 python3 research/kaggle/test_trlab.py
 ```
 
-不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。它在一个临时目录里把 notebook 的 16 个 code cell 按顺序 exec 一遍，然后跑 32 项断言。当前结果：**32/32 通过，约 10 秒**。
+不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。它在一个临时目录里把 notebook 的 16 个 code cell 按顺序 exec 一遍，然后跑 41 项断言。当前结果：**41/41 通过，约 11 秒**。
 
 | 测试 | 钉住的问题 |
 |---|---|
@@ -522,6 +566,15 @@ python3 research/kaggle/test_trlab.py
 | `test_toolchain_report` | 四个探测命令都失败时只记录不抛（假 PATH 下不崩） |
 | `test_s2_cmake_flags` | **P1-D**：cmake argv 含 `-DLLAMA_USE_PREBUILT_UI=OFF` / `-DCMAKE_CUDA_ARCHITECTURES=75` / `-DGGML_CUDA=ON`；build 不落源码树；`BUILD_CUDA=False` 时不传架构；nvcc 缺失时零外部调用 |
 | `test_s2_commit_fallback` | 无 `.git` 时 commit 记成 `declared` 而非 `None`；无预注册值时不编造；有 git 且不符必须抛 |
+| `test_s2_default_off_no_network` | **B-3**：默认 `RUN_S2=False` 时 `_apply_run_switches()` 返回 `{"run_s2": False}` 且一个字段都不改；无手动源码时 `_find_llama_src` 抛 `GuardError` 且消息含 `RUN_S2` 与 `Internet`，**不触发下载** |
+| `test_s2_run_switch_only_turns_on_s2` | **B-3**：`RUN_S2=True` 只开 `S2_BUILD`，`S3`–`S8` 全保持 `False`；`LLAMA_COMMIT`/`CUDA_ARCH`/`BUILD_JOBS`/`BUILD_CUDA` 自动填好 |
+| `test_s2_download_checksum_mismatch` | digest 与预登记值不符 → `GuardError`，下载的包被删掉，不解压 |
+| `test_s2_extract_rejects_traversal` | 归档里有 `../../evil.txt` → `GuardError`，不"尽量解压" |
+| `test_s2_repeat_run_uses_cache` | 重复运行三级缓存：离线复用 → 只解压 → 包被改坏才重下（下载次数被钉死） |
+| `test_s2_dir_name_mismatch_fails` | digest 对但顶层目录名与 pin 不符 → `GuardError`（pin 信息本身有问题） |
+| `test_s2_commit_from_pinned_tarball` | 自动路径记 `pinned_tarball` + `commit_verified=True`；有 git 且相符记 `git`；不符仍抛 |
+| `test_s2_failure_message_actionable` | 六种编译失败症状各自给出可操作处置（host g++ / nvcc / 磁盘 / 内存 / cmake / 其他） |
+| `test_s2_network_failure_message` | 真的连不上时消息含"Internet = On"，且不留下 `.partial` |
 | `test_paired_bootstrap_edges` | n=0 / n=1 返回 `ci95=None`；全正差值给不含 0 的 CI |
 | `test_ggml_type_table` | 7 个关键 type 的块尺寸/bpw |
 | `test_default_stages_complete` | **默认 S0/S1/S9 三个都必须 `ok`，S9 报告必须有效**；且 `results.json` 里 `S9_REPORT.status` 不能是 `null`（**P0-B**） |
@@ -550,7 +603,9 @@ python3 research/kaggle/test_trlab.py
 13. **不能关 `LLAMA_BUILD_SERVER`**。上游 `tools/CMakeLists.txt` 把 `add_subdirectory(cli)` 写在 `if (LLAMA_BUILD_SERVER)` 里，关了就没有 `llama-cli`，S7 会缺工具。省编译时间请改 `CUDA_ARCH` / `BUILD_JOBS`，别动 SERVER。
 14. **S2 的编译时间与峰值内存全是估算**。`2400 s` 预算、`1.5–3.5 GiB` build 目录、`8–16 GiB` 峰值 RAM 都没有在真实 Kaggle T4 上验证过（本轮不允许启动实例）。runbook 第六节给了止损值，超了就降 `BUILD_JOBS` 或改 `BUILD_CUDA=False`。
 15. **`-DLLAMA_USE_PREBUILT_UI=OFF` 依赖上游有这个选项名**。它在顶层 `CMakeLists.txt:138` 用 `option()` 声明；如果将来改名，cmake 只会对未知的 `-D` 变量警告一句然后忽略，后果回到"构建期尝试下载 UI"——不会失败，只是慢。runbook 的核对清单里有这一项。
-16. **tarball 源码没有 `.git`，commit 只能"声明"不能"校验"**。`_git_commit()` 走 `git rev-parse`，解压出来的目录必然失败；S2 会把 `CFG["LLAMA_COMMIT"]` 记成 `commit_source="declared"`。要真正可校验，只能用 `git clone`（`ALLOW_NETWORK=True`）或自己保留 `.git` 目录。**这直接决定 provenance 的强度**：`declared` 只能证明"我声称用的是这个 commit"。
+16. **tarball 源码没有 `.git`，commit 的校验强度取决于来源**。自动下载路径记 `commit_source="pinned_tarball"` + `commit_verified=True`，它证明"这份 tar.gz 的 sha256 与预登记值一致"，**不等于** git 校验；手动挂载的源码只能记 `declared`。要 git 级校验，需要自己 `git clone` 后保留 `.git` 再挂载（并设 `CFG["LLAMA_SRC"]`）。
+17. **预登记 sha256 本身是自证的**。它写在 notebook 里，校验只能防"上游文件被替换 / 网络返回错误页面"，防不了"notebook 里的预登记值被改坏"。第一次使用时应在报告第 2 节核对那串 sha256 与本文第四节列出的值一致。
+18. **Kaggle 能否直连 github.com 未验证**。自动下载走标准库 `urllib`（不依赖 curl/wget）。如果 Kaggle 网络策略拦了 GitHub，S2 会给出"检查 Settings → Internet = On"的报错，此时用断网备选：手动下载同一 tarball、挂成 Dataset、设 `CFG["LLAMA_SRC"]`。
 
 ---
 
@@ -579,11 +634,12 @@ python3 research/kaggle/test_trlab.py
 | S9 快照自一致性 | ✅ `results.json` 的 `S9_REPORT.status = "ok"` + `self_reported: true` |
 | S2 命令形状 | ✅ flag 全在位置参数之前；nvcc 缺失时零外部调用即报错 |
 | S2 commit 记录 | ✅ 无 `.git` 时记 `declared`、无预注册值时不编造、有 git 且不符必抛 |
-| `test_trlab.py` | ✅ **32/32，约 10 秒** |
+| S2 自动取源码（mock） | ✅ 默认不联网；只开 S2；digest 不符拒解压并删包；`..` 条目拒解压；三级缓存不重下；目录名不符拒解压；`pinned_tarball` 校验档；六种失败症状各有处置；真断网时消息含 "Internet = On" |
+| `test_trlab.py` | ✅ **41/41，约 11 秒** |
 
 **没有**验证的：S2 的实际编译、S3/S4 的真实量化、S6 的 `llama-perplexity` 真实输出解析（正则已用真实格式字符串测过，但没跑过真实二进制）。这三项必须在 Kaggle 上首跑时人工确认。
 
-**没有**验证的还有 S2 的预算数字（编译时长、build 目录大小、峰值内存）、`-DLLAMA_USE_PREBUILT_UI=OFF` 在当前 pin 上的实际效果、以及 `llama-imatrix` 在 T4 上跑 8B Q8_0 的耗时。runbook 第八节列了完整清单。
+**没有**验证的还有：S2 从 Kaggle 实际下载 tarball 能否成功（github.com 直连）、下载与编译的真实耗时、build 目录大小与峰值内存、`-DLLAMA_USE_PREBUILT_UI=OFF` 在当前 pin 上的实际效果、`llama-imatrix` 在 T4 上跑 8B Q8_0 的耗时。runbook 第八节列了完整清单。
 
 ---
 
@@ -593,4 +649,6 @@ python3 research/kaggle/test_trlab.py
 
 **如果 `S0_ENV` 说 `/kaggle/input` 下没有 `.gguf`，那 S3–S7 一定跑不了 —— 这是设计如此，不是 bug。**
 
-确认环境没问题之后，**不要**把 `STAGES` 全改成 `True` 再 `Run All`。下一步按 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md) 走：先只开 `S2_BUILD`，编译过了再开 `S3_IMATRIX`，每一段都有停机点和人工核对清单。
+确认环境没问题之后，**不要**把 `STAGES` 全改成 `True` 再 `Run All`。下一步按 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md) 走：把 `RUN_S2` 改成 `True`（`Internet` 记得设 On），编译过了再开 `S3_IMATRIX`，每一段都有停机点和人工核对清单。
+
+> v0.3.0 起 `RUN_S2=True` 会自动把 `STAGES["S2_BUILD"]` 打开，所以这一步只需要改一个开关，不用再手改 `STAGES`。
