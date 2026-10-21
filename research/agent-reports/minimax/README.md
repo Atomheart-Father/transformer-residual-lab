@@ -1,6 +1,6 @@
 # MiniMax research submissions
 
-**Active assignment:** [R2 Issue #1](https://github.com/Atomheart-Father/transformer-residual-lab/issues/1) · **→ [R3 Issue #3](https://github.com/Atomheart-Father/transformer-residual-lab/issues/3)**
+**Active assignment:** [R2 Issue #1](https://github.com/Atomheart-Father/transformer-residual-lab/issues/1) · [R3 Issue #3](https://github.com/Atomheart-Father/transformer-residual-lab/issues/3) · [R4 Issue #6](https://github.com/Atomheart-Father/transformer-residual-lab/issues/6)
 
 Expected files:
 - `2026-10-r2-report.md`
@@ -18,5 +18,6 @@ Expected files:
 - `2026-10-r4-encoding-status.md` — PR #899/#900、lalamo PR #364、公开 2-bit 模型的元数据与 bpw 追溯；**含对 R3 两条结论的更正**
 - `2026-10-r4-quality-gates.md` — 代数符号偏置修正的数学审查 + 严肃任务质量评价的分阶段方案（只设计，不执行）
 - `2026-10-r4-shortlist.md` — 仅两条候选及各自的最强反证与 kill condition
+- `2026-10-r4-errata.md` — **对 R4 的 6 项勘误**（3×P0：Q2_K 真实 bpw / 检出力表单调性 / CI 判据方向；3×P1：S0.1 探针拆分 / 证据边界收回 / 免费云可执行矩阵），源自 [Issue #6 独立审查](https://github.com/Atomheart-Father/transformer-residual-lab/issues/6#issuecomment-6309170459)；**不覆盖上面三份原报告**，保留审计轨迹
 
 Source verification and adversarial evidence are mandatory. Only write files within this researcher's subdirectory. Push and comment on Issue #1 with the commit SHA.
