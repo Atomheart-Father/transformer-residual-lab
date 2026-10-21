@@ -2,7 +2,7 @@
 
 `trlab_kaggle.ipynb` —— 一个**可直接上传到 Kaggle** 的独立 Notebook，用来在同一份 `Qwen/Qwen3-8B` 上产出 `IQ2_XS` 与 `IQ4_XS`，并比较**真实文件字节**、**配对 NLL**、**有限配对质量**。
 
-当前版本 **v0.2**。首版（v0.1）只做环境检查与短时 smoke test；v0.2 修掉了一轮逐 cell 审查提出的 3 个 P0 + 4 个 P1，并把它们全部转成了 CPU 可跑的回归测试（见第九、十节）。
+当前版本 **v0.2.1**。首版（v0.1）只做环境检查与短时 smoke test；v0.2 修掉了一轮逐 cell 审查提出的 3 个 P0 + 4 个 P1；v0.2.1 又修了 S4 的两个 P0（二次量化门槛、产物复用不看指纹）和 S9 的 rho 符号。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
 
 ---
 
@@ -52,8 +52,8 @@ research/kaggle/
 | `S0_ENV` | **开** | — | 120 s | GPU / CPU / RAM / 磁盘 / 工具链 / input 清单 | 这台机器能干什么 |
 | `S1_SMOKE` | **开** | — | 240 s | 合成 GGUF 往返、fp16 vs bf16 TFLOP/s、拷贝带宽、磁盘写速 | 解析器和预算算术对不对 |
 | `S2_BUILD` | 关 | llama.cpp 源码 | 2400 s | `llama-imatrix` / `llama-quantize` / `llama-perplexity` / `llama-cli` | 工具链能否就位 |
-| `S3_IMATRIX` | 关 | S2 + base GGUF + 校准语料 | 3600 s | `imatrix.gguf` + sha256 | 校准信息是否对等 |
-| `S4_QUANT` | 关 | S2 + S3 + base GGUF | 1800 s | 两个 GGUF + 逐文件 bpw | 能否编码、字节多少 |
+| `S3_IMATRIX` | 关 | S2 + `IMATRIX_BASE` + 校准语料 | 3600 s | `imatrix.gguf` + sha256 | 校准信息是否对等 |
+| `S4_QUANT` | 关 | S2 + S3 + `BASE_GGUF`（f16/bf16） | 1800 s | 两个 GGUF + provenance + 逐文件 bpw | 能否编码、字节多少 |
 | `S5_BYTES` | 关 | S4（或任意 GGUF） | 300 s | 逐张量类型字节、按 attn/ffn/embed 分类 | 哪些张量没被低位量化 |
 | `S6_NLL` | 关 | S2 + S5 + 评测语料 | 5400 s | 分组配对 NLL + bootstrap CI | 2.31 bpw 差多少 nats |
 | `S7_QUALITY` | 关 | S2 + S5 | 1800 s | 贪心续写一致性、repeat4 | 有没有整体崩塌 |
@@ -75,18 +75,27 @@ research/kaggle/
 | 4 | **llama.cpp 源码** | 任意近期 master | ~50 MB | S2 |
 | 5 | （可选）第三方量化 GGUF | 别人的 IQ2_XS / IQ4_XS | 2–5 GiB | SX |
 
-**base 选 f16 还是 Q8_0？**
+**两个 base 不是同一个东西（v0.2.1）**
 
-| | f16 | Q8_0 |
+| CFG 键 | 谁用 | 要求 |
 |---|---|---|
-| 大小 | 15.25 GiB | ≈ 8.1 GiB |
-| imatrix 在 T4 上 | **放不进显存，退 CPU**（慢几十倍） | 能进显存，正常速度 |
-| 与论文口径 | 一致 | 略偏 |
-| 能不能当 S8 锚点 | 能（`tier=high`） | **默认不能**（`tier=approx`） |
+| `BASE_GGUF` / `BASE_KIND` | **S4 量化**、S8 锚点 | **必须是 f16/bf16**。已量化的 base 再量化需要 `--allow-requantize`，官方帮助原文：`WARNING: this can severely reduce quality compared to quantizing from 16bit or 32bit!` |
+| `IMATRIX_BASE` / `IMATRIX_BASE_KIND` | **S3 算 imatrix** | 留空 = 同 `BASE_GGUF`。T4 上可以指向 Q8_0（能进显存，快几十倍） |
 
-**T4 上推荐 Q8_0**。选哪个都必须写进 `CFG["BASE_KIND"]`，它会进 provenance。
+**T4 上的推荐配置**：
 
-关于 Q8_0 当锚点，v0.2 起是**硬约束**：`_anchor_decision()` 把 `BASE_KIND` 分档，`bf16/f16/fp16 → high`，`q8_0/q6_k/q5_k/q4_k_m/q4_k/q4_0 → approx`。`approx` 档默认 `status=skipped`，理由是 Q8_0 是**二次量化**，拿它当"原始 checkpoint BF16 真值"是错的。确实只想估个量级时，显式设 `CFG["ANCHOR_ALLOW_APPROX"] = True`，结果会带 `validity_scope="approx_only"`，S9 里不算 `rho`。
+```python
+CFG["IMATRIX_BASE"]      = "/kaggle/input/.../qwen3-8b-q8_0.gguf"   # imatrix 要整模型进显存
+CFG["IMATRIX_BASE_KIND"] = "q8_0"
+CFG["BASE_GGUF"]         = "/kaggle/input/.../qwen3-8b-f16.gguf"    # 量化 base
+CFG["BASE_KIND"]         = "f16"
+```
+
+`llama-quantize` 是 **CPU 路径**，15.25 GiB 的 f16 走的是内存不是显存，T4 实例的 RAM 够。两份 base 必须来自同一 checkpoint —— S4 会核对 architecture、每个张量的名字与形状、参数量，不一致直接报错。
+
+如果只有 Q8_0 一个文件、又只想做 smoke，必须显式设 `CFG["ALLOW_REQUANTIZE"] = True`；此时命令追加 `--allow-requantize`，产物 provenance 标 `requantized_pilot_only`，报告顶部会出现醒目声明，**不能**当作相对原始 checkpoint 的高保真低比特结论。
+
+关于 Q8_0 当**锚点**，v0.2 起是另一条硬约束：`_anchor_decision()` 把 `BASE_KIND` 分档，`bf16/f16/fp16 → high`，`q8_0/q6_k/q5_k/q4_k_m/q4_k/q4_0 → approx`。`approx` 档默认 `status=skipped`，因为拿二次量化的文件当"原始 checkpoint BF16 真值"是错的。确实只想估个量级时显式设 `CFG["ANCHOR_ALLOW_APPROX"] = True`，结果带 `validity_scope="approx_only"`，S9 不算 `rho`。
 
 ---
 
@@ -305,13 +314,69 @@ def ggml_type_info(tid, strict=True):
 
 ---
 
+## 九之二、v0.2.1 修了什么
+
+第二轮审查（Issue #5 comment 6321656242）指出 S4 还有两个 P0，外加一个 rho 符号问题。
+
+### P0-1 · Q8_0 base 根本走不通 S4
+
+README 原来推荐"T4 上用 Q8_0 当 base"，但 `llama-quantize` 对已经量化的张量有硬门槛。上游 `llama_model_quantize_impl` 的主循环里：
+
+```cpp
+if (ggml_is_quantized(tensor->type) && !params->allow_requantize)
+    throw std::runtime_error(format("requantizing from type %s is disabled", ...));
+```
+
+`allow_requantize` 默认 `false`，所以 `llama-quantize f16.gguf out.gguf IQ2_XS` 换成 `q8_0.gguf` 就直接抛。`tools/quantize/quantize.cpp` 的帮助文本：
+
+```
+--allow-requantize
+    allow requantizing tensors that have already been quantized
+    WARNING: this can severely reduce quality compared to quantizing from 16bit or 32bit!
+```
+
+修复分三块：
+
+1. **拆开两个 base**：`IMATRIX_BASE` / `IMATRIX_BASE_KIND` 与 `BASE_GGUF` / `BASE_KIND` 独立。T4 上 imatrix 用 Q8_0（进显存），量化用 f16（CPU 路径，走内存）。
+2. **`_base_requant_plan()` 前置拦截**：`BASE_KIND` 是量化类型且 `ALLOW_REQUANTIZE=False` 时，在调用 `llama_bin()` 之前就 `GuardError`，报错里直接给出"BASE_GGUF 指 f16、IMATRIX_BASE 指 Q8_0"的替代方案，并引用上游帮助原文。放行时命令追加 `--allow-requantize`，产物 provenance 标 `requantized_pilot_only`。
+3. **`_base_consistency()` 核对同源**：两份 base 分别 `gguf_scan`，比 architecture、张量名集合、每个张量形状、参数量。不一致直接报错——imatrix 是逐张量逐输入通道的统计量，形状对不上就没有意义。
+
+### P0-2 · 指纹变了，S4 仍然复用旧 GGUF
+
+v0.2 的复用条件是 `dst.exists() and size > 0 and not FORCE_RERUN`，跟输入毫无关系。于是换了 imatrix 或 base，`run_stage` 报 `INVALIDATE`、S4 也"重跑"了，但两个 GGUF 还是上一次的，而 `_fairness` 又引用新输入说"已核验"。
+
+现在每个产物旁边有 `<name>.gguf.provenance.json`，里面记 `quant_fp`：
+
+```
+sha256(base 指纹 + imatrix sha256 + llama.cpp commit + 格式
+       + 二次量化标记 + 量化参数)[:32]
+```
+
+只有 `quant_fp` 与当前输入算出来的一致才复用。不一致时旧文件被改名成 `<name>.gguf.stale-<旧fp8>`（同时删掉更早的同类 stale，每种格式最多留一份），然后重新量化、重写 provenance。回归测试 `test_s4_rebuilds_when_imatrix_changes` 连跑四次 S4：第一次造两个、第二次全复用（外部命令零调用）、**改 imatrix 后必须实质重建两个且旧文件被移走**、最后切到 `q8_0 + ALLOW_REQUANTIZE` 检查 flag 与 `base_scope`。
+
+> 操作提示：**从 v0.2 升级到 v0.2.1 后，第一次跑 S4 会重建两个 GGUF** —— v0.2 的产物没有 provenance，无法证明它来自当前输入。旧的会被改名成 `.stale-*`，不会丢。
+
+### 附带 · rho 的符号
+
+v0.2 写的是 `d4 = anchor - Q4`（负向），打印却标成 `dNLL(Q4,anchor)`。比值因为分子分母同号碰巧正确，但标签与代数定义相反。现在统一成"后减前"：
+
+```python
+d4 = q4 - anchor          # 锚点 → Q4 的退化，应为正
+d2 = q2 - anchor
+rho = (d2 - d4) / d4
+```
+
+抽成纯函数 `_rho_from_nll()`，并且 `d4 <= 0` 时返回 `rho=None` + 原因（锚点没有比 Q4 更好，此时 rho 没有意义，而不是硬算一个数）。S9 的渲染测试 `test_s9_rho_rendering` 直接断言报告里出现 `dNLL(Q4,anchor)=+0.5000` 且不出现 `-0.5000`。
+
+---
+
 ## 十、怎么跑测试
 
 ```bash
 python3 research/kaggle/test_trlab.py
 ```
 
-不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。它在一个临时目录里把 notebook 的 16 个 code cell 按顺序 exec 一遍，然后跑 18 项断言。当前结果：**18/18 通过，约 8 秒**。
+不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。它在一个临时目录里把 notebook 的 16 个 code cell 按顺序 exec 一遍，然后跑 28 项断言。当前结果：**28/28 通过，约 9 秒**。
 
 | 测试 | 钉住的问题 |
 |---|---|
@@ -327,6 +392,16 @@ python3 research/kaggle/test_trlab.py
 | `test_split_eval_exact_groups` | P1-F：8 种段落数/组数组合，组数严格、无丢失、组间最多差 1 段 |
 | `test_fingerprint_invalidation` | P1-D：改 CFG 指纹必变，改回来必还原 |
 | `test_run_cmd_nonzero_raises` | P1-E：rc=3 必须抛 `CommandFailed` 且带日志尾部 |
+| `test_base_requant_plan` | **P0-1**：q8_0 默认 blocked、放行后带 `--allow-requantize`、f16 无 flag |
+| `test_quant_cmd_shape` | 命令里位置参数顺序，flag 不能挤动它们 |
+| `test_quant_fp_binds_inputs` | **P0-2**：base/imatrix/commit/格式/二次量化/参数任一变化都必须换指纹 |
+| `test_s4_blocks_quantized_base` | 量化 base 未放行时，**在碰 llama-quantize 之前**就报错 |
+| `test_s4_rebuilds_when_imatrix_changes` | **P0-2**：连跑四次 S4，改 imatrix 后必须实质重建两个 GGUF、旧文件改名 `.stale-*`、provenance 更新 |
+| `test_t4_split_base_path` | **P0-1**：imatrix 用 Q8_0、量化用 f16，结构核对通过且不需要 requantize |
+| `test_base_consistency` | 架构/张量名/形状/参数量任一不同都要判定为不同源 |
+| `test_rho_sign` | rho 的 d4 必须为正；锚点不如 Q4 时 `rho=None` 而不是硬算 |
+| `test_s9_rho_rendering` | S9 报告里 `dNLL(Q4,anchor)=+0.5000`，不能是 `-0.5000` |
+| `test_s9_marks_requantized_base` | 二次量化的 base 必须在报告顶部醒目声明，高精度 base 时不能出现该声明 |
 | `test_paired_bootstrap_edges` | n=0 / n=1 返回 `ci95=None`；全正差值给不含 0 的 CI |
 | `test_ggml_type_table` | 7 个关键 type 的块尺寸/bpw |
 | `test_default_stages_complete` | **默认 S0/S1/S9 三个都必须 `ok`，S9 报告必须有效** |
@@ -343,12 +418,15 @@ python3 research/kaggle/test_trlab.py
 1. **T4 没有原生 bf16**（CC 7.5）。S1 会实测 fp16 vs bf16 的 TFLOP/s 比值；比值明显小于 1 就说明 bf16 走了模拟路径。锚点因此只能用 **f16**，与论文口径有偏差，S8 会把这条写进 `dtype_deviation`。
 2. **单张 T4 装不下 8B 高精度权重**：f16 = 15.25 GiB，可用显存约 15.0 GiB，且未计 KV 与 CUDA context。S8 默认 `status=skipped`，并给出 `required_gb` / `vram_usable_gb` 两个具体数字。
 3. **隔离只做到内容级**：S6 用前 200 字符做行级重叠检测。如果校准集与评测集来自同一文档的不同段落，这个方法检测不出来 —— 必须靠 `CALIB_SOURCE` / `EVAL_SOURCE` 声明不同 split。
-4. **`/kaggle/working` 约 20 GB**。两个 GGUF（2.2 + 4.0 GiB）+ imatrix 约 7 GiB，余量够；不要把 base 也放进去。
+4. **`/kaggle/working` 约 20 GB**。两个 GGUF 约 2.2 + 4.0 GiB，imatrix 只有几十 MB，余量够；不要把 base 也放进去。指纹不符的旧产物会以 `.stale-*` 形式留一份（见第 12 条）。
 5. **S7 样本量极小**（8 prompt × 32 token）。只能发现整体崩塌，不能排序细微质量；`repeat4` 是退化信号，不是质量分数。
 6. **NLL 的 CI 跨 0 不等于等价**。`paired_bootstrap` 只给区间，判读在 S9 里写死为"未测出差异"。
 7. **不能外推**。单张 T4、8B、单一语料的结果不适用于 27B，也不适用于 M4 Pro。**吞吐不可跨平台迁移，只有格式与质量可以。**
 8. **`guard()` 不能阻止运行中 OOM**。它只在阶段入口检查，llama.cpp 的显存分配在外部进程里。
 9. **未知 ggml type 的文件没有字节拆分**。这是刻意的：宁可不给数，也不给 8 bpw 的假数。遇到这种情况需要升级 `GGML_TYPES` 表（对照 `ggml-common.h` 的结构体大小）。
+10. **量化 base 必须是 f16/bf16**。`llama-quantize` 对已量化张量默认拒绝（`requantizing from type ... is disabled`），S4 会在 Python 侧先拦住。`ALLOW_REQUANTIZE=True` 只用于 smoke，产物标 `requantized_pilot_only`，不能当高保真结论。
+11. **imatrix 与量化 base 可以不同文件，但必须同源**。S4 核对 architecture / 张量名 / 形状 / 参数量；这只保证结构一致，不能证明是同一个 checkpoint 的权重（同一模型的两个不同 finetune 也能通过）。`IMATRIX_BASE_KIND` 是量化类型时，报告里会声明"imatrix 的激活是对高精度的近似"。
+12. **旧产物会留在 working**。指纹不符的 GGUF 被改名成 `.stale-<fp8>`，每种格式最多留一份。确认新结果没问题后可以手动删，`CODE_FINAL` 会把它们列出来。
 
 ---
 
@@ -370,7 +448,11 @@ python3 research/kaggle/test_trlab.py
 | `split_eval` 分组（8 种组合） | ✅ 组数严格 = min(n_groups, 段数)，无重叠、无丢失 |
 | `paired_bootstrap` | ✅ n=8 给 CI；n=1 / n=0 返回 `ci95=None` 而不是崩 |
 | 未知 type 的 GGUF | ✅ strict 抛 `UnknownGGMLType`；降级时 `nbytes=None` 且 `bpw_effective=None` |
-| `test_trlab.py` | ✅ **18/18，约 8 秒** |
+| S4 复用逻辑（4 次连跑） | ✅ 造 → 全复用（外部命令零调用）→ 改 imatrix 必重建两个 + 旧文件改名 `.stale-*` → 切 `q8_0+ALLOW_REQUANTIZE` 带 flag |
+| S4 拒绝量化 base | ✅ `GuardError` 在 `llama_bin()` 之前抛出，报错含替代方案与上游原文 |
+| T4 分 base 路径（imatrix=Q8_0 / 量化=f16） | ✅ 结构核对通过、`requant=primary`、命令无 `--allow-requantize` |
+| S9 rho 渲染 | ✅ `dNLL(Q4,anchor)=+0.5000`，无负号版本 |
+| `test_trlab.py` | ✅ **28/28，约 9 秒** |
 
 **没有**验证的：S2 的实际编译、S3/S4 的真实量化、S6 的 `llama-perplexity` 真实输出解析（正则已用真实格式字符串测过，但没跑过真实二进制）。这三项必须在 Kaggle 上首跑时人工确认。
 
