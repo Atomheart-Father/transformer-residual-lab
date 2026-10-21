@@ -308,7 +308,12 @@ def test_base_requant_plan(ns):
 
 
 def test_quant_cmd_shape(ns):
-    """--allow-requantize 只能出现在需要它的时候，且位置参数顺序不能乱。"""
+    """选项必须全部在位置参数之前。
+
+    quantize.cpp 的循环条件是 `strncmp(argv[arg_idx], "--", 2) == 0`，
+    遇到第一个位置参数就退出 —— 之后出现的 --allow-requantize 会被当成
+    多余位置参数丢掉，requantize 仍然被拒。v0.2.1 就错在这里。
+    """
     cmd_f = ns["_quant_cmd"]
     plan_f = ns["_base_requant_plan"]
 
@@ -324,8 +329,12 @@ def test_quant_cmd_shape(ns):
 
     cmd = cmd_f("/b/llama-quantize", "/m/im.gguf", "/m/q8.gguf",
                 "/m/out.partial", "IQ4_XS", 8, plan_f("q8_0", True))
-    assert cmd[-1] == "--allow-requantize", cmd
-    assert cmd[3] == "/m/q8.gguf", "加 flag 不能挤动位置参数"
+    assert cmd[1] == "--allow-requantize", f"选项必须在最前面：{cmd}"
+    i = cmd.index("/m/q8.gguf")
+    assert cmd[i:] == ["/m/q8.gguf", "/m/out.partial", "IQ4_XS", "8"], cmd
+    assert all(not str(c).startswith("--") for c in cmd[i:]), \
+        f"位置参数之后不能再出现任何选项：{cmd[i:]}"
+    assert cmd.index("--allow-requantize") < cmd.index("--imatrix")
 
 
 def test_quant_fp_binds_inputs(ns):
@@ -801,6 +810,10 @@ def test_default_stages_complete(ns):
     rj = json.loads(Path(s9["results"]).read_text(encoding="utf-8"))
     assert rj["notebook_version"] == ns["NOTEBOOK_VERSION"]
     assert rj["stages"]["S1_SMOKE"]["status"] == "ok"
+    # 自一致性：S9 写盘时自己还没登记进 STATE，不能留 null
+    assert rj["stages"]["S9_REPORT"]["status"] == "ok", rj["stages"]["S9_REPORT"]
+    assert rj["stages"]["S9_REPORT"]["self_reported"] is True
+    assert s9["stage_status"]["S9_REPORT"] == "ok"
     assert set(rj["stages"]) == set(ns["STAGES"]), "阶段清单不完整"
     assert rj["disclaimer"]
 
@@ -846,6 +859,122 @@ def test_s9_report_bf16_both_ways(ns):
         assert Path(r["results"]).exists()
     finally:
         s1_rec["result"]["bench"]["torch"] = orig
+
+
+# ---------------------------------------------------------------- v0.2.2 · S2
+
+def test_cuda_preflight(ns):
+    """BUILD_CUDA=True 但 nvcc 不可用时必须在 cmake 之前拦住。"""
+    f = ns["_cuda_preflight"]
+
+    assert f({"nvcc": "Cuda compilation tools, release 12.8"}, True)["ok"] is True
+    assert f({"nvcc": "Cuda compilation tools, release 12.8"}, False)["ok"] is True
+
+    for bad in ({"nvcc": "不可用: FileNotFoundError"}, {"nvcc": "rc=127"}, {}, {"nvcc": ""}):
+        r = f(bad, True)
+        assert r["ok"] is False, bad
+        assert "BUILD_CUDA" in r["note"] and "CPU" in r["note"], r["note"]
+
+    # 关掉 CUDA 时，nvcc 缺失不该拦
+    assert f({"nvcc": "不可用: FileNotFoundError"}, False)["ok"] is True
+
+
+def test_toolchain_report(ns):
+    """本机没有 nvcc，也不能抛；返回值要覆盖四个键。"""
+    tc = ns["_toolchain_report"]()
+    assert set(tc) == {"cmake", "nvcc", "gxx", "gcc"}, tc
+    assert tc["cmake"].startswith("cmake version"), tc["cmake"]
+    assert isinstance(tc["nvcc"], str) and tc["nvcc"]
+
+
+def test_s2_cmake_flags(ns):
+    """S2 必须：关掉 UI 预构建下载、CUDA 只编一个架构、且不碰 /kaggle/input 写。"""
+    CFG = ns["CFG"]
+    BUILD = Path(ns["BUILD"])
+    work = Path(ns["WORK"])
+    src = work / "fake_llama_src"
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "CMakeLists.txt").write_text("# fake\n", encoding="utf-8")
+
+    keys = ("LLAMA_SRC", "LLAMA_BIN", "LLAMA_COMMIT", "BUILD_CUDA", "CUDA_ARCH",
+            "BUILD_JOBS", "FORCE_RERUN")
+    snap = {k: CFG[k] for k in keys}
+    orig_run, orig_tc = ns["run_cmd"], ns["_toolchain_report"]
+    calls = []
+
+    def fake_run(cmd, log_path, deadline, cwd=None, env=None):
+        calls.append([str(c) for c in cmd])
+        if "--build" in cmd:
+            for t in ("llama-imatrix", "llama-quantize", "llama-perplexity", "llama-cli"):
+                p = BUILD / "bin" / t
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                os.chmod(p, 0o755)
+        return 0, ""
+
+    def clear_bins():
+        for t in ("llama-imatrix", "llama-quantize", "llama-perplexity", "llama-cli"):
+            for c in (BUILD / "bin" / t, BUILD / t):
+                if c.exists():
+                    c.unlink()
+
+    ns["run_cmd"] = fake_run
+    ns["_toolchain_report"] = lambda: {"cmake": "cmake version 3.31.0",
+                                       "nvcc": "Cuda compilation tools, release 12.8",
+                                       "gxx": "11", "gcc": "11"}
+    try:
+        CFG.update(LLAMA_SRC=str(src), LLAMA_BIN="", LLAMA_COMMIT="",
+                   BUILD_CUDA=True, CUDA_ARCH="75", BUILD_JOBS=4, FORCE_RERUN=True)
+        clear_bins()
+        r = ns["stage_s2_build"](__import__("time").time() + 120)
+
+        cfg_call = calls[0]
+        assert cfg_call[0] == "cmake" and "-S" in cfg_call
+        assert str(src) in cfg_call and str(BUILD) in cfg_call
+        assert "-DLLAMA_USE_PREBUILT_UI=OFF" in cfg_call, \
+            "否则构建期会 file(DOWNLOAD) 去 HF 取 UI，Internet Off 时白等"
+        assert "-DCMAKE_CUDA_ARCHITECTURES=75" in cfg_call, \
+            "不指定时上游默认九套架构，4 核上编译量翻几倍"
+        assert "-DGGML_CUDA=ON" in cfg_call
+        assert "-DLLAMA_BUILD_TESTS=OFF" in cfg_call
+        assert "-DLLAMA_BUILD_EXAMPLES=OFF" in cfg_call
+        assert str(src / "build") not in " ".join(cfg_call), "build 不能落在源码树（只读挂载）"
+
+        build_call = calls[1]
+        assert "--build" in build_call and "--target" in build_call
+        for t in ("llama-imatrix", "llama-quantize", "llama-perplexity", "llama-cli"):
+            assert t in build_call, t
+        assert r["reused"] is False and r["cuda"] is True
+        assert r["cuda_arch"] == "75"
+        assert r["toolchain"]["nvcc"].startswith("Cuda")
+
+        # BUILD_CUDA=False：不传架构，GGML_CUDA=OFF
+        calls.clear()
+        clear_bins()
+        CFG.update(BUILD_CUDA=False)
+        r2 = ns["stage_s2_build"](__import__("time").time() + 120)
+        cfg2 = calls[0]
+        assert "-DGGML_CUDA=OFF" in cfg2
+        assert not any(a.startswith("-DCMAKE_CUDA_ARCHITECTURES") for a in cfg2), cfg2
+        assert r2["cuda"] is False
+
+        # nvcc 不可用 + BUILD_CUDA=True → GuardError，且一次 cmake 都没跑
+        calls.clear()
+        clear_bins()
+        ns["_toolchain_report"] = lambda: {"cmake": "cmake version 3.31.0",
+                                           "nvcc": "不可用: FileNotFoundError",
+                                           "gxx": "11", "gcc": "11"}
+        CFG.update(BUILD_CUDA=True)
+        try:
+            ns["stage_s2_build"](__import__("time").time() + 120)
+            raise AssertionError("nvcc 缺失时没有拦住")
+        except ns["GuardError"] as e:
+            assert "BUILD_CUDA" in str(e)
+        assert calls == [], f"拦住之后不该再调用外部命令：{calls}"
+    finally:
+        ns["run_cmd"], ns["_toolchain_report"] = orig_run, orig_tc
+        CFG.update(snap)
+        clear_bins()
 
 
 # ---------------------------------------------------------------- T4 mock 端到端
@@ -942,6 +1071,9 @@ TESTS = [
     test_rho_sign,
     test_s9_rho_rendering,
     test_s9_marks_requantized_base,
+    test_cuda_preflight,
+    test_toolchain_report,
+    test_s2_cmake_flags,
     test_paired_bootstrap_edges,
     test_ggml_type_table,
     test_default_stages_complete,

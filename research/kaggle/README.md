@@ -2,7 +2,9 @@
 
 `trlab_kaggle.ipynb` —— 一个**可直接上传到 Kaggle** 的独立 Notebook，用来在同一份 `Qwen/Qwen3-8B` 上产出 `IQ2_XS` 与 `IQ4_XS`，并比较**真实文件字节**、**配对 NLL**、**有限配对质量**。
 
-当前版本 **v0.2.1**。首版（v0.1）只做环境检查与短时 smoke test；v0.2 修掉了一轮逐 cell 审查提出的 3 个 P0 + 4 个 P1；v0.2.1 又修了 S4 的两个 P0（二次量化门槛、产物复用不看指纹）和 S9 的 rho 符号。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
+当前版本 **v0.2.2**。首版（v0.1）只做环境检查与短时 smoke test；v0.2 修掉了一轮逐 cell 审查提出的 3 个 P0 + 4 个 P1；v0.2.1 又修了 S4 的两个 P0（二次量化门槛、产物复用不看指纹）和 S9 的 rho 符号；v0.2.2 修了 `--allow-requantize` 参数位置（放在位置参数之后等于没传）、S9 快照里 `status=null` 的自相矛盾，并给 S2 加了工具链预检与两个编译期开关。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
+
+S2 → S3 的分步操作清单在 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md)：数据从哪来、每步按哪个按钮、什么时候算成功、失败了看哪个日志、S4 的容量预算。本文件讲"为什么"，那份讲"怎么做"。
 
 ---
 
@@ -24,9 +26,10 @@
 
 ```
 research/kaggle/
-├── trlab_kaggle.ipynb   # 唯一需要上传的文件（28 cells：16 code + 12 markdown）
-├── test_trlab.py        # CPU-only 回归测试，不联网、不需要 GPU / llama.cpp
-└── README.md            # 本文件
+├── trlab_kaggle.ipynb        # 唯一需要上传的文件（28 cells：16 code + 12 markdown）
+├── KAGGLE_S2_S3_RUNBOOK.md   # S2 编译 → S3 imatrix 的分步操作清单（网页 GUI 视角）
+├── test_trlab.py             # CPU-only 回归测试，不联网、不需要 GPU / llama.cpp
+└── README.md                 # 本文件
 ```
 
 `test_trlab.py` **不是** notebook 的副本：它把 `trlab_kaggle.ipynb` 里所有 code cell 抽出来 exec，再对函数做断言。改了 notebook 就跑得出来。
@@ -60,6 +63,19 @@ research/kaggle/
 | `S8_BF16_ANCHOR` | 关 | 高精度 GGUF + 足够显存 | 3600 s | 锚点 NLL 或明确的 skip 记录 | 锚点能不能上，`rho` 能不能算 |
 | `SX_EXPLORE` | 关 | 第三方 GGUF | 1800 s | 字节 + NLL，标 `provenance=third_party` | 这个文件本身如何（**不参与公平比较**） |
 | `S9_REPORT` | **开** | — | 120 s | `report.md` + `results.json` | 汇总 |
+
+**S2 的四个编译开关（v0.2.2 新增，都在 `CFG` 里）**
+
+| 键 | 默认 | 为什么 |
+|---|---|---|
+| `BUILD_CUDA` | `True` | `False` 只构建 CPU 版。三个工具（imatrix / quantize / perplexity）都有 CPU 路径，只是慢；nvcc 不可用时预检会直接建议改这个 |
+| `CUDA_ARCH` | `"75"` | T4 = sm_75。留空则用上游默认，而 `ggml/src/ggml-cuda/CMakeLists.txt` 的默认值是 `50-virtual 61-virtual 70-virtual 75-virtual 80-virtual 86-real 89-real 90-virtual 120a-real`（CUDA ≥12.9 再加 `121a-real`）—— **九套架构**，4 核上编译量翻几倍 |
+| `BUILD_JOBS` | `4` | Kaggle 只有 4 核 |
+| （硬编码） | `-DLLAMA_USE_PREBUILT_UI=OFF` | 不关的话 `tools/ui` 会在**构建期**跑 `file(DOWNLOAD)` 去 HF bucket 取 UI 资产包（TIMEOUT 30/300）。Internet Off 时不会 FATAL_ERROR，只 `message(WARNING)`，但会白等几十秒到几分钟 |
+
+`S2_BUILD` 在调 cmake 之前先跑 `_toolchain_report()`（`cmake --version` / `nvcc --version` / `g++ -dumpversion` / `gcc -dumpversion`，各 20 s 超时，拿不到就写"不可用"而不是抛），再由 `_cuda_preflight()` 判定：`BUILD_CUDA=True` 但 nvcc 不可用时直接 `GuardError`，不让 cmake 在 `FATAL_ERROR` 的几十行输出里把它淹掉。
+
+**一个容易踩的坑**：不要为了省编译时间去关 `LLAMA_BUILD_SERVER`。上游 `tools/CMakeLists.txt` 里 `add_subdirectory(cli)` 写在 `if (LLAMA_BUILD_SERVER)` 内部，关了就连 `llama-cli` 都没有（S7 要用）。
 
 ---
 
@@ -370,13 +386,86 @@ rho = (d2 - d4) / d4
 
 ---
 
+## 九之三、v0.2.2 修了什么
+
+这一轮不是审查驱动的，是**在真实 Kaggle T4 上跑通 v0.2.1 默认 S0/S1/S9 之后**，为 S2 → S3 做准备时发现的四个问题。前两个是真实缺陷，后两个是"知道上游行为之后必须提前处理"。
+
+### P0-A · `--allow-requantize` 追加在位置参数之后，等于没传
+
+v0.2.1 加了这个 flag，但拼命令的方式是：
+
+```python
+# v0.2.1（错）
+cmd = [qbin, "--imatrix", imatrix, base, out, fmt, threads]
+cmd += flags          # ← --allow-requantize 落到了位置参数后面
+```
+
+上游 `tools/quantize/quantize.cpp` 的参数循环是：
+
+```cpp
+for (; arg_idx < argc && strncmp(argv[arg_idx], "--", 2) == 0; arg_idx++)
+```
+
+**遇到第一个不以 `--` 开头的 token 就退出**，之后一律当位置参数读（model / output / ftype / nthreads）。所以写在末尾的 `--allow-requantize` 被当成"多余的位置参数"丢掉，`allow_requantize` 仍然是 `false`，`llama_model_quantize_impl` 里那行 `throw std::runtime_error("requantizing from type ... is disabled")` 照旧触发。
+
+更糟的是 v0.2.1 的测试**把错误行为钉住了**：
+
+```python
+assert cmd[-1] == "--allow-requantize"      # ← 断言的就是"在末尾"
+```
+
+现在命令形状是 `[qbin] + flags + ["--imatrix", im, base, out, fmt, threads]`，测试改成断言**位置参数之后不允许再出现任何以 `--` 开头的 token**：
+
+```python
+i = cmd.index(base)
+assert all(not str(c).startswith("--") for c in cmd[i:]), cmd[i:]
+assert cmd.index("--allow-requantize") < cmd.index("--imatrix")
+```
+
+顺带记一笔：审查给的行号（1332-1333 / 127-130）与当前 master 不符（实测约 954 / 154-157），但**机制描述是对的**——所以这一条照修，只是引用行号时不能照抄。
+
+### P0-B · `results.json` 里 `S9_REPORT.status` 是 `null`，日志却写 OK
+
+S9 在写盘时，`run_stage` 还没把 `S9_REPORT` 自己登记进 `STATE`，于是遍历 `STAGES` 取到的记录是 `None`，落盘成 `"status": null`。日志里那一行 `[S9_REPORT] OK` 是 `run_stage` 在 `stage_fn` 返回之后才打的，两处对不上。
+
+修复是在 S9 内部显式补一条，并且**标明这是自报**，不假装成外部登记：
+
+```python
+stage_snapshot["S9_REPORT"] = {
+    "status": "ok", "elapsed_sec": None,
+    "fingerprint": _fingerprint("S9_REPORT"),
+    "error": None,
+    "self_reported": True,
+    "note": "本阶段在写盘时尚未登记进 STATE；status 由这里显式置为 ok",
+}
+```
+
+`test_default_stages_complete` 现在断言三件事：`status == "ok"`、`self_reported is True`、S9 返回的 `stage_status["S9_REPORT"] == "ok"`。
+
+### P1-C · S2 在 nvcc 不可用时会淹在 cmake 输出里
+
+`BUILD_CUDA=True` 而镜像里没有 nvcc 时，cmake 的 `FATAL_ERROR` 会吐出几十行 `Could not find CMAKE_CUDA_COMPILER`，用户很难判断"是环境问题还是参数问题"。现在 cmake 之前先跑 `_toolchain_report()`（四个命令各 20 s 超时，失败只记 `rc=N` 或 `不可用: XxxError`，不抛），再 `_cuda_preflight()` 判定，直接给结论：
+
+> `BUILD_CUDA=True 但 nvcc 不可用。改 CFG['BUILD_CUDA']=False —— llama-imatrix / llama-quantize / llama-perplexity 都能走 CPU，只是慢；或换一个带 CUDA 的镜像。`
+
+`test_s2_cmake_flags` 用一个假 `run_cmd` 捕获 cmake 的 argv，断言 nvcc 缺失时抛 `GuardError` 且**一次外部调用都没有**。
+
+### P1-D · 两个编译期开关
+
+- `-DCMAKE_CUDA_ARCHITECTURES=75`：不指定时上游默认九套架构（见第四节表格）。4 核上这不是小差别。
+- `-DLLAMA_USE_PREBUILT_UI=OFF`：`tools/ui/CMakeLists.txt` 的 `llama-ui-assets` target 在**构建期**跑 `scripts/ui-assets.cmake`，`HF_ENABLED=ON` 时用 `file(DOWNLOAD ...)` 去 HF bucket 取 `dist.tar.gz`。Internet Off 的环境下它不会失败（只 `message(WARNING)` 然后生成空资产表），但会白等。
+
+这两条都只在 `CFG["BUILD_CUDA"]` / 无条件路径上各加一个 flag，没有改流程。
+
+---
+
 ## 十、怎么跑测试
 
 ```bash
 python3 research/kaggle/test_trlab.py
 ```
 
-不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。它在一个临时目录里把 notebook 的 16 个 code cell 按顺序 exec 一遍，然后跑 28 项断言。当前结果：**28/28 通过，约 9 秒**。
+不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。它在一个临时目录里把 notebook 的 16 个 code cell 按顺序 exec 一遍，然后跑 31 项断言。当前结果：**31/31 通过，约 10 秒**。
 
 | 测试 | 钉住的问题 |
 |---|---|
@@ -393,7 +482,7 @@ python3 research/kaggle/test_trlab.py
 | `test_fingerprint_invalidation` | P1-D：改 CFG 指纹必变，改回来必还原 |
 | `test_run_cmd_nonzero_raises` | P1-E：rc=3 必须抛 `CommandFailed` 且带日志尾部 |
 | `test_base_requant_plan` | **P0-1**：q8_0 默认 blocked、放行后带 `--allow-requantize`、f16 无 flag |
-| `test_quant_cmd_shape` | 命令里位置参数顺序，flag 不能挤动它们 |
+| `test_quant_cmd_shape` | **P0-A**：`--allow-requantize` 必须在位置参数**之前**；位置参数之后不能再出现任何选项 |
 | `test_quant_fp_binds_inputs` | **P0-2**：base/imatrix/commit/格式/二次量化/参数任一变化都必须换指纹 |
 | `test_s4_blocks_quantized_base` | 量化 base 未放行时，**在碰 llama-quantize 之前**就报错 |
 | `test_s4_rebuilds_when_imatrix_changes` | **P0-2**：连跑四次 S4，改 imatrix 后必须实质重建两个 GGUF、旧文件改名 `.stale-*`、provenance 更新 |
@@ -402,9 +491,12 @@ python3 research/kaggle/test_trlab.py
 | `test_rho_sign` | rho 的 d4 必须为正；锚点不如 Q4 时 `rho=None` 而不是硬算 |
 | `test_s9_rho_rendering` | S9 报告里 `dNLL(Q4,anchor)=+0.5000`，不能是 `-0.5000` |
 | `test_s9_marks_requantized_base` | 二次量化的 base 必须在报告顶部醒目声明，高精度 base 时不能出现该声明 |
+| `test_cuda_preflight` | **P1-C**：nvcc 缺失 + `BUILD_CUDA=True` → `GuardError`；`BUILD_CUDA=False` 不拦；nvcc 正常时放行 |
+| `test_toolchain_report` | 四个探测命令都失败时只记录不抛（假 PATH 下不崩） |
+| `test_s2_cmake_flags` | **P1-D**：cmake argv 含 `-DLLAMA_USE_PREBUILT_UI=OFF` / `-DCMAKE_CUDA_ARCHITECTURES=75` / `-DGGML_CUDA=ON`；build 不落源码树；`BUILD_CUDA=False` 时不传架构；nvcc 缺失时零外部调用 |
 | `test_paired_bootstrap_edges` | n=0 / n=1 返回 `ci95=None`；全正差值给不含 0 的 CI |
 | `test_ggml_type_table` | 7 个关键 type 的块尺寸/bpw |
-| `test_default_stages_complete` | **默认 S0/S1/S9 三个都必须 `ok`，S9 报告必须有效** |
+| `test_default_stages_complete` | **默认 S0/S1/S9 三个都必须 `ok`，S9 报告必须有效**；且 `results.json` 里 `S9_REPORT.status` 不能是 `null`（**P0-B**） |
 | `test_s9_report_bf16_both_ways` | bf16 报错 / bf16 正常 / 无 torch 三条渲染分支 |
 | `test_t4_mock_end_to_end` | 把 GPU 微基准换成 T4 结果，重跑 S1→S9，报告必须写出"bf16 不可用" |
 | `test_a100_mock_end_to_end` | 反例：bf16 可用时不能还打印"不可用"，且要给出比值 |
@@ -427,6 +519,9 @@ python3 research/kaggle/test_trlab.py
 10. **量化 base 必须是 f16/bf16**。`llama-quantize` 对已量化张量默认拒绝（`requantizing from type ... is disabled`），S4 会在 Python 侧先拦住。`ALLOW_REQUANTIZE=True` 只用于 smoke，产物标 `requantized_pilot_only`，不能当高保真结论。
 11. **imatrix 与量化 base 可以不同文件，但必须同源**。S4 核对 architecture / 张量名 / 形状 / 参数量；这只保证结构一致，不能证明是同一个 checkpoint 的权重（同一模型的两个不同 finetune 也能通过）。`IMATRIX_BASE_KIND` 是量化类型时，报告里会声明"imatrix 的激活是对高精度的近似"。
 12. **旧产物会留在 working**。指纹不符的 GGUF 被改名成 `.stale-<fp8>`，每种格式最多留一份。确认新结果没问题后可以手动删，`CODE_FINAL` 会把它们列出来。
+13. **不能关 `LLAMA_BUILD_SERVER`**。上游 `tools/CMakeLists.txt` 把 `add_subdirectory(cli)` 写在 `if (LLAMA_BUILD_SERVER)` 里，关了就没有 `llama-cli`，S7 会缺工具。省编译时间请改 `CUDA_ARCH` / `BUILD_JOBS`，别动 SERVER。
+14. **S2 的编译时间与峰值内存全是估算**。`2400 s` 预算、`1.5–3.5 GiB` build 目录、`8–16 GiB` 峰值 RAM 都没有在真实 Kaggle T4 上验证过（本轮不允许启动实例）。runbook 第六节给了止损值，超了就降 `BUILD_JOBS` 或改 `BUILD_CUDA=False`。
+15. **`-DLLAMA_USE_PREBUILT_UI=OFF` 依赖上游有这个选项名**。它是 `tools/ui/CMakeLists.txt` 里定义的 option；如果将来改名，cmake 会忽略这个未知的 `-D` 变量（只警告），后果回到"构建期尝试下载 UI"——不会失败，只是慢。runbook 的核对清单里有这一项。
 
 ---
 
@@ -452,9 +547,13 @@ python3 research/kaggle/test_trlab.py
 | S4 拒绝量化 base | ✅ `GuardError` 在 `llama_bin()` 之前抛出，报错含替代方案与上游原文 |
 | T4 分 base 路径（imatrix=Q8_0 / 量化=f16） | ✅ 结构核对通过、`requant=primary`、命令无 `--allow-requantize` |
 | S9 rho 渲染 | ✅ `dNLL(Q4,anchor)=+0.5000`，无负号版本 |
-| `test_trlab.py` | ✅ **28/28，约 9 秒** |
+| S9 快照自一致性 | ✅ `results.json` 的 `S9_REPORT.status = "ok"` + `self_reported: true` |
+| S2 命令形状 | ✅ flag 全在位置参数之前；nvcc 缺失时零外部调用即报错 |
+| `test_trlab.py` | ✅ **31/31，约 10 秒** |
 
 **没有**验证的：S2 的实际编译、S3/S4 的真实量化、S6 的 `llama-perplexity` 真实输出解析（正则已用真实格式字符串测过，但没跑过真实二进制）。这三项必须在 Kaggle 上首跑时人工确认。
+
+**没有**验证的还有 S2 的预算数字（编译时长、build 目录大小、峰值内存）、`-DLLAMA_USE_PREBUILT_UI=OFF` 在当前 pin 上的实际效果、以及 `llama-imatrix` 在 T4 上跑 8B Q8_0 的耗时。runbook 第八节列了完整清单。
 
 ---
 
@@ -463,3 +562,5 @@ python3 research/kaggle/test_trlab.py
 保持 `STAGES` 里只有 `S0_ENV` / `S1_SMOKE` / `S9_REPORT` 为 `True`，其余全 `False`，`Run All`。约 2–4 分钟，不碰大文件、不联网。
 
 **如果 `S0_ENV` 说 `/kaggle/input` 下没有 `.gguf`，那 S3–S7 一定跑不了 —— 这是设计如此，不是 bug。**
+
+确认环境没问题之后，**不要**把 `STAGES` 全改成 `True` 再 `Run All`。下一步按 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md) 走：先只开 `S2_BUILD`，编译过了再开 `S3_IMATRIX`，每一段都有停机点和人工核对清单。
