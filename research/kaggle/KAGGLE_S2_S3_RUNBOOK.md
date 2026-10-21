@@ -137,8 +137,33 @@ test 那份同理写成 `eval.txt`。两个文件都上传成一个小的 Kaggle
 ### 4.1 前置
 
 1. 主 notebook 里 `Add Input` 挂上 llama.cpp 源码。需要**固定 commit** 的源码目录（含 `CMakeLists.txt`）。
-   - 源码从哪来：GitHub 的 release tarball 或 `git clone` 后打包上传（源码约 50 MB，网页上传可行）。**待核**：是否有现成的 llama.cpp 源码 Kaggle Dataset；检索未做。
-   - 把 `CFG["LLAMA_COMMIT"]` 填成你打包时的 12 位 commit，S2 会校验；不匹配直接报错，避免"同一份报告混用两个 llama.cpp 版本"。
+
+   **推荐做法：下载固定 commit 的 tarball，上传成一个 Dataset（36.6 MiB，网页上传几秒）**
+
+   | 项 | 值 |
+   |---|---|
+   | commit | `d454a204ef2b63af357744809c05af897611a72e`（2026-10-21） |
+   | URL | `https://github.com/ggml-org/llama.cpp/archive/d454a204ef2b63af357744809c05af897611a72e.tar.gz` |
+   | 大小 | **38,419,835 B**（36.6 MiB，**实测**） |
+   | sha256 | `f565ee976503e0b66997a05554d4881a252ced7687811f2a41df771203b54d7f`（**实测**） |
+
+   在 Mac 上：
+
+   ```bash
+   curl -L -o llama_src.tar.gz \
+     https://github.com/ggml-org/llama.cpp/archive/d454a204ef2b63af357744809c05af897611a72e.tar.gz
+   shasum -a 256 llama_src.tar.gz    # 必须等于上面那个 sha256
+   tar xzf llama_src.tar.gz          # 得到 llama.cpp-d454a204.../ 目录
+   ```
+
+   把这个目录（不是 tarball）上传成 Kaggle Dataset，挂载后路径形如 `/kaggle/input/llama-src/llama.cpp-d454a204ef2b63af357744809c05af897611a72e/`。`CFG["LLAMA_SRC"]` 指到**含 `CMakeLists.txt` 的那一层**。
+
+   选这个 commit 的理由：本文所有行号、CMake 选项名、默认架构列表都是对着它核对过的（见 4.2）。换 commit 不影响流程，但**引用行号前请自己复核**。
+
+   **注意：tarball 解出来的目录没有 `.git`。** `git rev-parse` 拿不到 commit，S2 会把 `CFG["LLAMA_COMMIT"]` 记成声明值并标 `commit_source="declared"`（v0.2.2 起，不再是 `null`）。想拿到真正可校验的 commit，只有两条路：`CFG["ALLOW_NETWORK"]=True` 让它 `git clone`，或把 `.git` 目录一起打包（体积会涨到几百 MB，不推荐）。
+
+   **有没有现成的 Kaggle Dataset（**待核**）**：我在 Kaggle 公开检索 API 查了 `llama.cpp` / `llama-cpp` / `llamacpp` 三组关键词（2026-10-21），命中的大多是**预编译二进制**而不是源码，例如 `nixty2/llama-cpp-turing-sm75-b11342`（132.5 MB）、`chaosong319/llamacpp-t4-full-engine`（148.0 MB）、`smartmichaelma/llamacpp-build-latest`（195.3 MB）。这类数据集的问题是：**commit 不可知、不可 pin**，而且 `-DCMAKE_CUDA_ARCHITECTURES` 已经由别人定死，你没法验证它到底编了哪些架构。文件清单需要登录才能看（API 返回空），所以我**没有**验证它们是否含源码。**不要图省事用它们**：36.6 MiB 的 tarball 自己传一次，换来的是可复现的 commit。
+   - 把 `CFG["LLAMA_COMMIT"]` 填成上面那 40 位 sha，S2 会校验；不匹配直接报错，避免"同一份报告混用两个 llama.cpp 版本"。
 2. 打开 `STAGES`，**只改 S2 这一项**：
 
 ```python
@@ -166,16 +191,16 @@ CFG["BUILD_JOBS"]   = 4
 
 ### 4.2 为什么是这几个参数（都能在上游源码里查到）
 
-| 参数 | 作用 | 依据 |
+| 参数 | 作用 | 依据（行号均指 commit `d454a204`） |
 |---|---|---|
 | `-DGGML_CUDA=ON` | 编 CUDA 后端 | `ggml/CMakeLists.txt` 的 `option(GGML_CUDA ...)` |
-| `-DCMAKE_CUDA_ARCHITECTURES=75` | **只编 T4 一个架构** | 不指定时 `ggml/src/ggml-cuda/CMakeLists.txt` 默认 `50-v 61-v 70-v 75-v 80-v 86-r 89-r 90-v 120a-r`，**九套**；4 核上编译量翻几倍 |
-| `-DLLAMA_USE_PREBUILT_UI=OFF` | 不下载预构建 UI | `tools/ui/CMakeLists.txt` 的 `llama-ui-assets` 会在构建期跑 `scripts/ui-assets.cmake`，`HF_ENABLED=ON` 时用 `file(DOWNLOAD)` 去 HF bucket 取 `dist.tar.gz`（TIMEOUT 30 / 300 秒）。Internet Off 时它**不会失败**，只是白等，然后打一条 `UI: no assets available` 警告 |
+| `-DCMAKE_CUDA_ARCHITECTURES=75` | **只编 T4 一个架构** | 不指定时 `ggml/src/ggml-cuda/CMakeLists.txt:21` 起给出默认 `50-v 61-v 70-v 75-v 80-v 86-r 89-r 90-v 120a-r`，**九套**；4 核上编译量翻几倍 |
+| `-DLLAMA_USE_PREBUILT_UI=OFF` | 不下载预构建 UI | option 在顶层 `CMakeLists.txt:138`（默认 `ON`），经 `tools/ui/CMakeLists.txt:53` 转成 `HF_ENABLED` 传给 `scripts/ui-assets.cmake`；`llama-ui-assets` 是 `ALL` target，本地无 `dist/` 时走 `hf_download()` → `file(DOWNLOAD)`（sha256 `TIMEOUT 30` / 包体 `TIMEOUT 300`）。Internet Off 时**不会失败**，只是白等，然后打一条 `UI: no assets available` 警告 |
 | `-DLLAMA_CURL=OFF` | 兼容旧 pin | 当前 master 里 `LLAMA_CURL` 已被 `llama_option_depr` 标记为 deprecated 并**忽略**（只打一条警告）。保留这一项只为兼容较旧的源码 |
 | `-DLLAMA_BUILD_TESTS=OFF` / `-DLLAMA_BUILD_EXAMPLES=OFF` | 少编一堆东西 | 与 tools 无关；tools 由 `LLAMA_BUILD_TOOLS` 控制（默认 ON） |
-| 不加 `-DLLAMA_BUILD_SERVER=OFF` | **别关** | `tools/CMakeLists.txt` 里 `add_subdirectory(cli)` 在 `if (LLAMA_BUILD_SERVER)` 里面，关掉就没有 `llama-cli`，S7 会失败 |
+| 不加 `-DLLAMA_BUILD_SERVER=OFF` | **别关** | `tools/CMakeLists.txt:24-28`：`add_subdirectory(cli)` 在 `if (LLAMA_BUILD_SERVER)` 里面，关掉就没有 `llama-cli`，S7 会失败。而 `LLAMA_BUILD_SERVER` 默认取 `${LLAMA_STANDALONE}`（顶层构建时为 `ON`） |
 
-四个 target 在当前上游都存在（逐个核对过 `tools/*/CMakeLists.txt` 的 `set(TARGET ...)`）：
+四个 target 在 `d454a204` 上都存在（逐个查过 `tools/*/CMakeLists.txt` 的 `set(TARGET ...)`；注意同一文件里还有 `llama-quantize-impl` / `llama-perplexity-impl` / `llama-cli-impl`，那是内部库，`--target` 用下面这四个）：
 
 ```
 llama-imatrix    llama-quantize    llama-perplexity    llama-cli
@@ -207,6 +232,7 @@ S2 会先跑一次工具链预检（`cmake --version` / `nvcc --version` / `g++ 
 - [ ] 结果里 `bins` 四项都非空，`version` 不是空串
 - [ ] 结果里 `cmake_args` 含 `-DLLAMA_USE_PREBUILT_UI=OFF` 和 `-DCMAKE_CUDA_ARCHITECTURES=75`
 - [ ] `toolchain.nvcc` 记录了实际版本（不是"不可用"）
+- [ ] `commit` 非空，且 `commit_source` 是 `git` 或 `declared`；如果是 `declared`，**报告里必须写"commit 为声明值、未校验"**
 - [ ] 日志 `trlab/logs/s2_cmake.log` 末尾有 `Configuring done` / `Generating done`；`s2_build.log` 末尾有 `Built target llama-cli`
 - [ ] 日志里如果有 `UI: no assets available`，**可以忽略**（我们不构建 server UI）
 - [ ] `df -h /kaggle/working` 剩余 ≥ 12 GiB
@@ -297,12 +323,12 @@ llama-imatrix -m <Q8_0> -f <calib.txt> -o imatrix.gguf.partial -c 512 --chunks 3
 
 - 输入走 mmap，页缓存可回收，不等于常驻；
 - 输出是流式写出，峰值不要求同时持有整份权重；
-- `--max-buffer-size`（默认由上游决定）控制写缓冲。
+- `--max-buffer-size` 控制"单个张量在内存里保留多少行"，**默认 8192 MiB**（`quantize.cpp:166` 的帮助文本原文 `default: 8192`）。这是最大的一块可控缓冲。
 
-所以 29.67 GiB 可用 RAM **预期**够跑 15.26 GiB 输入，但**未实测**。止损办法：
+所以 29.67 GiB 可用 RAM **预期**够跑 15.26 GiB 输入（mmap 的 15.26 + 8 GiB 缓冲 + 进程开销 ≈ 24 GiB 量级），但**未实测**。止损办法：
 
-1. 先跑一次 `--dry-run`（只算大小不写文件）确认文件能被正确解析、类型能识别。**注意**：`--dry-run` 不经过主量化循环，所以**不会**触发二次量化的检查 —— 别用它来判断 `ALLOW_REQUANTIZE` 有没有生效。
-2. 如果出现 `exit 137`（OOM kill）或长时间 swap，把 `--max-buffer-size` 设小（如 64 MiB）再试；仍不行就说明这个会话不该同时留 build 和两份产物。
+1. 先跑一次 `--dry-run`（只算大小不写文件）确认文件能被正确解析、类型能识别。**注意**：`--dry-run` 在主循环里 `continue` 掉了（`llama-quant.cpp:1267`），所以**不会**触发二次量化的检查（`:1332`）**也不会**触发 imatrix 缺失的检查（`:1324`）—— 别用它判断 `ALLOW_REQUANTIZE` 或 imatrix 有没有生效。
+2. 如果出现 `exit 137`（OOM kill）或长时间 swap，把 `--max-buffer-size` 调小（如 64 MiB）再试；仍不行就说明这个会话不该同时留 build 和两份产物。
 
 ### 6.4 S4 的前置配置（写在这里，等你说可以了再跑）
 
@@ -344,8 +370,10 @@ CFG["ALLOW_REQUANTIZE"] = False
 3. **S3 的 imatrix 运行时间未实测。**
 4. **"notebook 输出当输入" 的界面入口与 Quick Save 是否保存 working 未验证**（3.3 节标了待核）。
 5. **没有找到公开的 Qwen3-8B Q8_0 / BF16 Kaggle Dataset**（检索了 5 组关键词，2026-10-21）；检索 API 不穷举。
-6. **31 GiB RAM 跑 15.26 GiB 输入的量化为未实测**（6.3 节）。
-7. **`_base_consistency()` 只能排除形状不符**，不能证明同一 checkpoint —— 三个仓库的 Q8_0 字节数不同就是证据。
+6. **Kaggle 上那些 llama.cpp 数据集到底装了什么，没有验证**。公开检索 API 返回的 `resources` 是空的（要登录才给文件清单），我只能从体积和标题判断它们多半是预编译二进制。**不要**把它们当源码用。
+7. **31 GiB RAM 跑 15.26 GiB 输入的量化为未实测**（6.3 节）。`--max-buffer-size` 默认 8192 MiB 是从帮助文本读到的，实际峰值没有观测。
+8. **`_base_consistency()` 只能排除形状不符**，不能证明同一 checkpoint —— 三个仓库的 Q8_0 字节数不同就是证据。
+9. **tarball 源码的 commit 是"声明值"**（`commit_source="declared"`），不是校验值。
 
 ---
 

@@ -64,6 +64,19 @@ research/kaggle/
 | `SX_EXPLORE` | 关 | 第三方 GGUF | 1800 s | 字节 + NLL，标 `provenance=third_party` | 这个文件本身如何（**不参与公平比较**） |
 | `S9_REPORT` | **开** | — | 120 s | `report.md` + `results.json` | 汇总 |
 
+**钉死一个 commit**
+
+上游没有 tag 可用（llama.cpp 只有 build number），所以必须按 commit 固定。本文所有行号、CMake 选项名、默认架构列表都对着下面这个 commit 核对过：
+
+```
+commit  d454a204ef2b63af357744809c05af897611a72e   (2026-10-21)
+tarball https://github.com/ggml-org/llama.cpp/archive/d454a204ef2b63af357744809c05af897611a72e.tar.gz
+大小    38,419,835 B (36.6 MiB)
+sha256  f565ee976503e0b66997a05554d4881a252ced7687811f2a41df771203b54d7f
+```
+
+36.6 MiB 从 Mac 上传到 Kaggle Dataset 毫无压力，比传 15 GiB 的权重现实得多。tarball 解出来的目录**没有 `.git`**，所以 `git rev-parse` 拿不到 commit；此时 S2 会把 `CFG["LLAMA_COMMIT"]` 记成**声明值**并标 `commit_source="declared"`（不是静默记 `None`）。这一点很重要：否则 S4 的 provenance 里 `llama_commit` 会是空，事后分不清"没记录"还是"记录了但没校验"。
+
 **S2 的四个编译开关（v0.2.2 新增，都在 `CFG` 里）**
 
 | 键 | 默认 | 为什么 |
@@ -71,7 +84,7 @@ research/kaggle/
 | `BUILD_CUDA` | `True` | `False` 只构建 CPU 版。三个工具（imatrix / quantize / perplexity）都有 CPU 路径，只是慢；nvcc 不可用时预检会直接建议改这个 |
 | `CUDA_ARCH` | `"75"` | T4 = sm_75。留空则用上游默认，而 `ggml/src/ggml-cuda/CMakeLists.txt` 的默认值是 `50-virtual 61-virtual 70-virtual 75-virtual 80-virtual 86-real 89-real 90-virtual 120a-real`（CUDA ≥12.9 再加 `121a-real`）—— **九套架构**，4 核上编译量翻几倍 |
 | `BUILD_JOBS` | `4` | Kaggle 只有 4 核 |
-| （硬编码） | `-DLLAMA_USE_PREBUILT_UI=OFF` | 不关的话 `tools/ui` 会在**构建期**跑 `file(DOWNLOAD)` 去 HF bucket 取 UI 资产包（TIMEOUT 30/300）。Internet Off 时不会 FATAL_ERROR，只 `message(WARNING)`，但会白等几十秒到几分钟 |
+| （硬编码） | `-DLLAMA_USE_PREBUILT_UI=OFF` | 这个 option 在顶层 `CMakeLists.txt:138` 声明、默认 `ON`，经 `tools/ui/CMakeLists.txt` 转成 `HF_ENABLED` 传给 `scripts/ui-assets.cmake`。`llama-ui-assets` 是 `ALL` target，只要 `LLAMA_BUILD_SERVER=ON`（默认）就会在**构建期**执行；本地没有 `dist/` 又没走 npm 构建时，会 `file(DOWNLOAD)` 去 HF bucket 取 `dist.tar.gz`（sha256 那次 `TIMEOUT 30`，包体那次 `TIMEOUT 300`）。Internet Off 时**不会** FATAL_ERROR，只 `message(WARNING)` 然后生成空资产表，但会白等 |
 
 `S2_BUILD` 在调 cmake 之前先跑 `_toolchain_report()`（`cmake --version` / `nvcc --version` / `g++ -dumpversion` / `gcc -dumpversion`，各 20 s 超时，拿不到就写"不可用"而不是抛），再由 `_cuda_preflight()` 判定：`BUILD_CUDA=True` 但 nvcc 不可用时直接 `GuardError`，不让 cmake 在 `FATAL_ERROR` 的几十行输出里把它淹掉。
 
@@ -422,7 +435,7 @@ assert all(not str(c).startswith("--") for c in cmd[i:]), cmd[i:]
 assert cmd.index("--allow-requantize") < cmd.index("--imatrix")
 ```
 
-顺带记一笔：审查给的行号（1332-1333 / 127-130）与当前 master 不符（实测约 954 / 154-157），但**机制描述是对的**——所以这一条照修，只是引用行号时不能照抄。
+顺带核对了行号（对着钉死的 commit `d454a204ef2b63af357744809c05af897611a72e`，见第四节）：`src/llama-quant.cpp:1332-1333` 是 requantize 的 throw，`tools/quantize/quantize.cpp:127-130` 是帮助文本，`tools/quantize/quantize.cpp:410` 是那个参数循环 —— **与审查给的行号一致**。行号会随上游漂移，引用时请对着自己 pin 的 commit 复核。
 
 ### P0-B · `results.json` 里 `S9_REPORT.status` 是 `null`，日志却写 OK
 
@@ -457,6 +470,20 @@ stage_snapshot["S9_REPORT"] = {
 
 这两条都只在 `CFG["BUILD_CUDA"]` / 无条件路径上各加一个 flag，没有改流程。
 
+### P1-E · tarball 源码的 commit 只能记成"声明值"
+
+从 `archive/<sha>.tar.gz` 解出来的目录没有 `.git`，`_git_commit()` 必然返回 `None`。v0.2.1 在这种情况下只打一行警告，结果里 `commit: null` —— 于是 S4 的 `quant_fp` 里 `llama_commit` 是空，事后**分不清"没记录"和"记录了但没校验"**。
+
+现在 `CFG["LLAMA_COMMIT"]` 非空而 git 拿不到东西时，把它记成声明值并标明来源：
+
+```python
+commit, commit_source = git_commit, ("git" if git_commit else None)
+if CFG["LLAMA_COMMIT"] and git_commit is None:
+    commit, commit_source = CFG["LLAMA_COMMIT"], "declared"
+```
+
+有 git 且与预注册值不符时仍然 `GuardError`（这一条没放松）。`test_s2_commit_fallback` 钉住四种组合：无 git + 有预注册 → `declared`；无 git + 无预注册 → `None`（不编造）；有 git 且不符 → 抛；有 git 且相符 → `git`。
+
 ---
 
 ## 十、怎么跑测试
@@ -465,7 +492,7 @@ stage_snapshot["S9_REPORT"] = {
 python3 research/kaggle/test_trlab.py
 ```
 
-不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。它在一个临时目录里把 notebook 的 16 个 code cell 按顺序 exec 一遍，然后跑 31 项断言。当前结果：**31/31 通过，约 10 秒**。
+不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。它在一个临时目录里把 notebook 的 16 个 code cell 按顺序 exec 一遍，然后跑 32 项断言。当前结果：**32/32 通过，约 10 秒**。
 
 | 测试 | 钉住的问题 |
 |---|---|
@@ -494,6 +521,7 @@ python3 research/kaggle/test_trlab.py
 | `test_cuda_preflight` | **P1-C**：nvcc 缺失 + `BUILD_CUDA=True` → `GuardError`；`BUILD_CUDA=False` 不拦；nvcc 正常时放行 |
 | `test_toolchain_report` | 四个探测命令都失败时只记录不抛（假 PATH 下不崩） |
 | `test_s2_cmake_flags` | **P1-D**：cmake argv 含 `-DLLAMA_USE_PREBUILT_UI=OFF` / `-DCMAKE_CUDA_ARCHITECTURES=75` / `-DGGML_CUDA=ON`；build 不落源码树；`BUILD_CUDA=False` 时不传架构；nvcc 缺失时零外部调用 |
+| `test_s2_commit_fallback` | 无 `.git` 时 commit 记成 `declared` 而非 `None`；无预注册值时不编造；有 git 且不符必须抛 |
 | `test_paired_bootstrap_edges` | n=0 / n=1 返回 `ci95=None`；全正差值给不含 0 的 CI |
 | `test_ggml_type_table` | 7 个关键 type 的块尺寸/bpw |
 | `test_default_stages_complete` | **默认 S0/S1/S9 三个都必须 `ok`，S9 报告必须有效**；且 `results.json` 里 `S9_REPORT.status` 不能是 `null`（**P0-B**） |
@@ -521,7 +549,8 @@ python3 research/kaggle/test_trlab.py
 12. **旧产物会留在 working**。指纹不符的 GGUF 被改名成 `.stale-<fp8>`，每种格式最多留一份。确认新结果没问题后可以手动删，`CODE_FINAL` 会把它们列出来。
 13. **不能关 `LLAMA_BUILD_SERVER`**。上游 `tools/CMakeLists.txt` 把 `add_subdirectory(cli)` 写在 `if (LLAMA_BUILD_SERVER)` 里，关了就没有 `llama-cli`，S7 会缺工具。省编译时间请改 `CUDA_ARCH` / `BUILD_JOBS`，别动 SERVER。
 14. **S2 的编译时间与峰值内存全是估算**。`2400 s` 预算、`1.5–3.5 GiB` build 目录、`8–16 GiB` 峰值 RAM 都没有在真实 Kaggle T4 上验证过（本轮不允许启动实例）。runbook 第六节给了止损值，超了就降 `BUILD_JOBS` 或改 `BUILD_CUDA=False`。
-15. **`-DLLAMA_USE_PREBUILT_UI=OFF` 依赖上游有这个选项名**。它是 `tools/ui/CMakeLists.txt` 里定义的 option；如果将来改名，cmake 会忽略这个未知的 `-D` 变量（只警告），后果回到"构建期尝试下载 UI"——不会失败，只是慢。runbook 的核对清单里有这一项。
+15. **`-DLLAMA_USE_PREBUILT_UI=OFF` 依赖上游有这个选项名**。它在顶层 `CMakeLists.txt:138` 用 `option()` 声明；如果将来改名，cmake 只会对未知的 `-D` 变量警告一句然后忽略，后果回到"构建期尝试下载 UI"——不会失败，只是慢。runbook 的核对清单里有这一项。
+16. **tarball 源码没有 `.git`，commit 只能"声明"不能"校验"**。`_git_commit()` 走 `git rev-parse`，解压出来的目录必然失败；S2 会把 `CFG["LLAMA_COMMIT"]` 记成 `commit_source="declared"`。要真正可校验，只能用 `git clone`（`ALLOW_NETWORK=True`）或自己保留 `.git` 目录。**这直接决定 provenance 的强度**：`declared` 只能证明"我声称用的是这个 commit"。
 
 ---
 
@@ -549,7 +578,8 @@ python3 research/kaggle/test_trlab.py
 | S9 rho 渲染 | ✅ `dNLL(Q4,anchor)=+0.5000`，无负号版本 |
 | S9 快照自一致性 | ✅ `results.json` 的 `S9_REPORT.status = "ok"` + `self_reported: true` |
 | S2 命令形状 | ✅ flag 全在位置参数之前；nvcc 缺失时零外部调用即报错 |
-| `test_trlab.py` | ✅ **31/31，约 10 秒** |
+| S2 commit 记录 | ✅ 无 `.git` 时记 `declared`、无预注册值时不编造、有 git 且不符必抛 |
+| `test_trlab.py` | ✅ **32/32，约 10 秒** |
 
 **没有**验证的：S2 的实际编译、S3/S4 的真实量化、S6 的 `llama-perplexity` 真实输出解析（正则已用真实格式字符串测过，但没跑过真实二进制）。这三项必须在 Kaggle 上首跑时人工确认。
 

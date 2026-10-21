@@ -977,6 +977,89 @@ def test_s2_cmake_flags(ns):
         clear_bins()
 
 
+def test_s2_commit_fallback(ns):
+    """源码不是 git 仓库（tarball 解出来的）时，commit 要记成"声明值"而不是 None。
+
+    从 GitHub 的 archive/<sha>.tar.gz 解出来的目录没有 .git，`git rev-parse` 拿不到
+    任何东西。如果就这样记 None，S4 的 provenance 里 llama_commit 会空，事后无法
+    区分"没记录"和"记录了但没校验"。这里钉住三条：
+      1. 有预注册 commit → 记成它，且 commit_source="declared"；
+      2. 没有预注册 → commit=None，commit_source=None（不编造）；
+      3. 有 git 且与预注册不符 → 必须抛 GuardError。
+    """
+    CFG = ns["CFG"]
+    BUILD = Path(ns["BUILD"])
+    work = Path(ns["WORK"])
+    src = work / "fake_llama_src_nogit"
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "CMakeLists.txt").write_text("# fake\n", encoding="utf-8")
+
+    keys = ("LLAMA_SRC", "LLAMA_BIN", "LLAMA_COMMIT", "BUILD_CUDA", "CUDA_ARCH",
+            "BUILD_JOBS", "FORCE_RERUN")
+    snap = {k: CFG[k] for k in keys}
+    orig_run, orig_tc, orig_git = ns["run_cmd"], ns["_toolchain_report"], ns["_git_commit"]
+    SHA = "d454a204ef2b63af357744809c05af897611a72e"
+
+    def fake_run(cmd, log_path, deadline, cwd=None, env=None):
+        return 0, ""
+
+    def make_bins():
+        for t in ("llama-imatrix", "llama-quantize", "llama-perplexity", "llama-cli"):
+            p = BUILD / "bin" / t
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(p, 0o755)
+
+    def clear_bins():
+        for t in ("llama-imatrix", "llama-quantize", "llama-perplexity", "llama-cli"):
+            for c in (BUILD / "bin" / t, BUILD / t):
+                if c.exists():
+                    c.unlink()
+
+    ns["run_cmd"] = fake_run
+    ns["_toolchain_report"] = lambda: {"cmake": "cmake version 3.31.0",
+                                       "nvcc": "Cuda compilation tools, release 12.8",
+                                       "gxx": "11", "gcc": "11"}
+    try:
+        CFG.update(LLAMA_SRC=str(src), LLAMA_BIN="", BUILD_CUDA=True,
+                   CUDA_ARCH="75", BUILD_JOBS=4, FORCE_RERUN=False)
+        make_bins()
+
+        # 1) 无 .git + 有预注册值 → declared
+        ns["_git_commit"] = lambda p: None
+        CFG.update(LLAMA_COMMIT=SHA)
+        r = ns["stage_s2_build"](__import__("time").time() + 120)
+        assert r["commit"] == SHA, r["commit"]
+        assert r["commit_source"] == "declared", r["commit_source"]
+
+        # 2) 无 .git + 无预注册值 → None，不能编造
+        CFG.update(LLAMA_COMMIT="")
+        r2 = ns["stage_s2_build"](__import__("time").time() + 120)
+        assert r2["commit"] is None, r2["commit"]
+        assert r2["commit_source"] is None, r2["commit_source"]
+
+        # 3) 有 git 且不符 → GuardError
+        ns["_git_commit"] = lambda p: "0" * 40
+        CFG.update(LLAMA_COMMIT=SHA)
+        try:
+            ns["stage_s2_build"](__import__("time").time() + 120)
+            raise AssertionError("commit 不符时没有拦住")
+        except ns["GuardError"] as e:
+            assert "不符" in str(e), e
+
+        # 4) 有 git 且相符 → commit_source="git"
+        ns["_git_commit"] = lambda p: SHA
+        CFG.update(LLAMA_COMMIT=SHA[:12])
+        r3 = ns["stage_s2_build"](__import__("time").time() + 120)
+        assert r3["commit_source"] == "git", r3["commit_source"]
+        assert r3["commit"] == SHA
+    finally:
+        ns["run_cmd"], ns["_toolchain_report"], ns["_git_commit"] = \
+            orig_run, orig_tc, orig_git
+        CFG.update(snap)
+        clear_bins()
+
+
 # ---------------------------------------------------------------- T4 mock 端到端
 
 T4_BENCH = {
@@ -1074,6 +1157,7 @@ TESTS = [
     test_cuda_preflight,
     test_toolchain_report,
     test_s2_cmake_flags,
+    test_s2_commit_fallback,
     test_paired_bootstrap_edges,
     test_ggml_type_table,
     test_default_stages_complete,
