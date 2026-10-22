@@ -122,12 +122,16 @@ def _fetch_from_embedded():
     raw = _b64.b64decode(_BUNDLE_B64)
     if _hl.sha256(raw).hexdigest() != _BUNDLE_SHA:
         raise RuntimeError("内嵌执行包校验失败（sha256 不符）—— notebook 可能被改坏")
+    # zip 里的条目是包内文件名（config.py …），解到 DEST/research/kaggle/trlab，
+    # 和 sparse fetch 的落点保持一致，_already_here()/sys.path 才认。
+    target = DEST / PKG_RELPATH
     for attempt in (1, 2):
         try:
+            target.parent.mkdir(parents=True, exist_ok=True)
             with _zf.ZipFile(_io.BytesIO(raw)) as z:
-                z.extractall(DEST)
+                z.extractall(target)
             STAMP.write_text(SRC_COMMIT + "\\n")
-            return DEST / PKG_RELPATH
+            return target
         except Exception as e:
             if attempt == 2:
                 raise RuntimeError(f"内嵌执行包解压失败：{{e}}")

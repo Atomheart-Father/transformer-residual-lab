@@ -12,10 +12,13 @@ v1.0 起测试对象是 research/kaggle/trlab/*.py；notebook 只由
 build_notebook.py 生成，本身不含逻辑。
 """
 
+import copy
 import json
 import os
+import re
 import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -3646,6 +3649,250 @@ def test_s4_report_lines_render(ns):
     assert "文件级" in md2 and "已回收" not in md2, md2
 
 
+# ---------------------------------------------------------------- v1.0 重构回归
+
+def _have_git():
+    return shutil.which("git") is not None
+
+
+def _make_local_src_repo(tmp):
+    """在 tmp/remote 建一个只含 research/kaggle/trlab 的 git 仓（模拟公开仓库）。
+
+    返回 (repo_path, commit_sha)。fetch 用本地路径，所以整组测试不联网。
+    """
+    remote = tmp / "remote"
+    pkg = remote / "research" / "kaggle" / "trlab"
+    pkg.parent.mkdir(parents=True)
+    shutil.copytree(HERE / "trlab", pkg,
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    env = dict(os.environ,
+               GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+    for args in (("init", "-q", "."),
+                 ("-c", "commit.gpgsign=false", "add", "-A"),
+                 ("-c", "commit.gpgsign=false", "commit", "-q", "-m", "src")):
+        r = subprocess.run(["git", *args], cwd=str(remote), env=env,
+                           capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0, f"git {' '.join(args)} 失败：{r.stderr[-400:]}"
+    r = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(remote), env=env,
+                       capture_output=True, text=True, timeout=60)
+    sha = r.stdout.strip()
+    assert len(sha) == 40, sha
+    return remote, sha
+
+
+def _gen_notebook(tmp, commit, repo_url, embed=False):
+    """调 build_notebook 生成 notebook；repo_url 可指向本地路径（离线测 fetch）。"""
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    import build_notebook as bn
+    old_url, old_argv = bn.REPO_URL, sys.argv
+    try:
+        bn.REPO_URL = repo_url
+        sys.argv = ["build_notebook.py", "--commit", commit,
+                    "--out", str(tmp / "nb.ipynb")] + (["--embed"] if embed else [])
+        bn.main()
+    finally:
+        bn.REPO_URL, sys.argv = old_url, old_argv
+    out = tmp / "nb.ipynb"
+    assert out.exists(), "notebook 没生成"
+    return out
+
+
+def _run_bootstrap_cell(nb_path, work):
+    """干净子进程里执行 notebook 的两个代码格（到 import trlab 为止，不跑 pipeline）。"""
+    nb = json.loads(Path(nb_path).read_text(encoding="utf-8"))
+    code = ["".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"]
+    assert len(code) == 2, f"notebook 应有 2 个代码格，实际 {len(code)}"
+    src = code[0] + "\n\n" + code[1].split("trlab.run(")[0]
+    script = work / "_nb_cell.py"
+    script.write_text(src, encoding="utf-8")
+    return subprocess.run([sys.executable, str(script)], cwd=str(work),
+                          capture_output=True, text=True, timeout=300)
+
+
+def test_import_has_no_side_effects(ns):
+    """v1.0：import trlab 必须零副作用 —— 不建目录、不打印、不联网。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_imp_"))
+    try:
+        code = (f"import sys; sys.path.insert(0, {str(HERE)!r}); import trlab; "
+                f"print('IMPORTED', trlab.__version__)")
+        r = subprocess.run([sys.executable, "-c", code], cwd=str(tmp),
+                           capture_output=True, text=True, timeout=180)
+        assert r.returncode == 0, r.stderr[-800:]
+        assert "IMPORTED" in r.stdout, r.stdout
+        assert list(tmp.iterdir()) == [], f"import 竟创建了文件：{list(tmp.iterdir())}"
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_each_module_imports_alone(ns):
+    """无循环 import：每个子模块在干净子进程里单独 import 都必须成功。"""
+    subs = [m.__name__ for m in ns._mods if "." in m.__name__]
+    assert len(subs) >= 15, f"子模块太少：{subs}"
+    env = dict(os.environ, PYTHONPATH=str(HERE))
+    for full in subs:
+        r = subprocess.run([sys.executable, "-c", f"import {full}"], env=env,
+                           capture_output=True, text=True, timeout=180)
+        assert r.returncode == 0, f"{full} 单独 import 失败：\n{r.stderr[-500:]}"
+
+
+def test_switches_off_change_nothing(ns):
+    """三个开关默认 False：_apply_run_switches() 一个字段都不该改（误点 Run All 安全）。"""
+    cfg, stages = ns["CFG"], ns["STAGES"]
+    saved = (copy.deepcopy(cfg), copy.deepcopy(stages))
+    try:
+        for k in ("RUN_S2", "RUN_S3", "RUN_S4"):
+            cfg[k] = False
+        plan = ns["_apply_run_switches"]()
+        assert plan == {"run_s2": False, "run_s3": False, "run_s4": False}, plan
+        assert cfg == saved[0], "全 False 时 CFG 被改了"
+        assert stages == saved[1], "全 False 时 STAGES 被改了"
+    finally:
+        cfg.clear(); cfg.update(saved[0])
+        stages.clear(); stages.update(saved[1])
+
+
+def test_switch_s4_expands_plan(ns):
+    """RUN_S4=True：S2+S3+S4+S5 开，S6/S7/S8/SX 关，BASE_GGUF 仍留空（由 S4 自己找）。"""
+    cfg, stages = ns["CFG"], ns["STAGES"]
+    saved = (copy.deepcopy(cfg), copy.deepcopy(stages))
+    try:
+        cfg["RUN_S4"] = True
+        plan = ns["_apply_run_switches"]()
+        assert plan["run_s2"] and plan["run_s3"] and plan["run_s4"], plan
+        on = set(plan["stages"])
+        for need in ("S2_BUILD", "S3_IMATRIX", "S4_QUANT", "S5_BYTES"):
+            assert need in on, f"{need} 没开：{sorted(on)}"
+        for off in ("S6_NLL", "S7_QUALITY", "S8_BF16_ANCHOR", "SX_EXPLORE"):
+            assert off not in on, f"{off} 不该开：{sorted(on)}"
+        assert cfg["BASE_GGUF"] == "", cfg["BASE_GGUF"]
+        assert plan["quant_base"] == ns["S4_PINNED"]["filename"], plan
+        assert plan["imatrix_base"] == ns["S3_PINNED"]["filename"], plan
+        assert cfg["ALLOW_REQUANTIZE"] is False
+    finally:
+        cfg.clear(); cfg.update(saved[0])
+        stages.clear(); stages.update(saved[1])
+
+
+def test_run_returns_plan_and_stages(ns):
+    """入口 run() 返回 plan + 各阶段状态；默认只跑 S0/S1/S9。"""
+    cfg = ns["CFG"]
+    saved = {k: cfg[k] for k in ("RUN_S2", "RUN_S3", "RUN_S4")}
+    try:
+        for k in saved:
+            cfg[k] = False
+        out = ns["run"]()
+        assert isinstance(out, dict) and "plan" in out and "stages" in out, out
+        assert out["plan"]["run_s4"] is False, out["plan"]
+        for k in ("S0_ENV", "S1_SMOKE", "S9_REPORT"):
+            assert out["stages"][k] == "ok", (k, out["stages"][k])
+        for k in ("S2_BUILD", "S3_IMATRIX", "S4_QUANT", "S5_BYTES"):
+            assert out["stages"][k] is None, (k, out["stages"][k])
+    finally:
+        cfg.update(saved)
+
+
+def test_generated_notebook_is_thin(ns):
+    """notebook 必须薄：≤5 cells、<20 KB、含钉死 commit、默认不内嵌执行包。"""
+    nb_path = HERE / "trlab_kaggle.ipynb"
+    if not nb_path.exists():
+        if not _have_git():
+            print("    （跳过：没有 notebook 也没有 git）")
+            return
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            _, sha = _make_local_src_repo(tmp)
+            nb_path = _gen_notebook(tmp, sha, "https://example.invalid/x")
+    raw = nb_path.read_text(encoding="utf-8")
+    nb = json.loads(raw)
+    assert len(nb["cells"]) <= 5, f"notebook 有 {len(nb['cells'])} cells"
+    assert nb_path.stat().st_size < 20_000, nb_path.stat().st_size
+    src = "\n".join("".join(c["source"]) for c in nb["cells"])
+    assert len(src) < 12_000, f"notebook 源码 {len(src)} B"
+    for must in ("RUN_S2", "RUN_S3", "RUN_S4", "trlab.run(", "rev-parse"):
+        assert must in src, must
+    assert "_BUNDLE_B64" not in src, "默认 notebook 不该内嵌执行包"
+    m = re.search(r'SRC_COMMIT\s*=\s*"([0-9a-f]{40})"', src)
+    assert m, "找不到钉死的 SRC_COMMIT"
+    if _have_git():
+        r = subprocess.run(["git", "merge-base", "--is-ancestor", m.group(1), "HEAD"],
+                           cwd=str(HERE), capture_output=True, text=True)
+        assert r.returncode == 0, (f"notebook 钉的 {m.group(1)[:12]} 不在当前历史里，"
+                                   "请重跑 build_notebook.py")
+
+
+def test_bootstrap_fetch_verify_reuse(ns):
+    """冷启动：本地仓 sparse fetch + rev-parse 校验 + 同 Session 二次执行复用。"""
+    if not _have_git():
+        print("    （跳过：没有 git）")
+        return
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        remote, sha = _make_local_src_repo(tmp)
+        nb = _gen_notebook(tmp, sha, str(remote))
+        work = tmp / "work"
+        work.mkdir()
+        r = _run_bootstrap_cell(nb, work)
+        assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
+        assert "执行包就绪" in r.stdout, r.stdout[-800:]
+        pkg = work / "_trlab_src" / "research" / "kaggle" / "trlab"
+        assert (pkg / "__init__.py").exists()
+        stamp = work / "_trlab_src" / ".trlab_commit"
+        assert stamp.read_text().strip() == sha
+        for f in sorted((HERE / "trlab").glob("*.py")):
+            assert (pkg / f.name).read_bytes() == f.read_bytes(), f.name
+        r2 = _run_bootstrap_cell(nb, work)
+        assert r2.returncode == 0, r2.stderr[-800:]
+        assert "已在盘上" in r2.stdout, r2.stdout[-800:]
+
+
+def test_bootstrap_embedded_fallback(ns):
+    """仓库不可读时回退内嵌包（sha256 校验后解压），不静默失败。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        remote, sha = _make_local_src_repo(tmp)
+        nb = _gen_notebook(tmp, sha, str(tmp / "no_such_repo"), embed=True)
+        work = tmp / "work"
+        work.mkdir()
+        r = _run_bootstrap_cell(nb, work)
+        assert r.returncode == 0, r.stdout[-1500:] + r.stderr[-1500:]
+        assert "从仓库取包失败" in r.stdout, r.stdout[-800:]
+        assert "改用 notebook 内嵌的执行包" in r.stdout, r.stdout[-800:]
+        pkg = work / "_trlab_src" / "research" / "kaggle" / "trlab"
+        assert (pkg / "__init__.py").exists()
+        assert (work / "_trlab_src" / ".trlab_commit").read_text().strip() == sha
+
+
+def test_bootstrap_embedded_sha_guard(ns):
+    """内嵌包 sha 标注被篡改 → fail closed，绝不静默解压。"""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        remote, sha = _make_local_src_repo(tmp)
+        nb_path = _gen_notebook(tmp, sha, str(tmp / "no_such_repo"), embed=True)
+        nb = json.loads(nb_path.read_text(encoding="utf-8"))
+        tampered = False
+        for c in nb["cells"]:
+            if c["cell_type"] != "code":
+                continue
+            txt = "".join(c["source"])
+            m = re.search(r'_BUNDLE_SHA = "([0-9a-f]{64})"', txt)
+            if m:
+                c["source"] = txt.replace(m.group(1), "0" * 64).splitlines(keepends=True)
+                tampered = True
+                break
+        assert tampered, "内嵌 notebook 里找不到 _BUNDLE_SHA"
+        bad = tmp / "nb_bad.ipynb"
+        bad.write_text(json.dumps(nb, ensure_ascii=False, indent=1), encoding="utf-8")
+        work = tmp / "work"
+        work.mkdir()
+        r = _run_bootstrap_cell(bad, work)
+        assert r.returncode != 0, "sha 不符居然跑通了"
+        assert "校验失败" in (r.stdout + r.stderr), (r.stdout + r.stderr)[-800:]
+        assert not (work / "_trlab_src" / "research" / "kaggle" / "trlab"
+                    / "__init__.py").exists()
+
+
 # ---------------------------------------------------------------- runner
 
 TESTS = [
@@ -3747,6 +3994,16 @@ TESTS = [
     test_ram_precheck,
     test_s4_helper_hint,
     test_s4_report_lines_render,
+    # v1.0 重构回归
+    test_import_has_no_side_effects,
+    test_each_module_imports_alone,
+    test_switches_off_change_nothing,
+    test_switch_s4_expands_plan,
+    test_run_returns_plan_and_stages,
+    test_generated_notebook_is_thin,
+    test_bootstrap_fetch_verify_reuse,
+    test_bootstrap_embedded_fallback,
+    test_bootstrap_embedded_sha_guard,
 ]
 
 
