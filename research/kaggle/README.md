@@ -2,13 +2,13 @@
 
 `trlab_kaggle.ipynb` —— 一个**可直接上传到 Kaggle** 的独立 Notebook，用来在同一份 `Qwen/Qwen3-8B` 上产出 `IQ2_XS` 与 `IQ4_XS`，并比较**真实文件字节**、**配对 NLL**、**有限配对质量**。
 
-当前版本 **v0.4.0**。首版（v0.1）只做环境检查与短时 smoke test；v0.2 修掉了一轮逐 cell 审查提出的 3 个 P0 + 4 个 P1；v0.2.1 修了 S4 的两个 P0（二次量化门槛、产物复用不看指纹）和 S9 的 rho 符号；v0.2.2 修了 `--allow-requantize` 参数位置、S9 快照里 `status=null` 的自相矛盾，并给 S2 加了工具链预检与两个编译期开关；v0.3.0 把 S2 收敛成一个开关 `RUN_S2`；v0.3.1 热修真实 Kaggle 失败（`CUDA::cuda_driver` target 找不到 → 默认 `-DGGML_CUDA_NO_VMM=ON`，并修掉把该错误误判成"找不到 nvcc"的分类器）；v0.3.2 记录 S2 已在真实 Kaggle T4 上完整通过（27 分 52 秒，四个二进制就位）；**v0.4.0：S3 一键化，唯一开关 `RUN_S3 = True`** —— 自动探活/复用/重编 llama.cpp 二进制，自动下载 pinned 的 Q8_0 与 wikitext 校准语料，生成并验证 imatrix，写 provenance，最后才回收 Q8_0。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
+当前版本 **v0.5.0**。首版（v0.1）只做环境检查与短时 smoke test；v0.2 修掉了一轮逐 cell 审查提出的 3 个 P0 + 4 个 P1；v0.2.1 修了 S4 的两个 P0（二次量化门槛、产物复用不看指纹）和 S9 的 rho 符号；v0.2.2 修了 `--allow-requantize` 参数位置、S9 快照里 `status=null` 的自相矛盾，并给 S2 加了工具链预检与两个编译期开关；v0.3.0 把 S2 收敛成一个开关 `RUN_S2`；v0.3.1 热修真实 Kaggle 失败（`CUDA::cuda_driver` target 找不到 → 默认 `-DGGML_CUDA_NO_VMM=ON`，并修掉把该错误误判成"找不到 nvcc"的分类器）；v0.3.2 记录 S2 已在真实 Kaggle T4 上完整通过（27 分 52 秒，四个二进制就位）；v0.4.0 把 S3 收敛成开关 `RUN_S3`（二进制探活三档 + Q8_0/校准语料单副本下载 + `-ngl` OOM 降级 + 先记录后回收）；**v0.5.0：S4 一键量化，唯一开关 `RUN_S4 = True`** —— 从与 S3 同仓库同 revision 的**原始 BF16**量化出 IQ2_XS / IQ4_XS（禁止 Q8_0 二次量化），imatrix 已验证过就整段跳过 S3，Q8_0 被回收后改用 provenance 级同源核验，量化 base 由 S4 按 `/kaggle/input` 已挂 > working 外暂存盘 > working 四级优先级自取，S5 的真实字节/bpw 统计随之打开。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
 
-**S2 已经不需要再验证了** —— 2026-10-22 的真实运行给出了全部数字（见第九之六）。
+**S2、S3 都已在真实 Kaggle T4 上通过**（S2 见第九之六；S3 于 2026-10-22 跑出 10,701,952 B / 1008 个张量的 imatrix.gguf，sha256 `34062ab6…`，耗时 57.95 s，产物已备份并 pin 进 `IMATRIX_PINNED`）。
 
-**S3 的一键化链路（v0.4.0）只有 CPU/mock 测试覆盖（68 项全通过），尚未在真实 Kaggle 上跑过。** 设计 rationale 与五个决策点的落点在 [`KAGGLE_S3_DESIGN.md`](./KAGGLE_S3_DESIGN.md)。
+**S4/S5 的一键化链路只有 CPU/mock 测试覆盖（98 项全通过），尚未在真实 Kaggle 上跑过。** BF16 有 15.26 GiB，`/kaggle/working` 只有 20 GB，所以第一次跑 `RUN_S4=True` 前需要把 BF16 挂成只读 Input —— 最少点击方案见 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md) 第 6 节。
 
-S2 → S3 的操作清单在 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md)：现在以**一页一步网页操作**开头（改 `RUN_S3 = True` → `Internet=On` → `Run All`），手工 tar / Dataset 路线降级为断网备选。本文件讲"为什么"，那份讲"怎么做"。
+S2 → S3 → S4 的操作清单在 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md)：以**一页一步网页操作**开头。本文件讲"为什么"，那份讲"怎么做"。
 
 ---
 
@@ -18,7 +18,7 @@ S2 → S3 的操作清单在 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.
 
 | 不做 | 机制 |
 |---|---|
-| 自动下载大模型 | 默认 `RUN_S2=False` / `RUN_S3=False`，此时**一个字节都不下载**。`RUN_S3=True` 才允许下载 pinned 的 Q8_0（8,709,519,168 B）+ wikitext 校准语料（6,357,543 B）；`RUN_S2=True` 只下载 36.6 MiB 的 llama.cpp 源码 tarball。三样东西全部 sha256/etag 预登记并强制校验 |
+| 自动下载大模型 | 默认 `RUN_S2=False` / `RUN_S3=False` / `RUN_S4=False`，此时**一个字节都不下载**。`RUN_S3=True` 才允许下载 pinned 的 Q8_0（8,709,519,168 B）+ wikitext 校准语料（6,357,543 B）；`RUN_S4=True` 额外允许下载 pinned 的 BF16（16,388,044,384 B）；`RUN_S2=True` 只下载 36.6 MiB 的 llama.cpp 源码 tarball。四样东西全部 sha256/etag 预登记并强制校验 |
 | 自动 `pip install` | 只用 Kaggle 镜像自带的包；llama.cpp 从源码编译；GGUF 解析器是纯 Python，无第三方依赖。parquet 解析优先 pyarrow、回落 pandas，都没有就报可操作的错（**不**偷偷装） |
 | 自动租 GPU / 跑实验 | 阶段开关默认全关；用户手动改 `RUN_S3` 后在网页上执行 |
 | 上传私有项目文件 | Notebook 不引用 `transformer-residual-lab` 的任何本地数据或脚本 |
@@ -31,10 +31,11 @@ S2 → S3 的操作清单在 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.
 
 ```
 research/kaggle/
-├── trlab_kaggle.ipynb        # 唯一需要上传的文件（28 cells：16 code + 12 markdown）
-├── KAGGLE_S2_S3_RUNBOOK.md   # S2 编译 → S3 imatrix 的操作清单（网页 GUI 视角）
+├── trlab_kaggle.ipynb        # 主 notebook（28 cells：16 code + 12 markdown）
+├── trlab_fetch_bf16.ipynb   # 一次性取数 notebook：把 pinned BF16 下成 Kaggle Output（v0.5）
+├── KAGGLE_S2_S3_RUNBOOK.md   # S2 编译 → S3 imatrix → S4 量化的操作清单（网页 GUI 视角）
 ├── KAGGLE_S3_DESIGN.md       # S3 一键化的设计 rationale 与五个决策点的落点（已实现）
-├── test_trlab.py             # CPU-only 回归测试，不联网、不需要 GPU / llama.cpp
+├── test_trlab.py             # CPU-only 回归测试（98 项），不联网、不需要 GPU / llama.cpp
 └── README.md                 # 本文件
 ```
 
@@ -56,7 +57,15 @@ research/kaggle/
 
 notebook 会自己按顺序做：探活四个 llama.cpp 二进制（在就复用，丢了就自动下载 pinned 源码重编，约 28 分钟）→ 磁盘预检 → 下载 pinned 的 Q8_0（8,709,519,168 B）→ 下载 wikitext train parquet 并转纯文本 → 按显存余量选 `-ngl`（OOM 会逐级降）→ 跑 `llama-imatrix` → 验证产物 → 写 provenance → 才删掉 Q8_0 回收磁盘。**S4–S8 与 SX 一律保持关闭。**
 
-`RUN_S3 = False` 是默认值，且 `_apply_run_switches()` 在两个开关都 `False` 时**一个字段都不改** —— 导入 notebook 或误点 `Run All` 都不会悄悄联网，更不会下 8 GB。想下载必须显式改这一行，由 `test_s2_default_off_no_network` / `test_s3_run_switch_scope` 双重钉住。
+**要把 IQ2_XS / IQ4_XS 一起做出来**（v0.5.0，只改一个开关）：
+
+1. 找到 `RUN_S4 = False` 这一行，改成 `RUN_S4 = True`
+2. 右侧 `Settings` → `Internet` = **On**
+3. `Run` → `Run all`
+
+S2/S3/S4/S5 会一条龙跑完。**唯一的例外**：BF16 有 15.26 GiB，与两个产物（≈ 6.7 GiB）放不进 20 GB 的 `/kaggle/working`（15.26 + 2.36 + 4.34 = 21.96 GiB），所以第一次跑之前要先用附带的 `trlab_fetch_bf16.ipynb` 把 BF16 变成只读 Input（6 次点击，之后每个 Session 都零点击，见 Runbook 第 6 节）。如果 Kaggle 提供了 working 之外的暂存盘，notebook 会自己探测到并直接下到那里，这一次性操作也可以省掉。
+
+`RUN_S4 = False` 是默认值，且 `_apply_run_switches()` 在三个开关都 `False` 时**一个字段都不改** —— 导入 notebook 或误点 `Run All` 都不会悄悄联网，更不会下 8 GB / 15 GB。想下载必须显式改这一行，由 `test_s2_default_off_no_network` / `test_s3_run_switch_scope` / `test_s4_run_switch_scope` 三重钉住。
 
 **只想编 llama.cpp、先不碰模型**（v0.3.0 路线）：把 `RUN_S2 = False` 改成 `RUN_S2 = True`，`Internet = On`，`Run all`。约 15–30 分钟（含编译，**估算值**）。
 
@@ -71,9 +80,9 @@ notebook 会自己按顺序做：探活四个 llama.cpp 二进制（在就复用
 | `S0_ENV` | **开** | — | 120 s | GPU / CPU / RAM / 磁盘 / 工具链 / input 清单 | 这台机器能干什么 |
 | `S1_SMOKE` | **开** | — | 240 s | 合成 GGUF 往返、fp16 vs bf16 TFLOP/s、拷贝带宽、磁盘写速 | 解析器和预算算术对不对 |
 | `S2_BUILD` | 关（`RUN_S2=True` 时自动开） | **不需要任何输入**：源码由 S2 自己下载 | 2400 s | `llama-imatrix` / `llama-quantize` / `llama-perplexity` / `llama-cli` | 工具链能否就位 |
-| `S3_IMATRIX` | 关（`RUN_S3=True` 时自动开） | S2 + imatrix base + 校准语料，**全部由 S3 自己取** | 3600 s | `imatrix.gguf` + sha256 + provenance | 校准信息是否对等 |
-| `S4_QUANT` | 关 | S2 + S3 + `BASE_GGUF`（f16/bf16） | 1800 s | 两个 GGUF + provenance + 逐文件 bpw | 能否编码、字节多少 |
-| `S5_BYTES` | 关 | S4（或任意 GGUF） | 300 s | 逐张量类型字节、按 attn/ffn/embed 分类 | 哪些张量没被低位量化 |
+| `S3_IMATRIX` | 关（`RUN_S3`/`RUN_S4=True` 时自动开） | S2 + imatrix base + 校准语料，**全部由 S3 自己取**；已有可信 imatrix 时整段跳过 | 3600 s | `imatrix.gguf` + sha256 + provenance sidecar | 校准信息是否对等 |
+| `S4_QUANT` | 关（`RUN_S4=True` 时自动开） | S2 + S3 + 量化 base（**BF16，由 S4 自己取**） | 1800 s | IQ2_XS + IQ4_XS 两个 GGUF + provenance + 逐文件 bpw | 能否编码、字节多少 |
+| `S5_BYTES` | 关（`RUN_S4=True` 时自动开） | S4（或任意 GGUF） | 300 s | 逐张量类型字节、按 attn/ffn/embed 分类 | 哪些张量没被低位量化 |
 | `S6_NLL` | 关 | S2 + S5 + 评测语料 | 5400 s | 分组配对 NLL + bootstrap CI | 2.31 bpw 差多少 nats |
 | `S7_QUALITY` | 关 | S2 + S5 | 1800 s | 贪心续写一致性、repeat4 | 有没有整体崩塌 |
 | `S8_BF16_ANCHOR` | 关 | 高精度 GGUF + 足够显存 | 3600 s | 锚点 NLL 或明确的 skip 记录 | 锚点能不能上，`rho` 能不能算 |
@@ -695,6 +704,70 @@ RUN_S3 = True      # 就改这一个；S2 由它自动带上
 
 **这一轮抓到并修掉 3 个真 bug**：前缀哈希不符时没删 `.partial`（会把垃圾拼到新内容后面）、复用二进制时 `commit_source` 记成 `null`（看不出"我们认为它是哪个版本"）、半成品 imatrix 在失败后留在 working。
 
+---
+
+## 九之八、v0.5.0：S4 一键量化（BF16 → IQ2_XS / IQ4_XS）
+
+### 唯一开关
+
+`RUN_S4 = True` 一个开关打开 S2 + S3 + S4 + S5，S6–S8 与 SX 全部保持关闭。**不设 `BASE_GGUF`** —— base 从哪来由 S4 自己按优先级决定，忘配路径不会失败，也不会盲目往 20 GB 的 working 里塞 15 GiB。
+
+### 磁盘算术是这条路线的第一约束
+
+| 账 | 数字 |
+|---|---|
+| `/kaggle/working` 配额 | 20 GB（Kaggle 官方文档） |
+| S2 之后实测剩余 | 19.07 GiB（v0.3.2 真实运行） |
+| BF16 + IQ2_XS + IQ4_XS | 15.26 + 2.36 + 4.34 = **21.96 GiB** |
+| 连 BF16 + IQ4_XS | 19.60 GiB，仍然超 |
+
+所以 BF16 **必须**来自不占 working 配额的地方。base 取源四级优先级（`_resolve_s4_base()`）：
+
+| # | 来源 | 点击 | 说明 |
+|---|---|---|---|
+| 1 | `CFG['BASE_GGUF']` 手动指定 | — | 存在就用，不碰网络 |
+| 2 | `/kaggle/input` 已挂载的 pinned BF16 | **0**（一次性操作后） | 字节数比对；开 `HASH_GGUF` 时 sha256 强校验 |
+| 3 | working 之外的暂存盘 | 0 | 运行时探测 `st_dev`；同设备不算额外空间 |
+| 4 | working 自己 | 0 | 只在磁盘账真的过得去时才下 |
+| — | 都走不通 | — | `GuardError` + `trlab_fetch_bf16.ipynb` 的 6 步一次性操作说明 |
+
+第 2 档的一次性操作就是附带的 `trlab_fetch_bf16.ipynb`（3 个 cell：下载 pinned BF16 → sha256 校验 → Save Version 提示）。挂成 Input 之后**永久复用、不再下载**。
+
+### imatrix：Q8_0 不在了也能核验同源性
+
+S3 按设计会回收 8.11 GiB 的 Q8_0，所以 `_base_consistency()` 要求"读 imatrix base 原文件"这条路直接堵死（v0.4 的真实缺陷：S4 会以 `GuardError` 收场，只能重下 8 GiB）。v0.5 换成两级核验：
+
+| 等级 | 条件 | 依据 |
+|---|---|---|
+| `file` | Q8_0 文件还在 | 逐张量比形状（architecture / 张量名 / dims / 参数量） |
+| `provenance` | Q8_0 已回收 | ① imatrix sha256 与记录一致；② 记录的 base repo/revision 与 `S4_PINNED` 相同（同仓库同 revision ⇒ 同一次转换 ⇒ 同一份权重）；③ imatrix 张量名 ⊆ base 张量名且层数一致；④ 每个 imatrix 张量的 `in_sum` 元素数 = base 对应张量的输入通道数 |
+
+第 ③④ 项的依据是**本地实测**的 imatrix GGUF 结构：没有 `general.architecture`，1008 个张量 = 36 层 × 7 种 × 4 个统计量（`.in_sum` / `.in_sum2` / `.counts` / `.stats`），`in_sum` 的元素数就是 n_in（`ffn_down.weight` → 12288 = ffn 宽度，其余 → 4096 = hidden）。dims 方向自动判定（要求所有张量同一方向 100% 匹配），防止 ggml `mul_mat` 约定与写入端相反。
+
+### imatrix 复用：新 Session 也能恢复
+
+- `IMATRIX_PINNED`（sha256 `34062ab6…`，10,701,952 B，1008 张量）是**真实 Kaggle 运行的产物**，直接 pin 进 notebook；
+- `_verify_imatrix()` 三态：`pinned_verified` / `provenance_verified` / `unverified`（默认不放行）；
+- S3 跑完会写 `models/imatrix.provenance.json`（schema 2）**挨着产物** —— OUT/ 可能随会话丢，models/ 里的产物和它的 provenance 是一起被保存/挂载的，这才是"新 Session 恢复"的关键；
+- `S3_SKIP_IF_IMATRIX_OK=True`（`RUN_S4` 自动开）：已有可信 imatrix 就整段跳过，**不重下 8.11 GiB、不重算 58 秒**。
+
+### 修掉的两个真 bug（都由 v0.4 真实运行记录现场确认）
+
+| Bug | 现场 | 修法 |
+|---|---|---|
+| `base_origin` 误记 `manual` | `_ensure_q8()` 把下载路径写回 `CFG["IMATRIX_BASE"]`，重跑时"手动指定"分支抢先命中 → `_reclaim_q8()` 的 `auto_download` 条件不成立 → 8.11 GiB 永远留在 working | `_s3_base_origin()` 改成比对路径落点与 stamp，不看 CFG 是否被污染；缓存命中也不算"手动" |
+| `_base_consistency()` 要求读原文件 | Q8_0 回收后 S4 直接 `GuardError` | 上面的 file / provenance 两级 |
+
+### 禁止二次量化
+
+`RUN_S4` 路线上 `ALLOW_REQUANTIZE` 永远保持 False，且 `plan.get("flags")` 非空时**直接 `GuardError`** —— 不给 `--allow-requantize` 活路。上游帮助原文：`WARNING: this can severely reduce quality compared to quantizing from 16bit or 32bit!`。
+
+### 测试
+
+新增 30 项 mock 回归，`test_trlab.py` 总计 **98 项**。除上表各分支外还覆盖：开关作用域（只开 S2/S3/S4/S5）、默认全关一个字段都不改、pin 值防手滑、暂存盘 `st_dev` 判定（同设备不算）、磁盘算术拒绝、遗留 Q8_0 回收三态、S3 跳过/重生成、S4 两道门（无 imatrix / 不可信）、S5 用 S4 实际取的 base、报告行渲染。
+
+**这一轮还抓到 1 个真 bug**：`stage_s4_quant` 里 `imatrix_base_kind` 变量名笔误（`imat_base_kind` vs `imatrix_base_kind`）→ `NameError`，由 `test_t4_split_base_path` 抓出。
+
 
 ---
 
@@ -704,7 +777,7 @@ RUN_S3 = True      # 就改这一个；S2 由它自动带上
 python3 research/kaggle/test_trlab.py
 ```
 
-不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。它在一个临时目录里把 notebook 的 16 个 code cell 按顺序 exec 一遍，然后跑 68 项断言。当前结果：**68/68 通过，约 25 秒**。
+不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。它在一个临时目录里把 notebook 的 16 个 code cell 按顺序 exec 一遍，然后跑 98 项断言。当前结果：**98/98 通过，约 30 秒**。
 
 | 测试 | 钉住的问题 |
 |---|---|
@@ -734,7 +807,7 @@ python3 research/kaggle/test_trlab.py
 | `test_toolchain_report` | 四个探测命令都失败时只记录不抛（假 PATH 下不崩） |
 | `test_s2_cmake_flags` | **P1-D**：cmake argv 含 `-DLLAMA_USE_PREBUILT_UI=OFF` / `-DCMAKE_CUDA_ARCHITECTURES=75` / `-DGGML_CUDA=ON`；build 不落源码树；`BUILD_CUDA=False` 时不传架构；nvcc 缺失时零外部调用 |
 | `test_s2_commit_fallback` | 无 `.git` 时 commit 记成 `declared` 而非 `None`；无预注册值时不编造；有 git 且不符必须抛 |
-| `test_s2_default_off_no_network` | **B-3**：默认 `RUN_S2=False` 时 `_apply_run_switches()` 返回 `{"run_s2": False}` 且一个字段都不改；无手动源码时 `_find_llama_src` 抛 `GuardError` 且消息含 `RUN_S2` 与 `Internet`，**不触发下载** |
+| `test_s2_default_off_no_network` | **B-3**：默认三个开关都 `False` 时 `_apply_run_switches()` 返回 `{"run_s2": False, "run_s3": False, "run_s4": False}` 且一个字段都不改；无手动源码时 `_find_llama_src` 抛 `GuardError` 且消息含 `RUN_S2` 与 `Internet`，**不触发下载** |
 | `test_s2_run_switch_only_turns_on_s2` | **B-3**：`RUN_S2=True` 只开 `S2_BUILD`，`S3`–`S8` 全保持 `False`；`LLAMA_COMMIT`/`CUDA_ARCH`/`BUILD_JOBS`/`BUILD_CUDA` 自动填好 |
 | `test_s2_download_checksum_mismatch` | digest 与预登记值不符 → `GuardError`，下载的包被删掉，不解压 |
 | `test_s2_extract_rejects_traversal` | 归档里有 `../../evil.txt` → `GuardError`，不"尽量解压" |
@@ -776,6 +849,36 @@ python3 research/kaggle/test_trlab.py
 | `test_s9_report_bf16_both_ways` | bf16 报错 / bf16 正常 / 无 torch 三条渲染分支 |
 | `test_t4_mock_end_to_end` | 把 GPU 微基准换成 T4 结果，重跑 S1→S9，报告必须写出"bf16 不可用" |
 | `test_a100_mock_end_to_end` | 反例：bf16 可用时不能还打印"不可用"，且要给出比值 |
+| `test_s4_run_switch_scope` | **需求 6**：`RUN_S4=True` 只开 S2/S3/S4/S5，S6–S8 与 SX 全 `False`；不设 `BASE_GGUF`、`ALLOW_REQUANTIZE` 保持 `False`、`BASE_KIND=bf16` |
+| `test_s4_pins_are_registered` | BF16 与 imatrix 的 pin 值（sha256/bytes/kind/url）防手滑；**量化 base 与 imatrix base 必须同仓库同 revision** |
+| `test_s4_default_off_downloads_nothing` | `RUN_S4=False` 时 `S4_AUTO_FETCH_BASE` / `S4_RECLAIM_Q8_CACHE` 保持 `False` |
+| `test_verify_imatrix_three_states` | **需求 3**：pin 一致 → `pinned_verified`；与 provenance 记录一致 → `provenance_verified`；都对不上 → `unverified`；缺文件/解析失败/空张量各自 `ok=False` |
+| `test_imatrix_found_in_input_and_candidates` | `/kaggle/input` 里挂着的 imatrix 能被扫到；候选优先级 = `IMATRIX_GGUF` > `models/` > Input |
+| `test_imatrix_provenance_records_sidecar_first` | provenance 记录按可信度排序：挨着产物的 sidecar 优先于 `OUT/S3_IMATRIX.json` |
+| `test_consistency_provenance_level_ok` | **需求 4**：Q8_0 已回收时，结构 + sha256 + 来源三项全过 → `provenance` 级通过 |
+| `test_consistency_structure_failures` | 张量名不存在 / 层数不同 / 输入通道两方向都对不上 → 拒；dims 方向反过来也认 |
+| `test_consistency_provenance_failures` | 无记录 / sha256 不符 / 来源 repo 或 revision 不符 / 字节数不符 → 拒；缺 repo 时回落 `S3_PINNED` 仍通过 |
+| `test_consistency_file_level_when_q8_present` | Q8_0 还在 → `file` 级逐张量比形状；imatrix GGUF 实测没有 architecture，不断言它有 |
+| `test_imatrix_base_does_not_throw_when_reclaimed` | **需求 4**：Q8_0 不在时 `_imatrix_base()` 返回记录路径而不抛（v0.4 就在这里炸） |
+| `test_resolve_s4_base_manual` | **需求 2**：`BASE_GGUF` 手动指定 → 零网络零预检 |
+| `test_resolve_s4_base_attached_input` | Input 已挂 → 零下载；字节数不符跳过；`HASH_GGUF` 开时 sha256 不符拒绝 |
+| `test_resolve_s4_base_refuses_without_auto_fetch` | 没挂 Input 又没开自动下载 → `GuardError` 指向 `RUN_S4`，不瞎试 |
+| `test_resolve_s4_base_scratch_download` | 暂存盘路线：下载落暂存盘、预检按暂存盘算、不占 working 配额 |
+| `test_resolve_s4_base_working_and_guard` | working 装得下才下；装不下 → `GuardError` 带 6 步一次性操作说明 |
+| `test_scratch_dirs_same_device_excluded` | 只认 `st_dev` 与 working 不同的候选；同设备 + 余量不足都不算 |
+| `test_s4_output_bytes_estimate` | 两种格式都估且落在 6–9 GiB；未知格式按 6.5 GiB 兜底 |
+| `test_reclaim_stale_q8_cache` | imatrix 已验证 → 回收遗留 Q8_0（含 stamp 与 `.partial`）；不可信/找不到/开关关掉 → 不删 |
+| `test_s3_base_origin_regression` | **需求 5**：下载路径被写回 CFG 后重跑仍判 `auto_download`（v0.4 真 bug 现场）；手动文件仍判 `manual` |
+| `test_s3_rerun_reclaims_q8` | 端到端复现该 bug：CFG 被污染的重跑，Q8_0 也被回收，provenance sidecar 落盘 |
+| `test_s3_skips_when_imatrix_verified` | **需求 3**：已有可信 imatrix → 整段跳过，`_ensure_q8` 一次都不调 |
+| `test_s3_untrusted_imatrix_reruns` | imatrix 存在但不可信 → 不跳过，重新生成 |
+| `test_s4_forbids_requantize_even_when_opted_in` | **需求 1**：`ALLOW_REQUANTIZE=True` 也被拦死，命令里不许出现 `--allow-requantize` |
+| `test_s4_requires_imatrix` | 没有 imatrix 直接拒（IQ2_XS 会被上游 bail out），不做降级 |
+| `test_s4_rejects_unverified_imatrix` | sha256 对不上 → 默认拒并告知 pin 值；显式放行后才继续 |
+| `test_s4_base_for_s5` | **需求 7**：S5 优先分析 S4 实际取的 base，回落 `CFG['BASE_GGUF']`，再回落 `None` |
+| `test_ram_precheck` | RAM 预检的算术（base + 余量）与告警分支 |
+| `test_s4_helper_hint` | 一次性操作说明含文件名与 6 步，且不超过一屏 |
+| `test_s4_report_lines_render` | S9 第 5 节：`provenance` 级必须显式声明"弱于文件级"，`file` 级不声明；两行产物表 |
 
 `test_default_stages_complete` 不是装饰。v0.2 加 P1-G 时，`gguf_write_synth` 变成 strict，S1 里"构造一个含未知 type 的坏文件"那行自己就抛了；而 `run_stage` 会吞掉异常只记 `status=error`，于是默认首跑 S1 静默失败、S9 报告里写 `SMOKE_OK = False`。这条测试就是为这种情况写的。
 
@@ -786,14 +889,14 @@ python3 research/kaggle/test_trlab.py
 1. **T4 没有原生 bf16**（CC 7.5）。S1 会实测 fp16 vs bf16 的 TFLOP/s 比值；比值明显小于 1 就说明 bf16 走了模拟路径。锚点因此只能用 **f16**，与论文口径有偏差，S8 会把这条写进 `dtype_deviation`。
 2. **单张 T4 装不下 8B 高精度权重**：f16 = 15.25 GiB，可用显存约 15.0 GiB，且未计 KV 与 CUDA context。S8 默认 `status=skipped`，并给出 `required_gb` / `vram_usable_gb` 两个具体数字。
 3. **隔离只做到内容级**：S6 用前 200 字符做行级重叠检测。如果校准集与评测集来自同一文档的不同段落，这个方法检测不出来 —— 必须靠 `CALIB_SOURCE` / `EVAL_SOURCE` 声明不同 split。
-4. **`/kaggle/working` 约 20 GB**。两个 GGUF 约 2.2 + 4.0 GiB，imatrix 只有几十 MB，余量够；不要把 base 也放进去。指纹不符的旧产物会以 `.stale-*` 形式留一份（见第 12 条）。
+4. **`/kaggle/working` 约 20 GB，装不下 BF16 + 两个产物**。BF16 15.26 + IQ2_XS 2.36 + IQ4_XS 4.34 = 21.96 GiB > 19.07 GiB（S2 后实测剩余），连 BF16 + IQ4_XS（19.60 GiB）都超。所以 S4 的量化 base 必须来自只读 Input 或 working 之外的暂存盘；working 里只放两个产物（约 6.7 GiB，余量够）。指纹不符的旧产物会以 `.stale-*` 形式留一份（见第 12 条）。
 5. **S7 样本量极小**（8 prompt × 32 token）。只能发现整体崩塌，不能排序细微质量；`repeat4` 是退化信号，不是质量分数。
 6. **NLL 的 CI 跨 0 不等于等价**。`paired_bootstrap` 只给区间，判读在 S9 里写死为"未测出差异"。
 7. **不能外推**。单张 T4、8B、单一语料的结果不适用于 27B，也不适用于 M4 Pro。**吞吐不可跨平台迁移，只有格式与质量可以。**
 8. **`guard()` 不能阻止运行中 OOM**。它只在阶段入口检查，llama.cpp 的显存分配在外部进程里。
 9. **未知 ggml type 的文件没有字节拆分**。这是刻意的：宁可不给数，也不给 8 bpw 的假数。遇到这种情况需要升级 `GGML_TYPES` 表（对照 `ggml-common.h` 的结构体大小）。
-10. **量化 base 必须是 f16/bf16**。`llama-quantize` 对已量化张量默认拒绝（`requantizing from type ... is disabled`），S4 会在 Python 侧先拦住。`ALLOW_REQUANTIZE=True` 只用于 smoke，产物标 `requantized_pilot_only`，不能当高保真结论。
-11. **imatrix 与量化 base 可以不同文件，但必须同源**。S4 核对 architecture / 张量名 / 形状 / 参数量；这只保证结构一致，不能证明是同一个 checkpoint 的权重（同一模型的两个不同 finetune 也能通过）。`IMATRIX_BASE_KIND` 是量化类型时，报告里会声明"imatrix 的激活是对高精度的近似"。
+10. **量化 base 必须是 f16/bf16，且 `RUN_S4` 路线不给逃生门**。`llama-quantize` 对已量化张量默认拒绝（`requantizing from type ... is disabled`）。手动模式下 `ALLOW_REQUANTIZE=True` 只用于 smoke，产物标 `requantized_pilot_only`，不能当高保真结论；**`RUN_S4=True` 时即使显式设 `ALLOW_REQUANTIZE=True` 也会被 `GuardError` 拦死**（`test_s4_forbids_requantize_even_when_opted_in`）。
+11. **imatrix 与量化 base 可以不同文件，但必须同源**（v0.5 起两级核验）。Q8_0 文件还在时逐张量比形状（architecture / 张量名 / dims / 参数量，`file` 级）；Q8_0 已回收时走 sha256 + 来源 repo/revision + 张量名/层数/输入通道三项（`provenance` 级）。两级都只保证"同一份权重"，**不能证明是同一个 checkpoint 的权重**（同一模型的两个不同 finetune 也能通过结构核对）。`IMATRIX_BASE_KIND` 是量化类型时，报告里会声明"imatrix 的激活是对高精度的近似"。
 12. **旧产物会留在 working**。指纹不符的 GGUF 被改名成 `.stale-<fp8>`，每种格式最多留一份。确认新结果没问题后可以手动删，`CODE_FINAL` 会把它们列出来。
 13. **不能关 `LLAMA_BUILD_SERVER`**。上游 `tools/CMakeLists.txt` 把 `add_subdirectory(cli)` 写在 `if (LLAMA_BUILD_SERVER)` 里，关了就没有 `llama-cli`，S7 会缺工具。省编译时间请改 `CUDA_ARCH` / `BUILD_JOBS`，别动 SERVER。
 14. ~~S2 的编译时间与峰值内存全是估算~~ **已被实测取代（v0.3.2）**：真实 Kaggle T4 上 27 分 52 秒，S2 后 working 剩 19.07 GiB。`STAGE_BUDGET_SEC["S2_BUILD"]=2400 s` 的预算对这个耗时仍有余量；峰值 RAM 与 build 目录大小仍未观测，超时仍可按 runbook 4.3 降 `BUILD_JOBS` 或改 `BUILD_CUDA=False`。
@@ -803,7 +906,7 @@ python3 research/kaggle/test_trlab.py
 18. **Kaggle 能否直连 github.com 未验证**。自动下载走标准库 `urllib`（不依赖 curl/wget）。如果 Kaggle 网络策略拦了 GitHub，S2 会给出"检查 Settings → Internet = On"的报错，此时用断网备选：手动下载同一 tarball、挂成 Dataset、设 `CFG["LLAMA_SRC"]`。
 19. ~~`-DGGML_CUDA_NO_VMM=ON` 只跨过 Generate 阶段~~ **已被实测取代（v0.3.2）**：真实运行里 build 阶段同样通过，四个二进制就位。该开关的代价不变且有限：显存池从 VMM 回退到 cudaMalloc 池（`ggml-cuda.cu:745`），算力内核与数值不变；构建产物会带 `NO_VMM=1` 特性标记。仍未观测的是 build 目录大小与峰值 RAM。
 20. **错误分类器按关键词匹配，永远可能漏**。v0.3.0 的 `"nvcc" in tail and "not found" in tail` 全文包含判断就把 driver 错误误判成了 nvcc 缺失。现在改成同行匹配 + driver 专用分支，但新的日志形态仍可能落到通用分支 —— 通用分支的处置是"看日志最后 30 行"，这是兜底不是终点。
-21. **S3 的一键化链路没有在真实 Kaggle 上跑过**。v0.4.0 的 68 项测试全是 CPU/mock；Q8_0 8.11 GiB 的实际下载耗时、`_fit_ngl` 在真实 T4 上的判定、imatrix 实际耗时、回收后的磁盘账，都还是估算。第一次跑请对照 runbook 5.4 的清单逐条核。
+21. **S3 已在真实 Kaggle T4 上通过（2026-10-22）**：imatrix 10,701,952 B / 1008 张量 / 57.95 s，`-ngl 99` 全上 GPU，显存总量 14.56 GiB。**但 S4/S5 的一键化链路仍只有 CPU/mock 测试**：BF16 15.26 GiB 的实际下载耗时、`llama-quantize` 的 CPU 耗时与峰值 RAM、S5 的真实字节账，都还是估算。第一次跑请对照 runbook 第 7 节的清单逐条核。
 22. **Kaggle 能否直连 huggingface.co 未验证**（github.com 已实测可达）。HF 的 CDN 域名不同，网络策略可能不同。连不上时 S3 会报可操作的错并保留断点。
 23. **Kaggle 镜像里有没有 `pyarrow` / `pandas` 未验证**。设计上不硬依赖（先 pyarrow 再 pandas，都没有就报错），退路是自己把 parquet 转成 `calib.txt` 挂成 Dataset 并设 `CFG["CALIB_TXT"]`。
 24. **`/kaggle/working` 是否跨 interactive session 保留未验证**。官方只说 ≤ 20 GB 自动保存；"掉线后不 commit 是否一定恢复"没写。v0.4.0 按"不保"做最坏假设，每次启动探活二进制，探不到就自动重编约 28 分钟 —— **首次新 Session 重编是可接受代价，已如实记录**。
@@ -811,6 +914,11 @@ python3 research/kaggle/test_trlab.py
 26. **imatrix base 是 Q8_0，不是 f16**。激活统计量是对 f16 的近似，比"从 Q8_0 二次量化"好，但不等于 f16 口径。`S3_IMATRIX.json` 里 `imatrix_base_from_approx=True`，S9 报告会声明 —— 别在结论里当成 f16。
 27. **校准规模 32 × 512 = 16,384 token 只是 pilot**。对 IQ2_XS 这种 2.31 bpw 的格式，imatrix 质量对校准量敏感；要更稳需调 `IMATRIX_CHUNKS`，耗时线性增长。
 28. **复用挂载的二进制时，commit 只能是声明值**。`build_reuse` 三档里 `attached_input` 和没有源码的 `existing_build` 都拿不到 git 或 tarball digest，`commit_source="declared"` + `commit_verified=false`。报告里会明说"未校验"，不会伪装成已验证。
+29. **Kaggle 暂存盘的容量没有官方数字**。官方只说有 "Additional scratchpad disk space (outside /kaggle/working) that will not be saved outside of the current session"，没给大小。v0.5 因此**运行时探测**：只认 `st_dev` 与 working 不同的候选，且要求空闲 ≥ BF16 + 余量。探测不到就走只读 Input 路线（`trlab_fetch_bf16.ipynb`），不会把账算错。
+30. **Kaggle 能否直连 huggingface.co 未验证**（github.com 已实测可达，HF 的 CDN 域名 `xet-bridge-us` 可能不同策略）。15.26 GiB 的 BF16 连不上时 S4 会报可操作的错并给出 helper notebook 说明；届时用手动下载 + 挂 Dataset 也一样（字节数与 sha256 双校验不依赖下载路径）。
+31. **S4 的 CPU 耗时与峰值 RAM 未实测**。`llama-quantize` 是 CPU 路径（15.26 GiB 走内存不走显存），输入 mmap 但 `--max-buffer-size` 默认 8192 MiB 是实打实要占的。`_ram_precheck()` 只警告不拦；真的 exit 137 时按提示调小 `S4_RAM_MARGIN_GB` 或加 `--max-buffer-size`。
+32. **暂存盘路线不跨 Session**。下到暂存盘的 BF16 会话结束就没了，下次要重下；只读 Input 路线才是一次操作永久复用。这是两条路线的本质差别，报告里会记 `quant_base_origin`。
+33. **provenance 级核验弱于文件级**。三项证据（sha256 / 来源 repo+revision / 张量结构）互相独立，且"同仓库同 revision ⇒ 同一次转换"比"形状一致"强，但它仍然不是逐张量比形状。S9 报告会显式声明这一条的效力范围（`imatrix_base_consistency_level`）。
 
 ---
 

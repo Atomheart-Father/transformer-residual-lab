@@ -139,3 +139,43 @@ q8_reclaimed / q8_reclaimed_bytes / q8_reclaim_reason
 8. 68 项 CPU/mock 测试（44 原有 + 24 新增）。
 
 **不在范围内**：S4–S8 的一键化、BF16 下载、任何真实推理。
+
+
+---
+
+## 八、v0.5.0 追加：S4 一键量化（**已实现**）
+
+S3 已在真实 Kaggle T4 上跑通（2026-10-22：imatrix 10,701,952 B / 1008 张量 / 57.95 s，sha256 `34062ab6…`，`-ngl 99` 全上 GPU，Q8_0 按设计回收）。这一节记 S4 的落点。
+
+### 8.1 七个需求 → 落成了什么
+
+| 需求 | 落点 |
+|---|---|
+| 1. 从同源的原始 F16/BF16 量化，禁止 Q8_0 二次量化 | `S4_PINNED`（repo/revision/sha256/bytes 与 S3 同源）；`plan.get("flags")` 非空直接 `GuardError`，`ALLOW_REQUANTIZE` 不给活路 |
+| 2. 解决 20 GiB working 限制，优先云端下载 + 只读 Input | `_resolve_s4_base()` 四级优先级 + 一次性 helper notebook（6 次点击） |
+| 3. 复用现有 imatrix，新 Session 也能恢复 | `IMATRIX_PINNED` + `_verify_imatrix()` 三态 + `S3_SKIP_IF_IMATRIX_OK` + 挨着产物的 `models/imatrix.provenance.json` |
+| 4. 修 `_base_consistency()` 依赖已回收的 Q8_0 | file / provenance 两级同源核验（见 8.3） |
+| 5. 修 `base_origin` 误记 `manual` | `_s3_base_origin()` 改为看路径落点与 stamp，不看被污染的 CFG |
+| 6. 完整来源记录 + 磁盘/RAM 检查 + 断点 + 失败恢复，默认不自动下载 BF16 | `S4_AUTO_FETCH_BASE` 默认 False；provenance schema 2；`_disk_precheck(root=)`；`_ram_precheck()` |
+| 7. 顺带打开 S5 真实字节/bpw，不启动 S6–S8 | `RUN_S4` 分支只开 S4_QUANT + S5_BYTES；`_s4_base_for_s5()` 用 S4 实际取的 base |
+
+### 8.2 磁盘算术（这条路线的第一约束）
+
+S2 后 working 实测剩 19.07 GiB；BF16 15.26 + IQ2_XS 2.36 + IQ4_XS 4.34 = 21.96 GiB，连 BF16+IQ4_XS = 19.60 GiB 都超。**BF16 必须来自不占 working 配额的地方。** 因此 base 取源按 `manual → attached_input → scratch_download → working_download` 排序，暂存盘只认 `st_dev` 与 working 不同的候选（同设备上的"另一个目录"不提供额外空间，算进来会导致虚假的磁盘账）。
+
+Kaggle 官方只说有 "Additional scratchpad disk space (outside /kaggle/working) that will not be saved outside of the current session"，**没给容量** —— 所以是运行时探测，不是假设。探测不到就报 `GuardError` 并给出 helper notebook 的 6 步说明，不瞎试。
+
+### 8.3 imatrix 与量化 base 的同源性：两级核验
+
+imatrix 的 base（Q8_0）按设计会被回收，所以"读原文件逐张量比形状"这条路会堵死（v0.4 的真实缺陷：S4 直接 `GuardError`，只能重下 8 GiB）。改成：
+
+- **file 级**（Q8_0 还在）：architecture / 张量名 / dims / 参数量，`_base_consistency()`；
+- **provenance 级**（Q8_0 已回收）：① imatrix sha256 与 provenance 记录一致；② 记录的 base repo/revision 与 `S4_PINNED` 相同 —— **同仓库同 revision ⇒ 同一次转换 ⇒ 同一份权重**，这比"张量形状一致"强得多（三个仓库的 Q8_0 字节数都不同，形状必然一致）；③ imatrix 张量名 ⊆ base 张量名且层数一致；④ 每个 imatrix 张量的 `in_sum` 元素数 = base 对应张量的输入通道数。
+
+③④ 的依据是本地实测的 imatrix GGUF 结构：**没有** `general.architecture`，1008 个张量 = 36 层 × 7 种 × 4 个统计量（`.in_sum` / `.in_sum2` / `.counts` / `.stats`），`in_sum` 的元素数就是 n_in（`ffn_down.weight` → 12288 = ffn 宽度，其余 → 4096 = hidden）。dims 方向自动判定（要求所有张量同一方向 100% 匹配），防止 ggml `mul_mat` 约定与写入端相反。报告里会写清核验到了哪一级，`provenance` 级必须显式声明"弱于文件级"。
+
+### 8.4 测试
+
+98 项 CPU/mock 回归（44 原有 + 24 v0.4 + 30 v0.5）。v0.5 抓到并修掉 1 个真 bug：`stage_s4_quant` 里 `imatrix_base_kind` 变量名笔误 → `NameError`（由 `test_t4_split_base_path` 抓出）。
+
+**仍未验证**：BF16 15.26 GiB 的真实下载、`llama-quantize` 的 CPU 耗时与峰值 RAM、暂存盘容量、provenance 级核验在真实"回收 → 新 Session → S4"路径上的首次走通。这些都写进了 README 已知限制与 runbook 未验证清单。

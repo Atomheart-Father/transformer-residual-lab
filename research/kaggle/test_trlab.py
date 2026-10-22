@@ -371,7 +371,8 @@ def test_s4_blocks_quantized_base(ns):
     CFG = ns["CFG"]
     work = Path(ns["WORK"])
     snap = {k: CFG[k] for k in ("BASE_GGUF", "BASE_KIND", "IMATRIX_GGUF", "IMATRIX_BASE",
-                                "IMATRIX_BASE_KIND", "ALLOW_REQUANTIZE")}
+                                "IMATRIX_BASE_KIND", "ALLOW_REQUANTIZE",
+                                "IMATRIX_ALLOW_UNPINNED")}
     orig_bin = ns["llama_bin"]
 
     base = work / "s4_q8.gguf"
@@ -380,7 +381,10 @@ def test_s4_blocks_quantized_base(ns):
     ns["gguf_write_synth"](imat, [("blk.0.attn_q.weight", (256, 256), 0)])
 
     CFG.update(BASE_GGUF=str(base), BASE_KIND="q8_0", IMATRIX_GGUF=str(imat),
-               IMATRIX_BASE="", IMATRIX_BASE_KIND="", ALLOW_REQUANTIZE=False)
+               IMATRIX_BASE="", IMATRIX_BASE_KIND="", ALLOW_REQUANTIZE=False,
+               # 合成 imatrix 不是 IMATRIX_PINNED 那个真实产物，pin 门必须显式放行，
+               # 否则被测的就不是"二次量化拦截"而是"imatrix pin 拦截"了
+               IMATRIX_ALLOW_UNPINNED=True)
     ns["llama_bin"] = lambda name: (_ for _ in ()).throw(
         AssertionError(f"llama_bin({name}) 不该被调用：应该在它之前就拦住"))
 
@@ -407,7 +411,7 @@ def test_s4_rebuilds_when_imatrix_changes(ns):
     work = Path(ns["WORK"])
     snap = {k: CFG[k] for k in ("BASE_GGUF", "BASE_KIND", "IMATRIX_GGUF", "IMATRIX_BASE",
                                 "IMATRIX_BASE_KIND", "ALLOW_REQUANTIZE", "FORCE_RERUN",
-                                "HASH_GGUF")}
+                                "HASH_GGUF", "IMATRIX_ALLOW_UNPINNED")}
     orig_bin, orig_run = ns["llama_bin"], ns["run_cmd"]
 
     base = work / "s4_base_f16.gguf"
@@ -418,7 +422,10 @@ def test_s4_rebuilds_when_imatrix_changes(ns):
 
     CFG.update(BASE_GGUF=str(base), BASE_KIND="f16", IMATRIX_GGUF=str(imat),
                IMATRIX_BASE="", IMATRIX_BASE_KIND="", ALLOW_REQUANTIZE=False,
-               FORCE_RERUN=False, HASH_GGUF=True)
+               FORCE_RERUN=False, HASH_GGUF=True,
+               # 合成 imatrix 过不了 IMATRIX_PINNED 的 sha256 门；这里测的是指纹复用，
+               # 不是 pin 校验（pin 校验由 v0.5 的 _verify_imatrix 专项测试覆盖）
+               IMATRIX_ALLOW_UNPINNED=True)
 
     calls = []
 
@@ -473,16 +480,17 @@ def test_s4_rebuilds_when_imatrix_changes(ns):
             assert rec["quant_fp"] == r3[fmt]["quant_fp"], "provenance 没有更新"
             made += stale
 
-        # 第四次：换成量化 base 但显式放行 → 命令必须带 --allow-requantize，且标 pilot
+        # 第四次：v0.5 起本路线**禁止**二次量化 —— 即使显式设 ALLOW_REQUANTIZE=True
+        # 也必须被拦死，且命令里不许出现 --allow-requantize（需求 1）
         CFG["BASE_KIND"] = "q8_0"
         CFG["ALLOW_REQUANTIZE"] = True
-        r4 = ns["stage_s4_quant"](deadline)
-        assert len(calls) == n_before + 4
-        for c in calls[-2:]:
-            assert "--allow-requantize" in c["cmd"], c["cmd"]
-        assert r4["_fairness"]["base_scope"] == "requantized_pilot_only"
-        assert r4["_fairness"]["requant"] == "requantized_pilot_only"
-        assert r4["IQ2_XS"]["reused"] is False
+        try:
+            ns["stage_s4_quant"](deadline)
+            raise AssertionError("v0.5 起 BASE_KIND=q8_0 必须被直接拒绝")
+        except ns["GuardError"] as e:
+            assert "禁止二次量化" in str(e), e
+            assert "ALLOW_REQUANTIZE 必须保持 False" in str(e), e
+        assert len(calls) == n_before + 2, "被拒之后不该再调用 llama-quantize"
         made += list(MDLS.glob("qwen3-8b-IQ*_XS.gguf.provenance.json"))
         made += list(MDLS.glob("qwen3-8b-IQ*_XS.gguf"))
     finally:
@@ -500,7 +508,7 @@ def test_t4_split_base_path(ns):
     work = Path(ns["WORK"])
     keys = ("BASE_GGUF", "BASE_KIND", "IMATRIX_BASE", "IMATRIX_BASE_KIND",
             "IMATRIX_GGUF", "ALLOW_REQUANTIZE", "FORCE_RERUN", "HASH_GGUF",
-            "IMATRIX_CTX", "IMATRIX_CHUNKS", "CALIB_TXT")
+            "IMATRIX_CTX", "IMATRIX_CHUNKS", "CALIB_TXT", "IMATRIX_ALLOW_UNPINNED")
     snap = {k: CFG[k] for k in keys}
     orig_bin, orig_run = ns["llama_bin"], ns["run_cmd"]
 
@@ -517,7 +525,10 @@ def test_t4_split_base_path(ns):
     CFG.update(BASE_GGUF=str(base_f16), BASE_KIND="f16",
                IMATRIX_BASE=str(base_q8), IMATRIX_BASE_KIND="q8_0",
                IMATRIX_GGUF=str(imat), ALLOW_REQUANTIZE=False,
-               FORCE_RERUN=False, HASH_GGUF=True, CALIB_TXT=str(calib))
+               FORCE_RERUN=False, HASH_GGUF=True, CALIB_TXT=str(calib),
+               # S3 会写出带真实 sha256 的 provenance sidecar，所以这里本来就能过
+               # provenance_verified；显式放行只是让结果不依赖测试执行顺序
+               IMATRIX_ALLOW_UNPINNED=True)
 
     calls = []
 
@@ -548,8 +559,14 @@ def test_t4_split_base_path(ns):
 
         s4 = ns["stage_s4_quant"](__import__("time").time() + 300)
         fair = s4["_fairness"]
-        assert fair["imatrix_base_same_as_quant_base"] is False, "两个 base 本就不是同一个文件"
+        # v0.5 语义变更：两个 base 文件不同（Q8_0 vs f16）是设计如此，
+        # 判据从"路径相同"改成"同源性核验到了哪一级"。
+        assert fair["imatrix_base_same_as_quant_base"] is None, \
+            "v0.5 起这个字段不再是路径比较，必须是 None（判据是 consistency level）"
+        assert fair["imatrix_base_consistency_level"] == "file", fair
         assert fair["imatrix_base_consistent"]["ok"] is True, fair["imatrix_base_consistent"]
+        assert fair["imatrix_base_kind"] == "q8_0", fair["imatrix_base_kind"]
+        assert fair["verified_level"] == "file", fair["verified_level"]
         assert fair["imatrix_base_from_approx"] is True, "imatrix 来自 Q8_0，必须如实记录"
         assert fair["base_scope"] == "from_high_precision"
         assert fair["requant"] == "primary"
@@ -1141,22 +1158,25 @@ def _fake_downloader(src_file):
 
 
 def test_s2_default_off_no_network(ns):
-    """默认 RUN_S2=False / RUN_S3=False：一个字段都不改，也不许联网。
+    """默认 RUN_S2=False / RUN_S3=False / RUN_S4=False：一个字段都不改，也不许联网。
 
     Kaggle 上"Run All"不应该因为导入 notebook 就悄悄下载。想下载必须显式把
     开关改成 True —— 这一点由 _apply_run_switches 的早退保证。
     """
     assert ns["RUN_S2"] is False, "默认值必须是 False"
     assert ns["RUN_S3"] is False, "默认值必须是 False"
+    assert ns["RUN_S4"] is False, "默认值必须是 False（不许默认下 15 GiB BF16）"
     before_stages = dict(ns["STAGES"])
     before_cfg = {k: ns["CFG"][k] for k in ("S2_AUTO_FETCH_SOURCE", "LLAMA_COMMIT",
                                            "CUDA_ARCH", "BUILD_JOBS", "BUILD_CUDA",
-                                           "S3_AUTO_FETCH_MODEL", "S3_AUTO_FETCH_CALIB")}
+                                           "S3_AUTO_FETCH_MODEL", "S3_AUTO_FETCH_CALIB",
+                                           "S4_AUTO_FETCH_BASE", "S4_RECLAIM_Q8_CACHE",
+                                           "S3_SKIP_IF_IMATRIX_OK")}
     out = ns["_apply_run_switches"]()
-    assert out == {"run_s2": False, "run_s3": False}, out
-    assert ns["STAGES"] == before_stages, "两个开关都 False 时不许改 STAGES"
+    assert out == {"run_s2": False, "run_s3": False, "run_s4": False}, out
+    assert ns["STAGES"] == before_stages, "三个开关都 False 时不许改 STAGES"
     for k, v in before_cfg.items():
-        assert ns["CFG"][k] == v, f"两个开关都 False 时不许改 CFG['{k}']"
+        assert ns["CFG"][k] == v, f"三个开关都 False 时不许改 CFG['{k}']"
 
     # 没有手动源码 + 没开自动获取 → GuardError，且消息里要提到 RUN_S2
     CFG = ns["CFG"]
@@ -2415,7 +2435,9 @@ def test_s3_manual_base_not_touched(ns):
         assert called["q8"] is False and called["calib"] is False
         assert rec["base_origin"] == "manual"
         assert q8.exists(), "手动指定的 base 一律不许删"
-        assert "q8_reclaimed" not in rec
+        # v0.5：即使不删，也要把"为什么不删"写进记录（原来这个键直接不存在）
+        assert rec["q8_reclaimed"] is False
+        assert "manual" in rec["q8_reclaim_reason"]
     finally:
         ns["CFG"].clear(); ns["CFG"].update(snap_cfg)
         ns["OUT"] = orig_out
@@ -2446,6 +2468,1123 @@ def test_s3_report_lines(ns):
                  "初判 99 → 实际 **18**", "已回收", "361 个张量",
                  "是对 f16 的近似", "尝试记录", '"oom": true'):
         assert must in md, f"报告缺少 {must!r}"
+
+
+# ---------------------------------------------------------------- S4 一键量化（v0.5）
+# 覆盖需求 1-7：开关作用域、imatrix pin 三态、provenance 级同源核验、
+# base 四级取源、暂存盘探测、遗留 Q8_0 回收、S3 重跑来源判定、禁止二次量化。
+
+
+class _Patch:
+    """极小的 patch 器：记录原值，undo() 一律还原（测试失败也不留污染）。"""
+
+    def __init__(self, ns):
+        self.ns = ns
+        self.saved = []
+
+    def __call__(self, name, value):
+        self.saved.append((name, self.ns[name]))
+        self.ns[name] = value
+        return value
+
+    def undo(self):
+        for name, value in reversed(self.saved):
+            self.ns[name] = value
+        self.saved = []
+
+
+class _FakeUsage:
+    def __init__(self, free, total=None):
+        self.free = free
+        self.total = total if total is not None else free * 2
+
+
+class _FakeShutil:
+    """只实现 _resolve_s4_base / disk_gb 用到的那一点点。"""
+
+    def __init__(self, free, total=None):
+        self._free = free
+        self._total = total
+
+    def disk_usage(self, p):
+        return _FakeUsage(self._free, self._total)
+
+    def which(self, name):
+        return None
+
+
+class _FakeOS:
+    """包住真 os，只按路径覆盖 stat().st_dev，用来造"另一个文件系统"。"""
+
+    def __init__(self, real, devmap):
+        self._real = real
+        self._devmap = {str(k): v for k, v in devmap.items()}
+
+    def stat(self, p):
+        s = str(p)
+        if s in self._devmap:
+            import types as _t
+            return _t.SimpleNamespace(st_dev=self._devmap[s])
+        return self._real.stat(p)
+
+    def __getattr__(self, k):
+        return getattr(self._real, k)
+
+
+def _scan_dispatch(mapping):
+    """假 gguf_scan：按路径返回预定 scan 字典。"""
+
+    def fake(path, deadline=None, **kw):
+        key = str(path)
+        if key not in mapping:
+            raise KeyError("假 gguf_scan 没有 %s 的记录" % key)
+        return mapping[key]
+
+    return fake
+
+
+def _fake_base_scan(layers=(0, 1, 2), arch="qwen3", n_params=1000):
+    """bf16 base 的 scan：ffn_down 的输入通道是 12288，其余 4096
+    （与真实 Qwen3-8B 的 imatrix 实测一致）。"""
+    tensors = []
+    for i in layers:
+        tensors.append({"name": "blk.%d.attn_q.weight" % i, "dims": [4096, 4096]})
+        tensors.append({"name": "blk.%d.ffn_down.weight" % i, "dims": [12288, 4096]})
+    return {"architecture": arch, "n_params": n_params, "tensors": tensors}
+
+
+def _fake_imatrix_scan(layers=(0, 1, 2), extra=()):
+    """imatrix 的 scan：每个模型张量 4 个统计量条目，只有 .in_sum 记 n_in。"""
+    tensors = []
+    for i in layers:
+        for suf in (".in_sum", ".in_sum2", ".counts", ".stats"):
+            tensors.append({"name": "blk.%d.attn_q.weight%s" % (i, suf),
+                            "n_elements": 4096})
+            tensors.append({"name": "blk.%d.ffn_down.weight%s" % (i, suf),
+                            "n_elements": 12288})
+    for name, n_in in extra:
+        tensors.append({"name": name, "n_elements": n_in})
+    return {"n_tensors": len(tensors), "tensors": tensors}
+
+
+# ---- 需求 6：默认不下载；RUN_S4 的作用域 ----
+
+def test_s4_run_switch_scope(ns):
+    """RUN_S4=True 只开 S2/S3/S4/S5；S6-S8 与 SX 必须全部保持 False。"""
+    STAGES, CFG = ns["STAGES"], ns["CFG"]
+    snap_s, snap_c = dict(STAGES), dict(CFG)
+    orig = ns["RUN_S4"]
+    try:
+        ns["RUN_S4"] = True
+        out = ns["_apply_run_switches"]()
+        assert out["run_s4"] is True
+        assert STAGES["S2_BUILD"] is True, "RUN_S4 必须隐含打开 S2（量化要二进制）"
+        assert STAGES["S3_IMATRIX"] is True, "RUN_S4 必须隐含打开 S3（imatrix 是 IQ2_XS 的前提）"
+        assert STAGES["S4_QUANT"] is True
+        assert STAGES["S5_BYTES"] is True
+        for k in ("S6_NLL", "S7_QUALITY", "S8_BF16_ANCHOR", "SX_EXPLORE"):
+            assert STAGES[k] is False, "%s 被 RUN_S4 顺手打开了" % k
+        assert CFG["BASE_KIND"] == ns["S4_PINNED"]["kind"] == "bf16"
+        assert CFG["S4_AUTO_FETCH_BASE"] is True
+        assert CFG["S4_RECLAIM_Q8_CACHE"] is True
+        assert CFG["S3_SKIP_IF_IMATRIX_OK"] is True
+        assert CFG["S3_DELETE_Q8_AFTER"] is True
+        assert CFG["ALLOW_REQUANTIZE"] is False, "本路线禁止二次量化，逃生门必须关着"
+        assert CFG["BASE_GGUF"] == "", "RUN_S4 不许预设 BASE_GGUF（base 由 S4 自己取）"
+        assert out["quant_base"] == ns["S4_PINNED"]["filename"]
+        assert out["formats"] == ns["FORMATS"] == ["IQ2_XS", "IQ4_XS"]
+    finally:
+        ns["RUN_S4"] = orig
+        ns["_apply_run_switches"]()
+        STAGES.clear(); STAGES.update(snap_s)
+        CFG.clear(); CFG.update(snap_c)
+
+
+def test_s4_pins_are_registered(ns):
+    """BF16 与 imatrix 的预登记值必须与 HF / 真实运行核对过的一致。"""
+    s4 = ns["S4_PINNED"]
+    assert s4["sha256"] == ("5e416a2020fe63e76ea13c8979be35fc"
+                            "6070aaf3578f7876400c55c2f5c3eb30"), s4["sha256"]
+    assert s4["bytes"] == 16388044384, s4["bytes"]
+    assert s4["kind"] == "bf16" and s4["filename"] == "Qwen3-8B-BF16.gguf"
+    assert s4["url"].endswith("/resolve/%s/%s" % (s4["revision"], s4["filename"]))
+    # 承重墙：imatrix 的 base 与量化 base 必须同仓库同 revision，
+    # provenance 级同源核验的第 ② 项全靠这一条
+    assert s4["repo"] == ns["S3_PINNED"]["repo"], "量化 base 与 imatrix base 不是同一个仓库"
+    assert s4["revision"] == ns["S3_PINNED"]["revision"], "不是同一次转换"
+
+    im = ns["IMATRIX_PINNED"]
+    assert im["sha256"] == ("34062ab6d5dfaaef56ee659461c19f4e"
+                            "94254ec14481b07d5531459fbb16ac37"), im["sha256"]
+    assert im["bytes"] == 10701952 and im["n_tensors"] == 1008, im
+
+
+def test_s4_default_off_downloads_nothing(ns):
+    """RUN_S4=False 时 S4_AUTO_FETCH_BASE 必须保持 False（不许默认下 15 GiB）。"""
+    CFG = ns["CFG"]
+    snap = dict(CFG)
+    try:
+        ns["_apply_run_switches"]()
+        assert CFG["S4_AUTO_FETCH_BASE"] is False
+        assert CFG["S4_RECLAIM_Q8_CACHE"] is False
+        assert CFG["BASE_KIND"] == snap["BASE_KIND"]
+    finally:
+        CFG.clear(); CFG.update(snap)
+
+
+# ---- 需求 3：imatrix 的 pin 三态与发现路径 ----
+
+def test_verify_imatrix_three_states(ns):
+    """imatrix 可信度三态：pinned / provenance / unverified，外加坏文件。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_v5_verify_")
+    p = Path(tmp) / "imatrix.gguf"
+    p.write_bytes(b"GGUF" + b"\0" * 4096)
+    CFG = ns["CFG"]
+    snap_h = CFG["HASH_GGUF"]
+    patch = _Patch(ns)
+    try:
+        patch("gguf_scan", _scan_dispatch({str(p): _fake_imatrix_scan()}))
+        CFG["HASH_GGUF"] = True
+
+        # ① 与 pin 一致 → pinned_verified（最强：真实 Kaggle 运行产物）
+        patch("sha256_of", lambda x, deadline=None: ns["IMATRIX_PINNED"]["sha256"])
+        patch("_imatrix_provenance_records", lambda: [])
+        v = ns["_verify_imatrix"](p)
+        assert v["ok"] is True and v["trust"] == "pinned_verified", v
+        assert "IMATRIX_PINNED" in v["why"]
+
+        # ② 与某条 provenance 记录一致 → provenance_verified
+        patch("sha256_of", lambda x, deadline=None: "c" * 64)
+        patch("_imatrix_provenance_records",
+              lambda: [{"sha256": "c" * 64, "_source": "/x/imatrix.provenance.json"}])
+        v = ns["_verify_imatrix"](p)
+        assert v["trust"] == "provenance_verified", v
+        assert v["provenance"]["_source"] == "/x/imatrix.provenance.json"
+
+        # ③ 谁都对不上 → unverified（默认不放行）
+        patch("sha256_of", lambda x, deadline=None: "e" * 64)
+        patch("_imatrix_provenance_records", lambda: [])
+        v = ns["_verify_imatrix"](p)
+        assert v["ok"] is True and v["trust"] == "unverified", v
+
+        # ④ 关掉 HASH_GGUF → 没有 sha256 可对，只能是 unverified
+        CFG["HASH_GGUF"] = False
+        v = ns["_verify_imatrix"](p)
+        assert v["sha256"] is None and v["trust"] == "unverified", v
+        CFG["HASH_GGUF"] = True
+
+        # ⑤ 字节数 / 张量数与 pin 不符 → 进 warnings，但不改变 trust
+        patch("sha256_of", lambda x, deadline=None: ns["IMATRIX_PINNED"]["sha256"])
+        v = ns["_verify_imatrix"](p)
+        assert v["trust"] == "pinned_verified"
+        assert any("字节数" in w for w in v["warnings"]), v["warnings"]
+
+        # ⑥ 文件不存在 / 解析失败 / 空文件
+        v = ns["_verify_imatrix"](Path(tmp) / "nope.gguf")
+        assert v["ok"] is False and v["trust"] == "missing", v
+
+        def boom(path, deadline=None, **kw):
+            raise RuntimeError("bad magic")
+
+        patch("gguf_scan", boom)
+        v = ns["_verify_imatrix"](p)
+        assert v["ok"] is False and v["trust"] == "unreadable", v
+        assert "GGUF 解析失败" in v["why"]
+
+        patch("gguf_scan", _scan_dispatch({str(p): {"n_tensors": 0, "tensors": []}}))
+        v = ns["_verify_imatrix"](p)
+        assert v["ok"] is False and v["trust"] == "empty", v
+    finally:
+        patch.undo()
+        CFG["HASH_GGUF"] = snap_h
+
+
+def test_imatrix_found_in_input_and_candidates(ns):
+    """/kaggle/input 里挂着的 imatrix 必须被发现，且候选顺序符合优先级。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_v5_cand_")
+    in_dir = Path(tmp) / "input" / "some-slug"
+    in_dir.mkdir(parents=True)
+    (in_dir / "imatrix.gguf").write_bytes(b"GGUF" + b"\0" * 1024)
+    (in_dir / "other.gguf").write_bytes(b"GGUF" + b"\0" * 1024)
+    mdls = Path(tmp) / "models"
+    mdls.mkdir()
+    (mdls / "imatrix.gguf").write_bytes(b"GGUF" + b"\0" * 2048)
+
+    patch = _Patch(ns)
+    snap = {k: ns["CFG"][k] for k in ("IMATRIX_GGUF",)}
+    try:
+        patch("IN", Path(tmp) / "input")
+        patch("MDLS", mdls)
+        ns["CFG"]["IMATRIX_GGUF"] = ""
+
+        hits = ns["_scan_input_gguf"](max_hits=32, time_budget_sec=10.0)
+        assert len(hits) == 2 and all(h.suffix == ".gguf" for h in hits), hits
+
+        cands = [str(c) for c in ns["_imatrix_candidates"]()]
+        assert cands[0] == str(mdls / "imatrix.gguf"), cands
+        assert str(in_dir / "imatrix.gguf") in cands, "Input 里的 imatrix 必须进候选"
+
+        # resolve_imatrix 取第一个存在的
+        assert ns["resolve_imatrix"]() == mdls / "imatrix.gguf"
+        (mdls / "imatrix.gguf").unlink()
+        assert ns["resolve_imatrix"]() == in_dir / "imatrix.gguf"
+        (in_dir / "imatrix.gguf").unlink()
+        assert ns["resolve_imatrix"]() is None
+
+        # 显式指定的 CFG['IMATRIX_GGUF'] 排最前
+        ns["CFG"]["IMATRIX_GGUF"] = str(in_dir / "other.gguf")
+        assert ns["resolve_imatrix"]() == in_dir / "other.gguf"
+    finally:
+        patch.undo()
+        ns["CFG"].update(snap)
+
+
+def test_imatrix_provenance_records_sidecar_first(ns):
+    """provenance 记录按可信度排序：挨着 imatrix 的 sidecar 优先于 OUT/。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_v5_prov_")
+    mdls, out = Path(tmp) / "models", Path(tmp) / "out"
+    mdls.mkdir(); out.mkdir()
+    patch = _Patch(ns)
+    try:
+        patch("MDLS", mdls)
+        patch("OUT", out)
+        assert ns["_imatrix_provenance_records"]() == []
+
+        ns["write_json"](out / "S3_IMATRIX.json",
+                         {"status": "ok", "result": {"imatrix": "/m/imatrix.gguf",
+                                                     "sha256": "b" * 64}})
+        recs = ns["_imatrix_provenance_records"]()
+        assert len(recs) == 1 and recs[0]["_source"] == str(out / "S3_IMATRIX.json")
+
+        ns["write_json"](mdls / "imatrix.provenance.json",
+                         {"schema": 2, "imatrix": "/m/imatrix.gguf",
+                          "sha256": "c" * 64, "base_repo": "unsloth/Qwen3-8B-GGUF"})
+        recs = ns["_imatrix_provenance_records"]()
+        assert len(recs) == 2
+        assert recs[0]["_source"] == str(mdls / "imatrix.provenance.json")
+        assert recs[0]["sha256"] == "c" * 64, "sidecar 必须排第一（挨着产物，最可能还在）"
+        assert recs[1]["_source"] == str(out / "S3_IMATRIX.json")
+    finally:
+        patch.undo()
+
+
+# ---- 需求 4：Q8_0 已回收时的同源性核验 ----
+
+def _consistency_env(ns, tmp, *, base_layers=(0, 1, 2), imat_layers=(0, 1, 2),
+                     imat_extra=(), q8_present=False, sha="c" * 64):
+    """搭一套 _imatrix_base_consistency 的桩环境，返回 (patch, base, imat, rec, undo)。"""
+    base = Path(tmp) / "Qwen3-8B-BF16.gguf"
+    imat = Path(tmp) / "imatrix.gguf"
+    q8 = Path(tmp) / "Qwen3-8B-Q8_0.gguf"
+    base.write_bytes(b"x" * 2048)
+    imat.write_bytes(b"x" * 2048)
+    if q8_present:
+        q8.write_bytes(b"x" * 2048)
+    mapping = {str(base): _fake_base_scan(layers=base_layers),
+               str(imat): _fake_imatrix_scan(layers=imat_layers, extra=imat_extra)}
+    if q8_present:
+        mapping[str(q8)] = _fake_base_scan(layers=base_layers)
+    patch = _Patch(ns)
+    patch("gguf_scan", _scan_dispatch(mapping))
+    patch("sha256_of", lambda p, deadline=None: sha)
+    rec = {"sha256": sha, "base_gguf": str(q8) if q8_present else "/gone/Q8_0.gguf",
+           "base_kind": "q8_0", "base_repo": ns["S3_PINNED"]["repo"],
+           "base_revision": ns["S3_PINNED"]["revision"],
+           "base_bytes": ns["S3_PINNED"]["bytes"]}
+    return patch, base, imat, rec
+
+
+def test_consistency_provenance_level_ok(ns):
+    """Q8_0 已回收：结构 + sha256 + 来源三项都过 → provenance 级通过。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_v5_cons_")
+    patch, base, imat, rec = _consistency_env(ns, tmp)
+    try:
+        r = ns["_imatrix_base_consistency"](imat, base, rec, None)
+        assert r["ok"] is True, r
+        assert r["level"] == "provenance", r
+        assert r["n_tensors"] == 6 and r["layers"] == 3, r
+        assert r["n_in_orientation"] == "dims[0]", r
+        assert "sha256" in r["verified_by"] and "来源" in r["verified_by"]
+        assert "已被回收" in r["note"], r["note"]
+    finally:
+        patch.undo()
+
+
+def test_consistency_structure_failures(ns):
+    """结构三项（张量名 / 层数 / 输入通道）任一不过都必须拒。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_v5_consf_")
+    f = ns["_imatrix_base_consistency"]
+
+    # ① imatrix 里有 base 中不存在的张量
+    patch, base, imat, rec = _consistency_env(
+        ns, tmp, imat_extra=[("blk.9.attn_q.weight.in_sum", 4096)])
+    try:
+        r = f(imat, base, rec, None)
+        assert r["ok"] is False and r["level"] == "structure", r
+        assert "不存在" in r["why"]
+    finally:
+        patch.undo()
+
+    # ② 层数不同（base 3 层 vs imatrix 2 层，名字仍全部存在）
+    patch, base, imat, rec = _consistency_env(ns, tmp, imat_layers=(0, 1))
+    try:
+        r = f(imat, base, rec, None)
+        assert r["ok"] is False and r["level"] == "structure", r
+        assert "层数不同" in r["why"]
+    finally:
+        patch.undo()
+
+    # ③ 输入通道数两个方向都对不上
+    patch, base, imat, rec = _consistency_env(
+        ns, tmp, imat_extra=[("blk.0.attn_q.weight.in_sum", 999)])
+    try:
+        r = f(imat, base, rec, None)
+        assert r["ok"] is False and r["level"] == "structure", r
+        assert "输入通道数对不上" in r["why"] and "dims[0]" in r["why"]
+    finally:
+        patch.undo()
+
+    # ④ 方向反过来也认（dims[1] = n_in），不算失败
+    patch = _Patch(ns)
+    base2 = Path(tmp) / "rev.gguf"
+    imat2 = Path(tmp) / "rev_im.gguf"
+    base2.write_bytes(b"x" * 16); imat2.write_bytes(b"x" * 16)
+    patch("gguf_scan", _scan_dispatch({
+        str(base2): {"architecture": "qwen3", "n_params": 9, "tensors": [
+            {"name": "blk.0.attn_q.weight", "dims": [4096, 4096]}]},
+        str(imat2): {"n_tensors": 4, "tensors": [
+            {"name": "blk.0.attn_q.weight.in_sum", "n_elements": 4096},
+            {"name": "blk.0.attn_q.weight.in_sum2", "n_elements": 4096},
+            {"name": "blk.0.attn_q.weight.counts", "n_elements": 4096},
+            {"name": "blk.0.attn_q.weight.stats", "n_elements": 4096}]}}))
+    patch("sha256_of", lambda p, deadline=None: "c" * 64)
+    try:
+        r = f(imat2, base2, {"sha256": "c" * 64,
+                             "base_repo": ns["S3_PINNED"]["repo"],
+                             "base_revision": ns["S3_PINNED"]["revision"],
+                             "base_bytes": ns["S3_PINNED"]["bytes"]}, None)
+        assert r["ok"] is True, r
+        assert r["n_in_orientation"] in ("dims[0]", "dims[1]")
+    finally:
+        patch.undo()
+
+
+def test_consistency_provenance_failures(ns):
+    """provenance 级的四个失败分支：无记录 / sha 不符 / 来源不符 / 字节数不符。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_v5_consp_")
+    f = ns["_imatrix_base_consistency"]
+
+    # ① 没有任何记录
+    patch, base, imat, _ = _consistency_env(ns, tmp)
+    try:
+        r = f(imat, base, None, None)
+        assert r["ok"] is False and r["level"] == "provenance", r
+        assert "没有" in r["why"]
+    finally:
+        patch.undo()
+
+    # ② imatrix sha256 与记录不符（换了文件）
+    patch, base, imat, rec = _consistency_env(ns, tmp, sha="d" * 64)
+    try:
+        r = f(imat, base, dict(rec, sha256="c" * 64), None)
+        assert r["ok"] is False and "sha256 与记录不符" in r["why"], r
+    finally:
+        patch.undo()
+
+    # ③ 来源不是同一个仓库 / revision
+    patch, base, imat, rec = _consistency_env(ns, tmp)
+    try:
+        bad = dict(rec, base_repo="someone/other-GGUF")
+        r = f(imat, base, bad, None)
+        assert r["ok"] is False and "来源不是 S4_PINNED" in r["why"], r
+        bad = dict(rec, base_revision="0" * 40)
+        r = f(imat, base, bad, None)
+        assert r["ok"] is False and "来源不是 S4_PINNED" in r["why"], r
+        # 缺 base_repo/revision 时回落到 S3_PINNED（同仓库同 revision）→ 仍然通过
+        ok = {k: v for k, v in rec.items() if k not in ("base_repo", "base_revision")}
+        r = f(imat, base, ok, None)
+        assert r["ok"] is True, r
+    finally:
+        patch.undo()
+
+    # ④ 记录的 base 字节数与 pin 不符
+    patch, base, imat, rec = _consistency_env(ns, tmp)
+    try:
+        r = f(imat, base, dict(rec, base_bytes=123), None)
+        assert r["ok"] is False and "字节数" in r["why"], r
+    finally:
+        patch.undo()
+
+
+def test_consistency_file_level_when_q8_present(ns):
+    """Q8_0 还在时走文件级：逐张量比形状，强于 provenance 级。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_v5_consfile_")
+    patch, base, imat, rec = _consistency_env(ns, tmp, q8_present=True)
+    try:
+        r = ns["_imatrix_base_consistency"](imat, base, rec, None)
+        assert r["ok"] is True and r["level"] == "file", r
+        assert r["n_tensors"] == 6
+        assert r["structure"]["imatrix_has_architecture"] is False, \
+            "imatrix GGUF 实测没有 general.architecture，别假设它有"
+    finally:
+        patch.undo()
+
+
+def test_imatrix_base_does_not_throw_when_reclaimed(ns):
+    """需求 4：Q8_0 被回收后 _imatrix_base() 不许抛异常（v0.4 就是在这里炸的）。"""
+    CFG = ns["CFG"]
+    snap = {k: CFG[k] for k in ("IMATRIX_BASE", "IMATRIX_BASE_KIND",
+                                "BASE_GGUF", "S3_AUTO_FETCH_MODEL",
+                                "S3_AUTO_FETCH_CALIB")}
+    patch = _Patch(ns)
+    try:
+        patch("_s3_base_path", lambda: Path("/gone/Qwen3-8B-Q8_0.gguf"))
+        CFG.update(IMATRIX_BASE="/gone/Qwen3-8B-Q8_0.gguf", BASE_GGUF="")
+        got = ns["_imatrix_base"]()
+        assert got == Path("/gone/Qwen3-8B-Q8_0.gguf")
+        assert not got.exists(), "桩路径本来就不存在 —— 调用方自己判 .exists()"
+        CFG.update(IMATRIX_BASE="", S3_AUTO_FETCH_MODEL=True)
+        assert ns["_imatrix_base"]() == Path("/gone/Qwen3-8B-Q8_0.gguf")
+        CFG.update(S3_AUTO_FETCH_MODEL=False, S3_AUTO_FETCH_CALIB=False,
+                   BASE_GGUF="/also/gone.gguf")
+        assert ns["_imatrix_base"]() == Path("/also/gone.gguf")
+    finally:
+        patch.undo()
+        CFG.update(snap)
+
+
+# ---- 需求 2：量化 base 四级取源 ----
+
+def _s4_base_env(ns, tmp):
+    """_resolve_s4_base 的公共桩：Input 扫描、暂存盘、下载、磁盘预检。"""
+    state = {"fetch": [], "precheck": [], "input": [], "scratch": []}
+
+    def fake_fetch(pin, dst, deadline, tag=""):
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
+        Path(dst).write_bytes(b"BF16" * 16)
+        meta = {"origin": "downloaded", "bytes": pin["bytes"],
+                "sha256": pin["sha256"], "path": str(dst)}
+        state["fetch"].append({"pin": dict(pin), "dst": str(dst), "tag": tag})
+        return meta
+
+    def fake_precheck(extra_bytes, tag, reserve_gb=None, root=None):
+        state["precheck"].append({"extra": extra_bytes, "tag": tag,
+                                  "reserve_gb": reserve_gb, "root": root})
+
+    patch = _Patch(ns)
+    patch("_fetch_pinned_blob", fake_fetch)
+    patch("_disk_precheck", fake_precheck)
+    patch("_scan_input_gguf",
+          lambda max_hits=8, time_budget_sec=20.0: list(state["input"]))
+    patch("_scratch_dirs", lambda need, margin_gb=2.0: list(state["scratch"]))
+    return patch, state
+
+
+def test_resolve_s4_base_manual(ns):
+    """第一优先：CFG['BASE_GGUF'] 手动指定，存在就用，不碰网络。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_v5_base_")
+    base = Path(tmp) / "hand-picked.gguf"
+    base.write_bytes(b"x" * 4096)
+    patch, state = _s4_base_env(ns, tmp)
+    snap = {k: ns["CFG"][k] for k in ("BASE_GGUF", "S4_AUTO_FETCH_BASE")}
+    try:
+        ns["CFG"].update(BASE_GGUF=str(base), S4_AUTO_FETCH_BASE=True)
+        p, origin, meta = ns["_resolve_s4_base"](None)
+        assert origin == "manual" and p == base, (origin, p)
+        assert meta == {"bytes": 4096}
+        assert state["fetch"] == [] and state["precheck"] == []
+    finally:
+        patch.undo(); ns["CFG"].update(snap)
+
+
+def test_resolve_s4_base_attached_input(ns):
+    """第二优先：/kaggle/input 已挂载 → 零下载；字节数比对 + 可选 sha256 强校验。"""
+    import tempfile as _tf
+    import types as _t
+
+    class _FakeHit:
+        """假Input 文件：只有名字和字节数是真的（不能真写 15 GiB）。"""
+
+        def __init__(self, name, size):
+            self.name = name
+            self._size = size
+
+        def stat(self):
+            return _t.SimpleNamespace(st_size=self._size)
+
+        def __str__(self):
+            return "/kaggle/input/fake-slug/" + self.name
+
+    tmp = _tf.mkdtemp(prefix="trlab_v5_input_")
+    pin = ns["S4_PINNED"]
+    hit = _FakeHit(pin["filename"], pin["bytes"])
+    patch, state = _s4_base_env(ns, tmp)
+    state["input"] = [hit]
+    snap = {k: ns["CFG"][k] for k in ("BASE_GGUF", "S4_AUTO_FETCH_BASE", "HASH_GGUF")}
+    try:
+        ns["CFG"].update(BASE_GGUF="", S4_AUTO_FETCH_BASE=True, HASH_GGUF=False)
+        p, origin, meta = ns["_resolve_s4_base"](None)
+        assert origin == "attached_input" and p == hit, (origin, p)
+        assert meta["sha256"] is None and meta["sha256_checked"] is False
+        assert state["fetch"] == [], "Input 里有了就不该再下载"
+
+        # 字节数不对的候选要被跳过；没有别的来源时就该失败而不是将就
+        other = _FakeHit("Qwen3-8B-Q8_0.gguf", pin["bytes"] - 1)
+        state["input"] = [other]
+        patch("shutil", _FakeShutil(free=2 * 2**30))
+        try:
+            ns["_resolve_s4_base"](None)
+            raise AssertionError("字节数不符的候选不该被采用")
+        except ns["GuardError"]:
+            pass
+        patch("shutil", _FakeShutil(free=500 * 2**30))
+
+        # 开 HASH_GGUF：sha256 不符必须拒绝（不是 pinned revision 的那个文件）
+        state["input"] = [hit]
+        ns["CFG"]["HASH_GGUF"] = True
+        patch("sha256_of", lambda x, deadline=None: "f" * 64)
+        try:
+            ns["_resolve_s4_base"](None)
+            raise AssertionError("sha256 不符时必须拒绝")
+        except ns["GuardError"] as e:
+            assert "sha256 不符" in str(e), e
+        patch("sha256_of", lambda x, deadline=None: pin["sha256"])
+        p, origin, meta = ns["_resolve_s4_base"](None)
+        assert origin == "attached_input" and meta["sha256_checked"] is True
+    finally:
+        patch.undo(); ns["CFG"].update(snap)
+
+
+def test_resolve_s4_base_refuses_without_auto_fetch(ns):
+    """没挂 Input、又没开自动下载 → 明确报错并指向 RUN_S4，不瞎试。"""
+    patch, state = _s4_base_env(ns, Path("/tmp"))
+    snap = {k: ns["CFG"][k] for k in ("BASE_GGUF", "S4_AUTO_FETCH_BASE")}
+    try:
+        ns["CFG"].update(BASE_GGUF="", S4_AUTO_FETCH_BASE=False)
+        try:
+            ns["_resolve_s4_base"](None)
+            raise AssertionError("没有拦住")
+        except ns["GuardError"] as e:
+            assert "S4_AUTO_FETCH_BASE" in str(e) and "RUN_S4" in str(e), e
+        assert state["fetch"] == []
+    finally:
+        patch.undo(); ns["CFG"].update(snap)
+
+
+def test_resolve_s4_base_scratch_download(ns):
+    """第三优先：working 之外的暂存盘 —— 下载不占 20 GB 配额，预检按暂存盘算。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_v5_scratch_")
+    scratch = Path(tmp) / "kaggle-tmp"
+    scratch.mkdir()
+    patch, state = _s4_base_env(ns, tmp)
+    state["scratch"] = [{"path": str(scratch), "free_gb": 500.0,
+                         "total_gb": 500.0, "st_dev": 424242}]
+    snap = {k: ns["CFG"][k] for k in ("BASE_GGUF", "S4_AUTO_FETCH_BASE",
+                                      "S4_RAM_MARGIN_GB")}
+    try:
+        ns["CFG"].update(BASE_GGUF="", S4_AUTO_FETCH_BASE=True,
+                         S4_RAM_MARGIN_GB=4.0)
+        p, origin, meta = ns["_resolve_s4_base"](None)
+        assert origin == "scratch_download", origin
+        assert str(p).startswith(str(scratch)), p
+        assert p.name == ns["S4_PINNED"]["filename"]
+        assert meta["sha256"] == ns["S4_PINNED"]["sha256"]
+        assert len(state["precheck"]) == 1
+        assert str(state["precheck"][0]["root"]) == str(scratch), \
+            "暂存盘的磁盘预检必须按暂存盘算，不能按 working"
+        assert state["precheck"][0]["reserve_gb"] == 4.0
+    finally:
+        patch.undo(); ns["CFG"].update(snap)
+
+
+def test_resolve_s4_base_working_and_guard(ns):
+    """第四优先：working 装得下才下；装不下就给一次性操作说明，不瞎试。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_v5_work_")
+    patch, state = _s4_base_env(ns, tmp)
+    patch("MODEL_DL", Path(tmp) / "dl" / "models")
+    patch("shutil", _FakeShutil(free=500 * 2**30))
+    snap = {k: ns["CFG"][k] for k in ("BASE_GGUF", "S4_AUTO_FETCH_BASE",
+                                      "MIN_FREE_DISK_GB")}
+    try:
+        ns["CFG"].update(BASE_GGUF="", S4_AUTO_FETCH_BASE=True,
+                         MIN_FREE_DISK_GB=5.0)
+        p, origin, meta = ns["_resolve_s4_base"](None)
+        assert origin == "working_download", origin
+        assert str(p).startswith(str(Path(tmp) / "dl")), p
+        assert len(state["precheck"]) == 1 and state["precheck"][0]["root"] is None
+
+        # 磁盘账不过 → GuardError，且消息里带最少点击方案
+        patch("shutil", _FakeShutil(free=2 * 2**30))
+        try:
+            ns["_resolve_s4_base"](None)
+            raise AssertionError("磁盘不够时必须拦住")
+        except ns["GuardError"] as e:
+            msg = str(e)
+            assert "trlab_fetch_bf16.ipynb" in msg, "必须给出一次性操作说明"
+            assert "Add Input" in msg and "Save Version" in msg, msg
+    finally:
+        patch.undo(); ns["CFG"].update(snap)
+
+
+def test_scratch_dirs_same_device_excluded(ns):
+    """暂存盘判定：只认 st_dev 与 working 不同的候选；同设备不算额外空间。"""
+    import os as _os
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_v5_dev_")
+    same = Path(tmp) / "same-dev"
+    other = Path(tmp) / "other-dev"
+    same.mkdir(); other.mkdir()
+    wdev = _os.stat(ns["WORK"]).st_dev
+    GiB = 2 ** 30
+
+    patch = _Patch(ns)
+    patch("os", _FakeOS(_os, {str(same): wdev, str(other): wdev + 1}))
+    try:
+        f = ns["_scratch_dirs"]
+        # ① 只有同设备候选 → 一律不算，哪怕空闲 500 GiB
+        patch("_scratch_candidates", lambda: [same])
+        patch("shutil", _FakeShutil(free=500 * GiB))
+        assert f(100 * GiB) == [], "同设备的'另一个目录'不提供额外空间"
+
+        # ② 加上另一个文件系统 → 只认它，且报出空闲/总量
+        patch("_scratch_candidates", lambda: [same, other])
+        got = f(100 * GiB, margin_gb=4.0)
+        assert len(got) == 1 and got[0]["path"] == str(other), got
+        assert got[0]["free_gb"] == 500.0 and got[0]["st_dev"] == wdev + 1
+
+        # ③ 另一个文件系统但不够大 → 不认（余量要算进去：12 < 10 + 4）
+        patch("shutil", _FakeShutil(free=50 * GiB))
+        assert f(100 * GiB, margin_gb=4.0) == []
+        assert len(f(10 * GiB, margin_gb=4.0)) == 1, "50 GiB 装 10+4 该认"
+        patch("shutil", _FakeShutil(free=12 * GiB))
+        assert f(10 * GiB, margin_gb=4.0) == [], "余量要算进去"
+    finally:
+        patch.undo()
+
+
+def test_s4_output_bytes_estimate(ns):
+    """产物体积估算：两种格式都要估，未知格式按 6.5 GiB 兜底并告警。"""
+    f = ns["_s4_output_bytes"]
+    GiB = 2 ** 30
+    total = f()
+    # 8B 模型：IQ2_XS ≈ 2.4 GiB + IQ4_XS ≈ 4.4 GiB，再加 15% 余量
+    assert 6.0 * GiB < total < 9.0 * GiB, total / GiB
+
+    patch = _Patch(ns)
+    try:
+        patch("FORMATS", ["NOT_A_REAL_TYPE"])
+        assert f() == int(6.5 * GiB), "未知格式必须按 6.5 GiB 兜底"
+    finally:
+        patch.undo()
+
+
+# ---- 需求 6：遗留 Q8_0 回收 / S3 重跑来源判定 ----
+
+def test_reclaim_stale_q8_cache(ns):
+    """imatrix 已验证过 → 上一轮遗留的 Q8_0 只是占盘，必须回收。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_v5_stale_")
+    q8 = Path(tmp) / "Qwen3-8B-Q8_0.gguf"
+    q8.write_bytes(b"x" * 4096)
+    stamp = Path(tmp) / "q8.stamp.json"
+    stamp.write_text("{}", encoding="utf-8")
+    part = q8.with_name(q8.name + ".partial")
+    part.write_bytes(b"x" * 16)
+    imat = Path(tmp) / "imatrix.gguf"
+    imat.write_bytes(b"x" * 16)
+
+    patch = _Patch(ns)
+    patch("_s3_base_path", lambda: q8)
+    patch("_q8_stamp_path", lambda: stamp)
+    patch("resolve_imatrix", lambda: imat)
+    snap = dict(ns["CFG"])
+    try:
+        ns["CFG"]["S4_RECLAIM_Q8_CACHE"] = True
+        # ① 已验证 → 删文件、删 stamp、删 .partial，并报告释放了多少
+        patch("_verify_imatrix",
+              lambda p, deadline=None: {"ok": True, "trust": "pinned_verified"})
+        before = q8.stat().st_size
+        r = ns["_reclaim_stale_q8_cache"](None)
+        assert r is not None and r["freed_bytes"] == before, r
+        assert not q8.exists() and not stamp.exists() and not part.exists()
+        assert "已验证" in r["reason"]
+
+        # ② imatrix 不可信 → 不删（它还是可恢复状态）
+        q8.write_bytes(b"x" * 32)
+        patch("_verify_imatrix",
+              lambda p, deadline=None: {"ok": True, "trust": "unverified"})
+        assert ns["_reclaim_stale_q8_cache"](None) is None
+        assert q8.exists()
+
+        # ③ 找不到 imatrix → 不删
+        patch("resolve_imatrix", lambda: None)
+        assert ns["_reclaim_stale_q8_cache"](None) is None
+        assert q8.exists()
+        patch("resolve_imatrix", lambda: imat)
+
+        # ④ 开关关掉 → 不删
+        ns["CFG"]["S4_RECLAIM_Q8_CACHE"] = False
+        assert ns["_reclaim_stale_q8_cache"](None) is None
+        assert q8.exists()
+    finally:
+        patch.undo(); ns["CFG"].clear(); ns["CFG"].update(snap)
+
+
+def test_s3_base_origin_regression(ns):
+    """v0.4 真 bug 回归：下载路径被写回 CFG['IMATRIX_BASE'] 后，重跑必须仍判
+    auto_download（否则 8.11 GiB 的 Q8_0 永远不回收）。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_v5_origin_")
+    q8 = Path(tmp) / "Qwen3-8B-Q8_0.gguf"
+    q8.write_bytes(b"x" * 32)
+    manual = Path(tmp) / "my-own.gguf"
+    manual.write_bytes(b"x" * 32)
+    stamp = Path(tmp) / "q8.stamp.json"
+    ns["write_json"](stamp, {"sha256": ns["S3_PINNED"]["sha256"],
+                             "bytes": ns["S3_PINNED"]["bytes"],
+                             "written_utc": "2026-10-22T00:00:00+00:00"})
+
+    patch = _Patch(ns)
+    patch("_s3_base_path", lambda: q8)
+    patch("_q8_stamp_path", lambda: stamp)
+    snap = {k: ns["CFG"][k] for k in ("IMATRIX_BASE", "S3_AUTO_FETCH_MODEL",
+                                      "S3_AUTO_FETCH_CALIB")}
+    try:
+        f = ns["_s3_base_origin"]
+        # bug 现场：CFG 被上一轮污染，指向自动下载的落点 + stamp 对得上
+        ns["CFG"].update(IMATRIX_BASE=str(q8), S3_AUTO_FETCH_MODEL=True,
+                         S3_AUTO_FETCH_CALIB=True)
+        origin, meta = f(q8)
+        assert origin == "auto_download", "污染后必须仍判 auto_download"
+        assert meta["origin"] == "cache_or_download" and meta["bytes"]
+
+        # 没有 stamp → 仍然是自动下载（落点本身就是证据）
+        stamp.unlink()
+        origin, meta = f(q8)
+        assert origin == "auto_download" and meta["origin"] == "downloaded_expected"
+
+        # 真的手动文件 → manual，且没有 meta（不许删别人的文件）
+        assert f(manual) == ("manual", None)
+
+        # 没开自动取数 → 一律 manual（保守）
+        ns["CFG"].update(S3_AUTO_FETCH_MODEL=False, S3_AUTO_FETCH_CALIB=False)
+        assert f(q8) == ("manual", None)
+    finally:
+        patch.undo(); ns["CFG"].update(snap)
+
+
+def test_s3_rerun_reclaims_q8(ns):
+    """端到端复现 v0.4 bug：CFG 被污染的重跑，Q8_0 也必须被回收。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_v5_rerun_")
+    orig_out, orig_mdls = ns["OUT"], ns["MDLS"]
+    ns["OUT"] = Path(tmp) / "out"; ns["OUT"].mkdir(parents=True)
+    ns["MDLS"] = Path(tmp) / "models"; ns["MDLS"].mkdir(parents=True)
+    snap_cfg = dict(ns["CFG"])
+    orig_bin = ns["llama_bin"]
+    try:
+        q8, calib, restore = _stub_s3(ns, tmp, imatrix_ok=True)
+        ns["llama_bin"] = lambda name: Path("/fake") / name
+        ns["CFG"].update(S3_AUTO_FETCH_MODEL=True, S3_AUTO_FETCH_CALIB=True,
+                         IMATRIX_BASE=str(q8),      # ← v0.4 bug 现场
+                         IMATRIX_BASE_KIND="q8_0",
+                         CALIB_TXT="", IMATRIX_GGUF="",
+                         S3_SKIP_IF_IMATRIX_OK=False,   # 强制走完整 S3
+                         S3_DELETE_Q8_AFTER=True)
+        try:
+            rec = ns["stage_s3_imatrix"](time.time() + 120)
+        finally:
+            restore(); ns["llama_bin"] = orig_bin
+
+        assert rec["base_origin"] == "auto_download", rec["base_origin"]
+        assert rec["base_download"] is not None
+        assert rec["q8_reclaimed"] is True and rec["q8_reclaimed_bytes"] > 0
+        assert not q8.exists(), "重跑后 Q8_0 必须被回收"
+        assert rec["base_file_present_now"] is False
+        # provenance sidecar 是"新 Session 恢复"的关键，必须落盘
+        side = ns["MDLS"] / "imatrix.provenance.json"
+        assert side.exists(), "imatrix.provenance.json 没写"
+        sc = json.loads(side.read_text(encoding="utf-8"))
+        assert sc["schema"] == 2 and sc["base_repo"] == ns["S3_PINNED"]["repo"]
+        assert sc["base_revision"] == ns["S3_PINNED"]["revision"]
+        assert sc["base_expected_sha256"] == ns["S3_PINNED"]["sha256"]
+    finally:
+        ns["CFG"].clear(); ns["CFG"].update(snap_cfg)
+        ns["OUT"], ns["MDLS"] = orig_out, orig_mdls
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s3_skips_when_imatrix_verified(ns):
+    """需求 3：已有可信 imatrix → 整段跳过，不重下 Q8_0、不重算。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_v5_skip_")
+    imat = Path(tmp) / "imatrix.gguf"
+    imat.write_bytes(b"x" * 16)
+    patch = _Patch(ns)
+    patch("resolve_imatrix", lambda: imat)
+    patch("_verify_imatrix", lambda p, deadline=None: {
+        "ok": True, "trust": "pinned_verified", "sha256": ns["IMATRIX_PINNED"]["sha256"],
+        "bytes": 10701952, "n_tensors": 1008, "why": "sha256 与 pin 一致",
+        "warnings": []})
+    patch("llama_bin", lambda name: Path("/fake") / name)
+
+    def boom(deadline):
+        raise AssertionError("已有 imatrix 时不许再下载 Q8_0")
+
+    patch("_ensure_q8", boom)
+    snap = dict(ns["CFG"])
+    try:
+        ns["CFG"]["S3_SKIP_IF_IMATRIX_OK"] = True
+        rec = ns["stage_s3_imatrix"](time.time() + 60)
+        assert rec["skipped"] is True and rec["reason"] == "imatrix_reuse"
+        assert rec["trust"] == "pinned_verified"
+        assert "provenance" in rec["note"]
+        md = "\n".join(ns["_s3_report_lines"](rec))
+        assert "S3 未运行，复用已有 imatrix" in md
+        assert "pinned_verified" in md
+    finally:
+        patch.undo(); ns["CFG"].clear(); ns["CFG"].update(snap)
+
+
+def test_s3_untrusted_imatrix_reruns(ns):
+    """imatrix 存在但不可信 → 不能跳过，必须重新生成。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_v5_untrust_")
+    imat = Path(tmp) / "imatrix.gguf"
+    imat.write_bytes(b"x" * 16)
+    patch = _Patch(ns)
+    patch("resolve_imatrix", lambda: imat)
+    patch("_verify_imatrix", lambda p, deadline=None: {
+        "ok": True, "trust": "unverified", "sha256": "e" * 64, "bytes": 16,
+        "n_tensors": 3, "why": "对不上", "warnings": []})
+    patch("llama_bin", lambda name: Path("/fake") / name)
+    called = {"q8": False}
+
+    def fake_q8(deadline):
+        called["q8"] = True
+        raise RuntimeError("REACHED_REGENERATE_PATH")
+
+    patch("_ensure_q8", fake_q8)
+    snap = dict(ns["CFG"])
+    try:
+        ns["CFG"]["S3_SKIP_IF_IMATRIX_OK"] = True
+        ns["CFG"]["S3_AUTO_FETCH_MODEL"] = True
+        ns["CFG"]["IMATRIX_BASE"] = ""
+        try:
+            ns["stage_s3_imatrix"](time.time() + 60)
+            raise AssertionError("不可信 imatrix 不该跳过")
+        except RuntimeError as e:
+            assert "REACHED_REGENERATE_PATH" in str(e)
+        assert called["q8"] is True
+    finally:
+        patch.undo(); ns["CFG"].clear(); ns["CFG"].update(snap)
+
+
+# ---- 需求 1：S4 禁止二次量化；S4 的两道门 ----
+
+def test_s4_forbids_requantize_even_when_opted_in(ns):
+    """即使显式设 ALLOW_REQUANTIZE=True，RUN_S4 路线也必须拒绝（不给活路）。"""
+    CFG = ns["CFG"]
+    work = Path(ns["WORK"])
+    snap = {k: CFG[k] for k in ("BASE_GGUF", "BASE_KIND", "IMATRIX_GGUF", "IMATRIX_BASE",
+                                "IMATRIX_BASE_KIND", "ALLOW_REQUANTIZE",
+                                "IMATRIX_ALLOW_UNPINNED")}
+    orig_bin = ns["llama_bin"]
+    patch = _Patch(ns)
+    patch("_reclaim_stale_q8_cache", lambda deadline: None)
+
+    base = work / "s4_requant_base.gguf"
+    ns["gguf_write_synth"](base, [("blk.0.attn_q.weight", (256, 256), 8)])
+    imat = work / "s4_requant_im.gguf"
+    ns["gguf_write_synth"](imat, [("blk.0.attn_q.weight", (256, 256), 0)])
+    CFG.update(BASE_GGUF=str(base), BASE_KIND="q8_0", IMATRIX_GGUF=str(imat),
+               IMATRIX_BASE="", IMATRIX_BASE_KIND="", ALLOW_REQUANTIZE=True,
+               IMATRIX_ALLOW_UNPINNED=True)
+    ns["llama_bin"] = lambda name: (_ for _ in ()).throw(
+        AssertionError("llama_bin 不该被调用：应该在它之前就拦住"))
+    try:
+        ns["stage_s4_quant"](time.time() + 60)
+        raise AssertionError("ALLOW_REQUANTIZE=True 也必须被拒绝")
+    except ns["GuardError"] as e:
+        assert "禁止二次量化" in str(e), e
+        assert "ALLOW_REQUANTIZE 必须保持 False" in str(e), e
+        assert "Qwen3-8B-BF16.gguf" in str(e), e
+    finally:
+        ns["llama_bin"] = orig_bin
+        patch.undo(); CFG.update(snap)
+        for p in (base, imat):
+            if p.exists():
+                p.unlink()
+
+
+def test_s4_requires_imatrix(ns):
+    """没有 imatrix 直接拒：IQ2_XS 没有 imatrix 会被上游 bail out，不做降级。"""
+    patch = _Patch(ns)
+    patch("resolve_imatrix", lambda: None)
+    try:
+        try:
+            ns["stage_s4_quant"](time.time() + 30)
+            raise AssertionError("没有拦住")
+        except ns["GuardError"] as e:
+            assert "找不到 imatrix" in str(e), e
+            assert "S3" in str(e)
+    finally:
+        patch.undo()
+
+
+def test_s4_rejects_unverified_imatrix(ns):
+    """sha256 对不上任何记录的 imatrix：默认拒，显式放行后才继续。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_v5_gate_")
+    imat = Path(tmp) / "imatrix.gguf"
+    imat.write_bytes(b"x" * 16)
+    patch = _Patch(ns)
+    patch("resolve_imatrix", lambda: imat)
+    patch("_verify_imatrix", lambda p, deadline=None: {
+        "ok": True, "trust": "unverified", "sha256": "e" * 64, "bytes": 16,
+        "n_tensors": 3, "why": "没有找到能与 sha256 对上的 provenance 记录",
+        "warnings": []})
+    patch("_reclaim_stale_q8_cache", lambda deadline: None)
+    sentinel = "REACHED_BASE_RESOLUTION"
+
+    def fake_base(deadline):
+        raise RuntimeError(sentinel)
+
+    patch("_resolve_s4_base", fake_base)
+    snap = dict(ns["CFG"])
+    try:
+        ns["CFG"]["IMATRIX_ALLOW_UNPINNED"] = False
+        try:
+            ns["stage_s4_quant"](time.time() + 30)
+            raise AssertionError("不可信 imatrix 没有拦住")
+        except ns["GuardError"] as e:
+            assert "IMATRIX_ALLOW_UNPINNED" in str(e), e
+            assert ns["IMATRIX_PINNED"]["sha256"] in str(e), "要把 pin 值告诉用户"
+
+        ns["CFG"]["IMATRIX_ALLOW_UNPINNED"] = True
+        try:
+            ns["stage_s4_quant"](time.time() + 30)
+            raise AssertionError("没走到 base 解析")
+        except RuntimeError as e:
+            assert sentinel in str(e), "放行后必须继续往下走"
+    finally:
+        patch.undo(); ns["CFG"].clear(); ns["CFG"].update(snap)
+
+
+# ---- 需求 7：S5 用 S4 实际取的 base ----
+
+def test_s4_base_for_s5(ns):
+    """S5 优先分析 S4 实际用的 base（可能在暂存盘或 Input），不是只看 CFG。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_v5_s5_")
+    used = Path(tmp) / "used.gguf"
+    used.write_bytes(b"x" * 16)
+    cfg_base = Path(tmp) / "cfg.gguf"
+    cfg_base.write_bytes(b"x" * 16)
+    patch = _Patch(ns)
+    snap = {k: ns["CFG"][k] for k in ("BASE_GGUF",)}
+    try:
+        patch("_get", lambda name: {"_fairness": {"quant_base": str(used)}}
+              if name == "S4_QUANT" else None)
+        p, src = ns["_s4_base_for_s5"]()
+        assert p == used and src == "from_S4", (p, src)
+
+        patch("_get", lambda name: None)
+        ns["CFG"]["BASE_GGUF"] = str(cfg_base)
+        p, src = ns["_s4_base_for_s5"]()
+        assert p == cfg_base and src == "from_CFG", (p, src)
+
+        ns["CFG"]["BASE_GGUF"] = ""
+        p, src = ns["_s4_base_for_s5"]()
+        assert p is None and src is None, (p, src)
+    finally:
+        patch.undo(); ns["CFG"].update(snap)
+
+
+def test_ram_precheck(ns):
+    """RAM 预检：base + 余量与实测量对比，不够时只警告不拦。"""
+    GiB = 2 ** 30
+    r1 = ns["_ram_precheck"](0, "S4 量化")
+    assert r1 is not None and r1["ram_gb"] > 0
+    assert r1["need_gb"] == round(ns["CFG"]["S4_RAM_MARGIN_GB"], 2), r1
+    r2 = ns["_ram_precheck"](100 * GiB, "S4 量化")
+    assert r2["need_gb"] == round((100 * GiB + ns["CFG"]["S4_RAM_MARGIN_GB"] * GiB)
+                                  / GiB, 2), r2
+    assert r2["need_gb"] > r2["ram_gb"], "100 GiB base 在任何开发机上都该告警"
+
+
+def test_s4_helper_hint(ns):
+    """一次性操作说明必须写清文件名与步骤，且不能多于 6 次点击。"""
+    hint = ns["_s4_helper_notebook_hint"]()
+    for must in ("trlab_fetch_bf16.ipynb", "Internet = On", "Run All",
+                 "Save Version", "Add Input", "BASE_GGUF"):
+        assert must in hint, must
+    assert hint.count("\n") <= 8, "说明要短，超过一屏就等于没有"
+
+
+def test_s4_report_lines_render(ns):
+    """S9 第 5 节：provenance 级必须显式声明，file 级不声明；表格两行。"""
+    f = ns["_s4_report_lines"]
+    common_fair = {
+        "quant_base": "/kaggle/input/x/Qwen3-8B-BF16.gguf",
+        "quant_base_kind": "bf16", "quant_base_origin": "attached_input",
+        "quant_base_download": {"sha256": "a" * 64, "sha256_checked": False},
+        "quant_base_repo": ns["S4_PINNED"]["repo"],
+        "quant_base_revision": ns["S4_PINNED"]["revision"],
+        "imatrix": "/kaggle/working/trlab/models/imatrix.gguf",
+        "imatrix_sha256": ns["IMATRIX_PINNED"]["sha256"],
+        "imatrix_trust": "pinned_verified",
+        "base_scope": "from_high_precision", "verified": True,
+    }
+    r = {"IQ2_XS": {"file_gb": 2.4, "bpw_effective": 2.3125,
+                    "dominant_type": "IQ2_XS", "reused": False, "sha256": "a" * 64},
+         "IQ4_XS": {"file_gb": 4.4, "bpw_effective": 4.25,
+                    "dominant_type": "IQ4_XS", "reused": True, "sha256": "b" * 64},
+         "_fairness": dict(common_fair,
+                           imatrix_base_consistency_level="provenance",
+                           imatrix_base_consistent={
+                               "ok": True, "verified_by": "sha256 + 来源 + 结构三项"})}
+    md = "\n".join(f(r))
+    for must in ("Qwen3-8B-BF16.gguf", "attached_input", "pinned_verified",
+                 "provenance 级", "弱于文件级", "from_high_precision",
+                 "| IQ2_XS | 2.400 |", "| IQ4_XS | 4.400 |"):
+        assert must in md, must
+
+    # file 级：不该出现"Q8_0 已回收"的声明
+    r2 = {"IQ2_XS": r["IQ2_XS"], "IQ4_XS": r["IQ4_XS"],
+          "_fairness": dict(common_fair,
+                            imatrix_base_consistency_level="file",
+                            imatrix_base_consistent={"ok": True, "verified_by": "x"})}
+    md2 = "\n".join(f(r2))
+    assert "文件级" in md2 and "已回收" not in md2, md2
 
 
 # ---------------------------------------------------------------- runner
@@ -2519,6 +3658,36 @@ TESTS = [
     test_s3_q8_not_deleted_when_configured_off,
     test_s3_manual_base_not_touched,
     test_s3_report_lines,
+    test_s4_run_switch_scope,
+    test_s4_pins_are_registered,
+    test_s4_default_off_downloads_nothing,
+    test_verify_imatrix_three_states,
+    test_imatrix_found_in_input_and_candidates,
+    test_imatrix_provenance_records_sidecar_first,
+    test_consistency_provenance_level_ok,
+    test_consistency_structure_failures,
+    test_consistency_provenance_failures,
+    test_consistency_file_level_when_q8_present,
+    test_imatrix_base_does_not_throw_when_reclaimed,
+    test_resolve_s4_base_manual,
+    test_resolve_s4_base_attached_input,
+    test_resolve_s4_base_refuses_without_auto_fetch,
+    test_resolve_s4_base_scratch_download,
+    test_resolve_s4_base_working_and_guard,
+    test_scratch_dirs_same_device_excluded,
+    test_s4_output_bytes_estimate,
+    test_reclaim_stale_q8_cache,
+    test_s3_base_origin_regression,
+    test_s3_rerun_reclaims_q8,
+    test_s3_skips_when_imatrix_verified,
+    test_s3_untrusted_imatrix_reruns,
+    test_s4_forbids_requantize_even_when_opted_in,
+    test_s4_requires_imatrix,
+    test_s4_rejects_unverified_imatrix,
+    test_s4_base_for_s5,
+    test_ram_precheck,
+    test_s4_helper_hint,
+    test_s4_report_lines_render,
 ]
 
 
