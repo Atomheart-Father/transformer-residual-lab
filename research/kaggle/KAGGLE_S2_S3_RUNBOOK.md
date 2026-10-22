@@ -1,6 +1,6 @@
 # Kaggle T4 部署清单：S2 编译 → S3 imatrix → S4 量化
 
-**v1.0.0 更新（2026-10-22）**：**执行方式重构。** notebook 从 253 KB / 28 cells 的巨物缩成 **7.3 KB / 5 cells** 的薄入口，全部逻辑在 `trlab/` 包的 17 个 `.py` 模块里；执行包由引导格按**钉死的 commit** 从公开仓库 sparse fetch（约 200 KB、1–3 秒，`git rev-parse HEAD` 强校验）后 import。**你的操作从六步（取 BF16 notebook → Run All → Save Version → Add Input → 配路径 → 主 notebook）收敛成"一个开关 + Run All"**：改 `RUN_S4 = True`，`Internet = On`，`Run all`。S6–S8 与 SX 默认关闭，要跑就把执行格最后一行改成 `trlab.run(run_s4=True, S6_NLL=True)`。
+**v1.0.0 更新（2026-10-22）**：**执行方式重构。** notebook 从 253 KB / 28 cells 的巨物缩成 **7.3 KB / 5 cells** 的薄入口，全部逻辑在 `trlab/` 包的 16 个 `.py` 模块里；执行包由引导格按**钉死的 commit** 从公开仓库 sparse fetch（约 200 KB、1–3 秒，`git rev-parse HEAD` 强校验）后 import。**你的操作从六步（取 BF16 notebook → Run All → Save Version → Add Input → 配路径 → 主 notebook）收敛成"一个开关 + Run All"**：改 `RUN_S4 = True`，`Internet = On`，`Run all`。S6–S8 与 SX 默认关闭，要跑就把执行格最后一行改成 `trlab.run(run_s4=True, S6_NLL=True)`。
 
 **v0.5.0 的量化链路本身不变**：`RUN_S4 = True` 自动打开 S2 + S3 + S4 + S5，从与 S3 同仓库同 revision 的**原始 BF16** 量化出 `IQ2_XS` / `IQ4_XS`（禁止 Q8_0 二次量化）。已有的 imatrix 会按 sha256 复用，**整段跳过 S3，不重下 8.11 GiB、不重算**。
 

@@ -2,7 +2,7 @@
 
 `trlab_kaggle.ipynb` —— 一个**可直接上传到 Kaggle** 的独立 Notebook，用来在同一份 `Qwen/Qwen3-8B` 上产出 `IQ2_XS` 与 `IQ4_XS`，并比较**真实文件字节**、**配对 NLL**、**有限配对质量**。
 
-当前版本 **v1.0.0**。v1.0 是一次**执行方式重构**（Issue #5）：notebook 本体从 253 KB / 28 cells 的巨物缩成 **7.3 KB / 5 cells** 的薄入口，全部逻辑搬进 `trlab/` 包的 17 个 `.py` 模块；执行包不再靠人工搬运，而是 notebook 的引导格按**钉死的 commit** 从公开仓库 sparse fetch `research/kaggle/trlab/`（约 200 KB、1–3 秒，`git rev-parse HEAD` 强校验）后再 import。用户操作收敛为**一个开关 + Run All**，取代原来的六步人工流程（取 BF16 notebook → Run All → Save Version → Add Input → 配路径 → 主 notebook）。版本史：v0.1 只做环境检查与 smoke；v0.2–v0.2.2 修掉三轮逐 cell 审查的问题（S4 二次量化门槛、`--allow-requantize` 参数位置、S2 工具链预检）；v0.3.x 把 S2 收敛成开关 `RUN_S2` 并记录真实 Kaggle T4 通过；v0.4.0 把 S3 收敛成开关 `RUN_S3`；v0.5.0 把 S4 收敛成开关 `RUN_S4`（从原始 BF16 量化 IQ2_XS/IQ4_XS，禁止 Q8_0 二次量化，imatrix 命中即整段跳过 S3，量化 base 四级自取）。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
+当前版本 **v1.0.0**。v1.0 是一次**执行方式重构**（Issue #5）：notebook 本体从 253 KB / 28 cells 的巨物缩成 **7.3 KB / 5 cells** 的薄入口，全部逻辑搬进 `trlab/` 包的 16 个 `.py` 模块；执行包不再靠人工搬运，而是 notebook 的引导格按**钉死的 commit** 从公开仓库 sparse fetch `research/kaggle/trlab/`（约 200 KB、1–3 秒，`git rev-parse HEAD` 强校验）后再 import。用户操作收敛为**一个开关 + Run All**，取代原来的六步人工流程（取 BF16 notebook → Run All → Save Version → Add Input → 配路径 → 主 notebook）。版本史：v0.1 只做环境检查与 smoke；v0.2–v0.2.2 修掉三轮逐 cell 审查的问题（S4 二次量化门槛、`--allow-requantize` 参数位置、S2 工具链预检）；v0.3.x 把 S2 收敛成开关 `RUN_S2` 并记录真实 Kaggle T4 通过；v0.4.0 把 S3 收敛成开关 `RUN_S3`；v0.5.0 把 S4 收敛成开关 `RUN_S4`（从原始 BF16 量化 IQ2_XS/IQ4_XS，禁止 Q8_0 二次量化，imatrix 命中即整段跳过 S3，量化 base 四级自取）。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
 
 **S2、S3 都已在真实 Kaggle T4 上通过**（S2 见第九之六；S3 于 2026-10-22 跑出 10,701,952 B / 1008 个张量的 imatrix.gguf，sha256 `34062ab6…`，耗时 57.95 s，产物已备份并 pin 进 `IMATRIX_PINNED`）。
 
@@ -32,7 +32,7 @@ S2 → S3 → S4 的操作清单在 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_R
 ```
 research/kaggle/
 ├── trlab_kaggle.ipynb        # 主 notebook（5 cells：2 code + 3 markdown，7.3 KB）
-├── trlab/                    # 执行包：17 个 .py 模块（notebook 只 import 它，不含逻辑）
+├── trlab/                    # 执行包：16 个 .py 模块（notebook 只 import 它，不含逻辑）
 ├── build_notebook.py         # 从 trlab/ 生成短 notebook（--embed 可内嵌执行包）
 ├── trlab_fetch_bf16.ipynb   # 例外降级：一次性取数 notebook，把 pinned BF16 下成 Kaggle Output（v0.5）
 ├── KAGGLE_S2_S3_RUNBOOK.md   # S2 编译 → S3 imatrix → S4 量化的操作清单（网页 GUI 视角）
@@ -788,7 +788,7 @@ v1.0 新增的 10 项架构回归（对应 Issue #5 的验收清单）：
 | 测试 | 钉住的问题 |
 |---|---|
 | `test_import_has_no_side_effects` | import trlab 不建目录、不打印、不联网 |
-| `test_each_module_imports_alone` | 无循环 import：16 个子模块各自单独 import |
+| `test_each_module_imports_alone` | 无循环 import：15 个子模块各自单独 import |
 | `test_switches_off_change_nothing` | 三开关全 False 时 CFG/STAGES 一个字段都不改 |
 | `test_switch_s4_expands_plan` | `RUN_S4=True` 只开 S2–S5，S6–S8/SX 不开，`BASE_GGUF` 留空 |
 | `test_run_returns_plan_and_stages` | 入口返回 plan + 各阶段状态 |
@@ -949,7 +949,7 @@ v1.0 新增的 10 项架构回归（对应 Issue #5 的验收清单）：
 
 | 验证项 | 结果 |
 |---|---|
-| 16 个子模块全部 `compile()` 通过（v1.0 起对象是 `trlab/*.py`，不再是 notebook cell） | ✅ |
+| 16 个 `.py` 文件全部 `compile()` 通过（v1.0 起对象是 `trlab/*.py`，不再是 notebook cell） | ✅ |
 | import 包后执行默认阶段（S0/S1/S9） | ✅ |
 | **默认 S0 / S1 / S9 三个都 `status=ok`** | ✅ S9 产出 2.0 KB `report.md` + 6.0 KB `results.json` |
 | 第二次执行 | ✅ 全部 `RESUME`（S9 例外，强制重跑） |
