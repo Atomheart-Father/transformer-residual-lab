@@ -1,11 +1,14 @@
 # Kaggle T4 部署清单：S2 编译 → S3 imatrix → S4 量化
 
-**v0.5.0 更新（2026-10-22）**：**S4 已一键化。** 唯一操作开关是 `RUN_S4 = True` —— 它自动打开 S2 + S3 + S4 + S5，从与 S3 同仓库同 revision 的**原始 BF16** 量化出 `IQ2_XS` / `IQ4_XS`（禁止 Q8_0 二次量化），S6–S8 与 SX 全部保持关闭。已有的 imatrix 会按 sha256 复用，**整段跳过 S3，不重下 8.11 GiB、不重算**。
+**v1.0.0 更新（2026-10-22）**：**执行方式重构。** notebook 从 253 KB / 28 cells 的巨物缩成 **7.3 KB / 5 cells** 的薄入口，全部逻辑在 `trlab/` 包的 17 个 `.py` 模块里；执行包由引导格按**钉死的 commit** 从公开仓库 sparse fetch（约 200 KB、1–3 秒，`git rev-parse HEAD` 强校验）后 import。**你的操作从六步（取 BF16 notebook → Run All → Save Version → Add Input → 配路径 → 主 notebook）收敛成"一个开关 + Run All"**：改 `RUN_S4 = True`，`Internet = On`，`Run all`。S6–S8 与 SX 默认关闭，要跑就把执行格最后一行改成 `trlab.run(run_s4=True, S6_NLL=True)`。
+
+**v0.5.0 的量化链路本身不变**：`RUN_S4 = True` 自动打开 S2 + S3 + S4 + S5，从与 S3 同仓库同 revision 的**原始 BF16** 量化出 `IQ2_XS` / `IQ4_XS`（禁止 Q8_0 二次量化）。已有的 imatrix 会按 sha256 复用，**整段跳过 S3，不重下 8.11 GiB、不重算**。
 
 **状态说明**：
 - **S2 已被真实 Kaggle 运行完整验证**（v0.3.2，27 分 52 秒，四个二进制就位，见用户回传 `S2_BUILD-3.json`）。
 - **S3 已被真实 Kaggle 运行完整验证**（2026-10-22，imatrix 10,701,952 B / 1008 张量 / 57.95 s，`-ngl 99` 全上 GPU，产物 sha256 `34062ab6…` 已 pin 进 `IMATRIX_PINNED`）。
-- **S4/S5 的一键化链路只有 CPU/mock 测试覆盖（98 项全通过），尚未在真实 Kaggle 上跑过。** BF16 下载、`llama-quantize` 的 CPU 耗时与峰值 RAM、S5 的真实字节账都还是**估算/待核**，本文一律如实标注。
+- **S4/S5 的一键化链路只有 CPU/mock 测试覆盖（108 项全通过），尚未在真实 Kaggle 上跑过。** BF16 下载、`llama-quantize` 的 CPU 耗时与峰值 RAM、S5 的真实字节账都还是**估算/待核**，本文一律如实标注。
+- **v1.0 的引导链路已本地验证**（干净目录真实冷启动：GitHub fetch → 校验 → import → S0/S1/S9 → 产物落盘），**未在 Kaggle 上实测**；它要求 GitHub 仓库保持 public（`--embed` 内嵌变体可兜底）。
 
 S3 的设计 rationale 与五个决策点的落点在 [`KAGGLE_S3_DESIGN.md`](./KAGGLE_S3_DESIGN.md)：**已实现。**
 
@@ -100,7 +103,9 @@ trlab_fetch_bf16.ipynb（Internet=On，下 BF16 15.26 GiB）──Save Version�
 
 两个文件必须分两个 notebook：8.11 + 15.26 = 23.37 GiB > 19.5 GiB，同一个 working 装不下。
 
-**v0.5.0 起 BF16 的取数 notebook 已经随主 notebook 一起交付** —— `trlab_fetch_bf16.ipynb`（3 个 cell：下载 pinned BF16 → sha256 校验 → Save Version 提示），不需要你自己新建。点击步骤见 6.1。Q8_0 那条路由于 S3 已一键化也不再需要手动取。
+**这条六步流程从 v1.0.0 起不再是默认用法**，只在一种情况下需要：Kaggle **没有**提供 working 之外的暂存盘（或暂存盘也装不下 15.26 GiB），S4 会在下载前以 `GuardError` 停下并提示这一条降级路径。`trlab_fetch_bf16.ipynb`（3 个 cell：下载 pinned BF16 → sha256 校验 → Save Version 提示）仍随主 notebook 一起交付，不需要你自己新建；点击步骤见 6.1。Q8_0 那条路由于 S3 已一键化不再需要手动取。
+
+**v1.0.0 优先尝试的零操作路径**：S4 的 `scratch_download` 分支会枚举候选挂载点，只认 `st_dev` 与 `/kaggle/working` **不同**的候选（同设备不同路径不算额外空间，避免把 19.07 GiB 算两遍），探测到足够空间就直接下到那里并校验；暂存盘容量 Kaggle 官方没给数字，所以是运行时探测而不是预设值。
 
 **取数 notebook 的代码**（万一要自己新建，代码长这样）：
 
@@ -328,7 +333,7 @@ RUN_S4 = False      # 想一路做到 IQ2_XS/IQ4_XS 就改这个（见第六节�
 
 ---
 
-## 六、S4：一键量化（v0.5.0，改一个开关）
+## 六、S4：一键量化（v1.0.0：一个开关 + Run All）
 
 ### 6.0 唯一操作开关
 
@@ -337,6 +342,8 @@ RUN_S4 = True
 ```
 
 它自动打开 S2 + S3 + S4 + S5，S6–S8 与 SX 全部保持关闭。**不设 `BASE_GGUF`** —— 量化 base 由 S4 自己按优先级取。已有的 `imatrix.gguf` 只要 sha256 与 `IMATRIX_PINNED`（`34062ab6…`）一致，S3 就整段跳过：不重下 8.11 GiB 的 Q8_0、不重算 58 秒的 imatrix。
+
+完整操作只有三步：上传 7.3 KB 的 `trlab_kaggle.ipynb` → 把开关格改成 `RUN_S4 = True`、`Settings → Internet = On` → `Run All`。第二个代码格会自己从公开仓库取执行包（约 200 KB、1–3 秒，校验 commit 后 import），不需要 Save Version、Add Input 或配任何路径。
 
 ### 6.1 BF16 的一次性操作（**最少点击：6 次**）
 
@@ -472,6 +479,9 @@ S3 成功后 Q8_0 会被回收（8.11 GiB），所以 S4 **不再要求**读 ima
 16. ~~`-DGGML_CUDA_NO_VMM=ON` 只跨过 Generate 阶段~~ **已被实测取代（v0.3.2）**：build 阶段同样通过。仍未观测：build 目录大小、峰值 RAM。
 17. **tarball 源码没有 `.git`**，自动下载路径记 `commit_source="pinned_tarball"` + `commit_verified=true` —— 它证明"这份 tar.gz 的 sha256 与预登记值一致"，**不等于** git 校验。复用二进制时只能是 `declared`。
 18. **预登记 sha256 本身是自证的**：它写在 notebook 里，防"上游文件被替换 / 网络返回错误页面"，防不了"notebook 里的值被改坏"。首次使用请在 S3/S4 结果里核对那串 sha256 与 3.2 表格一致。
+19. **v1.0 的引导格未在真实 Kaggle 上跑过**（本地已验证）：GitHub 匿名 sparse fetch、`rev-parse` 强校验、stamp 复用都在干净目录实测通过，但 Kaggle 镜像里 `git` 的版本与 `core.sparseCheckout` 支持情况、以及 Kaggle 出口到 github.com 的带宽/限流未实测。失败时的报错信息会说明原因，`--embed` 内嵌变体可绕过仓库依赖。
+20. **仓库转私有后匿名 fetch 会失效**。当前 GitHub 仓库是 public（用户 2026-10-22 设为公开）。若之后转回私有，用 `python3 build_notebook.py --embed` 生成内嵌执行包的版本，或在 Kaggle 环境里配好身份。
+21. **Kaggle 上重复 `Run All` 的 stamp 复用未实测**：同一 Session 内第二次执行应命中 `_trlab_src/.trlab_commit` 直接复用、不重新 fetch；这是本地验证过的逻辑，Kaggle 上的 `/kaggle/working` 持久化行为（第 7 条）会叠加影响。
 
 ### 已被真实 Kaggle 运行验证的部分（v0.3.0–v0.5.0，2026-10-21/22）
 
@@ -481,6 +491,14 @@ S3 成功后 Q8_0 会被回收（8.11 GiB），所以 S4 **不再要求**读 ima
 4. **S2 完整通过** —— 27 分 52 秒，四个二进制就位，S2 后 working 剩 19.07 GiB，`commit_source=pinned_tarball` + `commit_verified=true`。
 5. **S3 完整通过** —— Q8_0（8,709,919,168 B）下载并校验、校准语料转换、`llama-imatrix` 57.95 s 产出 10,701,952 B / 1008 张量、`-ngl 99` 全上 GPU（显存 14.56 GiB）、Q8_0 回收、provenance 落盘。产物 sha256 `34062ab6…` 已 pin 进 `IMATRIX_PINNED`。
 6. **v0.4 真实运行暴露的两个真 bug 已修** —— `base_origin` 误记 `manual` 导致 Q8_0 未回收（`_s3_base_origin()` 改为看路径与 stamp）；`_base_consistency()` 要求读已回收文件（改为 file / provenance 两级）。
+
+### 已在本地验证的部分（v1.0.0，2026-10-22，非 Kaggle）
+
+1. **真实冷启动**：干净目录执行 notebook 的两个代码格 —— GitHub sparse fetch 钉 commit（约 200 KB、1–3 秒）→ `git rev-parse HEAD` 强校验 → `import trlab` → S0/S1/S9 全部 `status=ok` → `report.md` / `results.json` 落盘，全程约 3 秒。
+2. **取到的包与本地 `trlab/` 逐字节一致**（`diff -r` 无差异）；同一 Session 二次执行命中 stamp 直接复用，不重新 fetch。
+3. **内嵌回退**：把 `SRC_URL` 指向不存在路径 → 三次 fetch 失败 → 自动解压 notebook 内嵌包（sha256 校验通过）→ 同样能 import；把 `_BUNDLE_SHA` 改坏 → fail closed，不解压、不 import。
+4. **108 项 CPU 回归**（不联网、约 40 秒），含 10 项 v1.0 架构回归；其中 3 项 bootstrap 测试用本地 git 仓当"公开仓库"，保持离线。
+5. **修掉的两个 v1.0 真 bug**：内嵌包解压落点少了 `research/kaggle/trlab` 层级（回退路径 import 失败）；`run(**overrides)` 不写 STAGES 导致 S6–S8/SX 在薄 notebook 里无入口。
 
 ---
 
@@ -492,10 +510,14 @@ Kaggle 的每日 GPU 配额、单会话时长上限、并发会话数、存储�
 
 ## 十、下一步
 
-改一个开关：`RUN_S4 = True` →（第一次）按 6.1 用 `trlab_fetch_bf16.ipynb` 把 BF16 挂成只读 Input → `Internet=On` → `Run all` → 核对 5.4 与 6.6 两份清单 → 停下。
+改一个开关：上传 7.3 KB 的 `trlab_kaggle.ipynb` → 把 `RUN_S4 = False` 改成 `RUN_S4 = True` → `Settings → Internet = On` → `Run all` → 核对 5.4 与 6.6 两份清单 → 停下。
 
-**只想做到 imatrix 为止**就改 `RUN_S3 = True`（6.1 的一次性操作可以整个跳过）。
+**唯一可能需要的一次性操作**：如果 Kaggle 没有 working 之外的暂存盘，按 6.1 用 `trlab_fetch_bf16.ipynb` 把 BF16 挂成只读 Input（6 次点击，之后每个 Session 零点击）。有暂存盘就全自动，这一步也会被省掉。
+
+**只想做到 imatrix 为止**就改 `RUN_S3 = True`（BF16 的一次性操作可以整个跳过）。
 
 **从零开始的全新 session 也走同一条路**：notebook 会自己发现没有二进制、自己下源码、自己编（约 28 分钟）、自己下 Q8_0、自己算 imatrix（已有可信 imatrix 就跳过）、自己按优先级取 BF16。中间任何一步失败都会停在那一格并给人话，不会带着残缺状态往下跑。
+
+**执行包不在 notebook 里**：第二个代码格按钉死的 commit 从公开仓库 sparse fetch `research/kaggle/trlab/`（约 200 KB）。同一 Session 重复 `Run All` 会命中 stamp 直接复用。**仓库必须保持 public**；否则用 `python3 research/kaggle/build_notebook.py --embed` 生成内嵌执行包的版本。
 
 **不要反复点 `Run All` 去"推进"。** 默认开关下 S4–S8 是关的，`Run All` 不会真的跑量化，但它会一路执行到 S9 并重新生成报告 —— 报告里那些"未运行"的段落很容易被误读成"全部跑完了"。逐段执行，每段对着清单看一眼。S4 成功后建议 **Save Version**，这样两个 GGUF 与记录都进版本，下次开会话不用重量化。

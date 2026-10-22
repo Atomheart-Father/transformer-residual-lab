@@ -2,11 +2,11 @@
 
 `trlab_kaggle.ipynb` —— 一个**可直接上传到 Kaggle** 的独立 Notebook，用来在同一份 `Qwen/Qwen3-8B` 上产出 `IQ2_XS` 与 `IQ4_XS`，并比较**真实文件字节**、**配对 NLL**、**有限配对质量**。
 
-当前版本 **v0.5.0**。首版（v0.1）只做环境检查与短时 smoke test；v0.2 修掉了一轮逐 cell 审查提出的 3 个 P0 + 4 个 P1；v0.2.1 修了 S4 的两个 P0（二次量化门槛、产物复用不看指纹）和 S9 的 rho 符号；v0.2.2 修了 `--allow-requantize` 参数位置、S9 快照里 `status=null` 的自相矛盾，并给 S2 加了工具链预检与两个编译期开关；v0.3.0 把 S2 收敛成一个开关 `RUN_S2`；v0.3.1 热修真实 Kaggle 失败（`CUDA::cuda_driver` target 找不到 → 默认 `-DGGML_CUDA_NO_VMM=ON`，并修掉把该错误误判成"找不到 nvcc"的分类器）；v0.3.2 记录 S2 已在真实 Kaggle T4 上完整通过（27 分 52 秒，四个二进制就位）；v0.4.0 把 S3 收敛成开关 `RUN_S3`（二进制探活三档 + Q8_0/校准语料单副本下载 + `-ngl` OOM 降级 + 先记录后回收）；**v0.5.0：S4 一键量化，唯一开关 `RUN_S4 = True`** —— 从与 S3 同仓库同 revision 的**原始 BF16**量化出 IQ2_XS / IQ4_XS（禁止 Q8_0 二次量化），imatrix 已验证过就整段跳过 S3，Q8_0 被回收后改用 provenance 级同源核验，量化 base 由 S4 按 `/kaggle/input` 已挂 > working 外暂存盘 > working 四级优先级自取，S5 的真实字节/bpw 统计随之打开。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
+当前版本 **v1.0.0**。v1.0 是一次**执行方式重构**（Issue #5）：notebook 本体从 253 KB / 28 cells 的巨物缩成 **7.3 KB / 5 cells** 的薄入口，全部逻辑搬进 `trlab/` 包的 17 个 `.py` 模块；执行包不再靠人工搬运，而是 notebook 的引导格按**钉死的 commit** 从公开仓库 sparse fetch `research/kaggle/trlab/`（约 200 KB、1–3 秒，`git rev-parse HEAD` 强校验）后再 import。用户操作收敛为**一个开关 + Run All**，取代原来的六步人工流程（取 BF16 notebook → Run All → Save Version → Add Input → 配路径 → 主 notebook）。版本史：v0.1 只做环境检查与 smoke；v0.2–v0.2.2 修掉三轮逐 cell 审查的问题（S4 二次量化门槛、`--allow-requantize` 参数位置、S2 工具链预检）；v0.3.x 把 S2 收敛成开关 `RUN_S2` 并记录真实 Kaggle T4 通过；v0.4.0 把 S3 收敛成开关 `RUN_S3`；v0.5.0 把 S4 收敛成开关 `RUN_S4`（从原始 BF16 量化 IQ2_XS/IQ4_XS，禁止 Q8_0 二次量化，imatrix 命中即整段跳过 S3，量化 base 四级自取）。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
 
 **S2、S3 都已在真实 Kaggle T4 上通过**（S2 见第九之六；S3 于 2026-10-22 跑出 10,701,952 B / 1008 个张量的 imatrix.gguf，sha256 `34062ab6…`，耗时 57.95 s，产物已备份并 pin 进 `IMATRIX_PINNED`）。
 
-**S4/S5 的一键化链路只有 CPU/mock 测试覆盖（98 项全通过），尚未在真实 Kaggle 上跑过。** BF16 有 15.26 GiB，`/kaggle/working` 只有 20 GB，所以第一次跑 `RUN_S4=True` 前需要把 BF16 挂成只读 Input —— 最少点击方案见 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md) 第 6 节。
+**v1.0 已本地验证 / 尚未验证的边界**：短 notebook 生成器、钉 commit sparse fetch 引导（已在干净目录真实冷启动跑通：GitHub → import → S0/S1/S9 → 产物落盘，全程约 3 秒）、`--embed` 内嵌回退与 sha256 篡改 fail-closed、108 项 CPU 测试（不联网）。**尚未在真实 Kaggle 上跑过**：S4/S5 一键链路本身，以及 BF16 的 15.26 GiB 下载、`llama-quantize` 的 CPU 耗时与峰值 RAM。BF16 与两个产物（≈ 6.7 GiB）放不进 20 GB 的 `/kaggle/working`（15.26 + 2.36 + 4.34 = 21.96 GiB），所以第一次跑 `RUN_S4=True` 前需要把 BF16 挂成只读 Input —— 最少点击方案见 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md) 第 6 节；若 Kaggle 提供了 working 之外的暂存盘，notebook 会自己探测并直接下到那里。
 
 S2 → S3 → S4 的操作清单在 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md)：以**一页一步网页操作**开头。本文件讲"为什么"，那份讲"怎么做"。
 
@@ -31,33 +31,35 @@ S2 → S3 → S4 的操作清单在 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_R
 
 ```
 research/kaggle/
-├── trlab_kaggle.ipynb        # 主 notebook（28 cells：16 code + 12 markdown）
-├── trlab_fetch_bf16.ipynb   # 一次性取数 notebook：把 pinned BF16 下成 Kaggle Output（v0.5）
+├── trlab_kaggle.ipynb        # 主 notebook（5 cells：2 code + 3 markdown，7.3 KB）
+├── trlab/                    # 执行包：17 个 .py 模块（notebook 只 import 它，不含逻辑）
+├── build_notebook.py         # 从 trlab/ 生成短 notebook（--embed 可内嵌执行包）
+├── trlab_fetch_bf16.ipynb   # 例外降级：一次性取数 notebook，把 pinned BF16 下成 Kaggle Output（v0.5）
 ├── KAGGLE_S2_S3_RUNBOOK.md   # S2 编译 → S3 imatrix → S4 量化的操作清单（网页 GUI 视角）
 ├── KAGGLE_S3_DESIGN.md       # S3 一键化的设计 rationale 与五个决策点的落点（已实现）
-├── test_trlab.py             # CPU-only 回归测试（98 项），不联网、不需要 GPU / llama.cpp
+├── test_trlab.py             # CPU-only 回归测试（108 项），不联网、不需要 GPU / llama.cpp
 └── README.md                 # 本文件
 ```
 
-`test_trlab.py` **不是** notebook 的副本：它把 `trlab_kaggle.ipynb` 里所有 code cell 抽出来 exec，再对函数做断言。改了 notebook 就跑得出来。
+`test_trlab.py` **不是** notebook 的副本：它直接 **import `trlab/` 包**（不解析 notebook 字符串），在临时工作目录里补齐默认三阶段后对函数做断言。改了 `trlab/` 就跑得出来。notebook 本身另有结构测试钉住"必须薄"：≤5 cells、<20 KB、钉的 commit 必须在仓库历史里、默认不含内嵌大包。
 
 ---
 
-## 三、三步上手
+## 三、上手：一个开关 + Run All
 
-1. Kaggle → `File` → `Import Notebook` → 上传 `trlab_kaggle.ipynb`
+1. Kaggle → `File` → `Import Notebook` → 上传 `trlab_kaggle.ipynb`（7.3 KB）
 2. 右侧 `Settings`：`Accelerator` = **GPU T4 ×2**（Notebook 只用第 0 张，第二张不会自动用上）；`Internet` = **Off**（默认不需要联网）
-3. 直接 `Run All`。默认只跑 `S0_ENV` / `S1_SMOKE` / `S9_REPORT`，约 2–4 分钟，**不碰任何大文件、不联网**。
+3. 直接 `Run All`。第二个代码格会自己从公开仓库取执行包（约 200 KB、1–3 秒，校验 commit 后 import），然后只跑 `S0_ENV` / `S1_SMOKE` / `S9_REPORT`，约 2–4 分钟，**不碰任何大文件**。
 
-**要把 imatrix 一起做出来**（v0.4.0 起只改一个开关，**不需要手动先跑 S2，不需要准备任何 Dataset**）：
+**要把 imatrix 一起做出来**（只改一个开关，**不需要手动先跑 S2，不需要准备任何 Dataset**）：
 
 1. 找到 `RUN_S3 = False` 这一行，改成 `RUN_S3 = True`
 2. 右侧 `Settings` → `Internet` = **On**
 3. `Run` → `Run all`
 
-notebook 会自己按顺序做：探活四个 llama.cpp 二进制（在就复用，丢了就自动下载 pinned 源码重编，约 28 分钟）→ 磁盘预检 → 下载 pinned 的 Q8_0（8,709,519,168 B）→ 下载 wikitext train parquet 并转纯文本 → 按显存余量选 `-ngl`（OOM 会逐级降）→ 跑 `llama-imatrix` → 验证产物 → 写 provenance → 才删掉 Q8_0 回收磁盘。**S4–S8 与 SX 一律保持关闭。**
+notebook 会自己按顺序做：探活四个 llama.cpp 二进制（在就复用，丢了就自动下载 pinned 源码重编，约 28 分钟）→ 磁盘预检 → 下载 pinned 的 Q8_0（8,709,919,168 B）→ 下载 wikitext train parquet 并转纯文本 → 按显存余量选 `-ngl`（OOM 会逐级降）→ 跑 `llama-imatrix` → 验证产物 → 写 provenance → 才删掉 Q8_0 回收磁盘。**S4–S8 与 SX 一律保持关闭。**
 
-**要把 IQ2_XS / IQ4_XS 一起做出来**（v0.5.0，只改一个开关）：
+**要把 IQ2_XS / IQ4_XS 一起做出来**（只改一个开关）：
 
 1. 找到 `RUN_S4 = False` 这一行，改成 `RUN_S4 = True`
 2. 右侧 `Settings` → `Internet` = **On**
@@ -65,11 +67,13 @@ notebook 会自己按顺序做：探活四个 llama.cpp 二进制（在就复用
 
 S2/S3/S4/S5 会一条龙跑完。**唯一的例外**：BF16 有 15.26 GiB，与两个产物（≈ 6.7 GiB）放不进 20 GB 的 `/kaggle/working`（15.26 + 2.36 + 4.34 = 21.96 GiB），所以第一次跑之前要先用附带的 `trlab_fetch_bf16.ipynb` 把 BF16 变成只读 Input（6 次点击，之后每个 Session 都零点击，见 Runbook 第 6 节）。如果 Kaggle 提供了 working 之外的暂存盘，notebook 会自己探测到并直接下到那里，这一次性操作也可以省掉。
 
-`RUN_S4 = False` 是默认值，且 `_apply_run_switches()` 在三个开关都 `False` 时**一个字段都不改** —— 导入 notebook 或误点 `Run All` 都不会悄悄联网，更不会下 8 GB / 15 GB。想下载必须显式改这一行，由 `test_s2_default_off_no_network` / `test_s3_run_switch_scope` / `test_s4_run_switch_scope` 三重钉住。
+三个开关默认都是 `False`，且 `_apply_run_switches()` 在三个开关都 `False` 时**一个字段都不改** —— 导入 notebook 或误点 `Run All` 都不会悄悄联网，更不会下 8 GB / 15 GB。想下载必须显式改这一行，由 `test_switches_off_change_nothing` / `test_switch_s4_expands_plan` 等测试钉住。
 
-**只想编 llama.cpp、先不碰模型**（v0.3.0 路线）：把 `RUN_S2 = False` 改成 `RUN_S2 = True`，`Internet = On`，`Run all`。约 15–30 分钟（含编译，**估算值**）。
+**只想编 llama.cpp、先不碰模型**：把 `RUN_S2 = False` 改成 `RUN_S2 = True`，`Internet = On`，`Run all`。约 15–30 分钟（含编译，**估算值**）。
 
-跑完后读 `S0_ENV` 的输出，它会列出 `/kaggle/input` 下每个 Dataset 的文件数、大小、以及**所有 `.gguf` 的完整路径**。S4–S8 仍需要你把路径抄进配置 cell 的 `CFG` 再逐段执行 —— 只有 S2/S3 是一键的。
+**S6–S8 与 SX**（配对 NLL / 质量检查 / BF16 锚点 / 第三方量化探索）默认关闭，打开方式是把执行格最后一行改成 `trlab.run(run_s4=True, S6_NLL=True)` —— 阶段名直接当关键字参数传（见第十节 `test_overrides_route_stages_vs_cfg`）。它们各自还需要额外输入（评测语料 / 高精度 GGUF / 第三方 GGUF），见第九节。
+
+**执行包从哪来**：引导格按钉死的 commit 从公开仓库 sparse fetch `research/kaggle/trlab/`，只取这一个子目录（约 200 KB）。同一 Session 重复 `Run All` 会直接复用盘上的包（stamp 命中），不重新下载。仓库需要保持 public；`--embed` 变体（`python3 build_notebook.py --embed`）可把同一份包 base64 内嵌进 notebook，仓库不可匿名读时自动回退，sha256 校验不过就 fail closed。
 
 ---
 
@@ -764,7 +768,7 @@ S3 按设计会回收 8.11 GiB 的 Q8_0，所以 `_base_consistency()` 要求"�
 
 ### 测试
 
-新增 30 项 mock 回归，`test_trlab.py` 总计 **98 项**。除上表各分支外还覆盖：开关作用域（只开 S2/S3/S4/S5）、默认全关一个字段都不改、pin 值防手滑、暂存盘 `st_dev` 判定（同设备不算）、磁盘算术拒绝、遗留 Q8_0 回收三态、S3 跳过/重生成、S4 两道门（无 imatrix / 不可信）、S5 用 S4 实际取的 base、报告行渲染。
+新增 30 项 mock 回归，`test_trlab.py` 到此为止 **98 项**（v1.0 又加 10 项架构回归，现为 **108 项**）。除上表各分支外还覆盖：开关作用域（只开 S2/S3/S4/S5）、默认全关一个字段都不改、pin 值防手滑、暂存盘 `st_dev` 判定（同设备不算）、磁盘算术拒绝、遗留 Q8_0 回收三态、S3 跳过/重生成、S4 两道门（无 imatrix / 不可信）、S5 用 S4 实际取的 base、报告行渲染。
 
 **这一轮还抓到 1 个真 bug**：`stage_s4_quant` 里 `imatrix_base_kind` 变量名笔误（`imat_base_kind` vs `imatrix_base_kind`）→ `NameError`，由 `test_t4_split_base_path` 抓出。
 
@@ -777,7 +781,24 @@ S3 按设计会回收 8.11 GiB 的 Q8_0，所以 `_base_consistency()` 要求"�
 python3 research/kaggle/test_trlab.py
 ```
 
-不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。它在一个临时目录里把 notebook 的 16 个 code cell 按顺序 exec 一遍，然后跑 98 项断言。当前结果：**98/98 通过，约 30 秒**。
+不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。v1.0 起它**直接 import `trlab/` 包**（不再解析 notebook 字符串），在临时工作目录里补齐默认三阶段，然后跑 108 项断言。当前结果：**108/108 通过，约 40 秒**。
+
+v1.0 新增的 10 项架构回归（对应 Issue #5 的验收清单）：
+
+| 测试 | 钉住的问题 |
+|---|---|
+| `test_import_has_no_side_effects` | import trlab 不建目录、不打印、不联网 |
+| `test_each_module_imports_alone` | 无循环 import：16 个子模块各自单独 import |
+| `test_switches_off_change_nothing` | 三开关全 False 时 CFG/STAGES 一个字段都不改 |
+| `test_switch_s4_expands_plan` | `RUN_S4=True` 只开 S2–S5，S6–S8/SX 不开，`BASE_GGUF` 留空 |
+| `test_run_returns_plan_and_stages` | 入口返回 plan + 各阶段状态 |
+| `test_overrides_route_stages_vs_cfg` | 阶段名进 STAGES、CFG 键不进 STAGES（薄 notebook 打开 S6–S8 的唯一入口） |
+| `test_generated_notebook_is_thin` | notebook ≤5 cells / <20 KB / 钉的 commit 在仓库历史里 / 默认无内嵌大包 |
+| `test_bootstrap_fetch_verify_reuse` | 冷启动：sparse fetch + `rev-parse` 强校验 + 同 Session 复用 + 逐字节一致 |
+| `test_bootstrap_embedded_fallback` | 仓库不可读时回退内嵌包（sha256 校验后解压） |
+| `test_bootstrap_embedded_sha_guard` | 内嵌包 sha 标注被篡改 → fail closed，不静默解压 |
+
+后三项用一个本地 git 仓当"公开仓库"（`build_notebook.REPO_URL` 指向本地路径），所以整套测试保持离线。真实 GitHub 冷启动（fetch 9ebf858 → import → S0/S1/S9 → 产物落盘，约 3 秒）已手工验证过，不放进自动测试（避免联网）。
 
 | 测试 | 钉住的问题 |
 |---|---|
@@ -928,8 +949,8 @@ python3 research/kaggle/test_trlab.py
 
 | 验证项 | 结果 |
 |---|---|
-| 16 个 code cell 全部 `compile()` 通过 | ✅ |
-| 按顺序执行全部 cell（默认阶段） | ✅ 16/16 |
+| 16 个子模块全部 `compile()` 通过（v1.0 起对象是 `trlab/*.py`，不再是 notebook cell） | ✅ |
+| import 包后执行默认阶段（S0/S1/S9） | ✅ |
 | **默认 S0 / S1 / S9 三个都 `status=ok`** | ✅ S9 产出 2.0 KB `report.md` + 6.0 KB `results.json` |
 | 第二次执行 | ✅ 全部 `RESUME`（S9 例外，强制重跑） |
 | 全阶段开启但无任何输入文件 | ✅ 8 个阶段干净 `GuardError`，S9 仍出报告，无 traceback 崩溃 |
@@ -954,9 +975,11 @@ python3 research/kaggle/test_trlab.py
 | S2 version 探测 | ✅ stderr 回退 + 双流皆空时给 rc（`_probe_version`） |
 | S2 自动取源码（mock） | ✅ 默认不联网；只开 S2；digest 不符拒解压并删包；`..` 条目拒解压；三级缓存不重下；目录名不符拒解压；`pinned_tarball` 校验档；六种失败症状各有处置；真断网时消息含 "Internet = On" |
 | **S3 一键化（mock，v0.4.0）** | ✅ 24 项新回归全通过：二进制三档复用 + `--version` 真跑 + 不可执行被拒；S2 失败拦下 S3；掉线重启复用断点；磁盘不足拒下；四重完整性校验；`.partial` 续传 / 坏 partial 重下 / 网络失败保留断点 / 重复运行不重下；`-ngl` 阶梯与 OOM 降级；Q8_0 只在记录写盘后删 / 失败保留 / 关开关时保留；手动 base 不碰不删；S9 报告行渲染 |
-| `test_trlab.py` | ✅ **68/68，约 25 秒** |
+| `test_trlab.py` | ✅ **108/108，约 40 秒** |
+| **v1.0 执行方式重构（本地）** | ✅ 干净目录真实冷启动：GitHub sparse fetch 钉 commit（9ebf858，约 200 KB）→ `rev-parse` 强校验 → import → S0/S1/S9 全 OK → 产物落盘，全程约 3 秒；同 Session 二次执行 stamp 命中直接复用；取到的包与本地 `trlab/` 逐字节一致 |
+| **v1.0 notebook 结构** | ✅ 5 cells / 7,281 B（原 253 KB / 28 cells）；`--embed` 内嵌回退与 sha256 篡改 fail-closed 均有回归 |
 
-**没有**验证的：S3 的真实下载与 imatrix 生成、S4 的真实量化、S6 的 `llama-perplexity` 真实输出解析（正则已用真实格式字符串测过，但没跑过真实二进制）。这三项必须在 Kaggle 上首跑时人工确认。
+**没有**验证的：S3 的真实下载与 imatrix 生成、S4 的真实量化、S6 的 `llama-perplexity` 真实输出解析（正则已用真实格式字符串测过，但没跑过真实二进制）。这三项必须在 Kaggle 上首跑时人工确认。**v1.0 新增的未验证项**：S4/S5 一键链路在真实 Kaggle Session 的首跑、BF16 的 15.26 GiB 真实下载、`llama-quantize` 的 CPU 耗时与峰值 RAM、Kaggle 暂存盘的真实容量（官方未给数字，代码只按 `st_dev` 探测）、以及**仓库转私有后匿名 fetch 会失效**（那时用 `--embed` 变体）。
 
 **v0.3.1 的真实进度（来自用户 2026-10-21 的 Kaggle 运行）**：源码下载与 sha256 校验**已通过**，CMake 检测到 CUDA 12.8.93 与 host GNU 13.3.0、arch=75、`-- Including CUDA backend`，随后在 `ggml-cuda/CMakeLists.txt:181` 因 `CUDA::cuda_driver` target 缺失而 Generate 失败。也就是说：**自动下载链路和工具链预检都被真实环境验证过了，失败的只有 CMake 的 driver 链接这一处**，本版针对它做了热修；v0.3.2 已确认热修后完整通过。
 
