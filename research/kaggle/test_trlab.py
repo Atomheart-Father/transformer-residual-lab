@@ -890,7 +890,11 @@ def test_toolchain_report(ns):
 
 
 def test_s2_cmake_flags(ns):
-    """S2 必须：关掉 UI 预构建下载、CUDA 只编一个架构、且不碰 /kaggle/input 写。"""
+    """S2 必须：关掉 UI 预构建下载、CUDA 只编一个架构、且不碰 /kaggle/input 写。
+
+    v0.3.1 追加：默认传 `-DGGML_CUDA_NO_VMM=ON`（Kaggle T4 上 CUDA::cuda_driver
+    target 找不到），`CUDA_NO_VMM=False` 或 `BUILD_CUDA=False` 时不传。
+    """
     CFG = ns["CFG"]
     BUILD = Path(ns["BUILD"])
     work = Path(ns["WORK"])
@@ -899,7 +903,7 @@ def test_s2_cmake_flags(ns):
     (src / "CMakeLists.txt").write_text("# fake\n", encoding="utf-8")
 
     keys = ("LLAMA_SRC", "LLAMA_BIN", "LLAMA_COMMIT", "BUILD_CUDA", "CUDA_ARCH",
-            "BUILD_JOBS", "FORCE_RERUN")
+            "CUDA_NO_VMM", "BUILD_JOBS", "FORCE_RERUN")
     snap = {k: CFG[k] for k in keys}
     orig_run, orig_tc = ns["run_cmd"], ns["_toolchain_report"]
     calls = []
@@ -926,7 +930,8 @@ def test_s2_cmake_flags(ns):
                                        "gxx": "11", "gcc": "11"}
     try:
         CFG.update(LLAMA_SRC=str(src), LLAMA_BIN="", LLAMA_COMMIT="",
-                   BUILD_CUDA=True, CUDA_ARCH="75", BUILD_JOBS=4, FORCE_RERUN=True)
+                   BUILD_CUDA=True, CUDA_ARCH="75", CUDA_NO_VMM=True,
+                   BUILD_JOBS=4, FORCE_RERUN=True)
         clear_bins()
         r = ns["stage_s2_build"](__import__("time").time() + 120)
 
@@ -941,6 +946,10 @@ def test_s2_cmake_flags(ns):
         assert "-DLLAMA_BUILD_TESTS=OFF" in cfg_call
         assert "-DLLAMA_BUILD_EXAMPLES=OFF" in cfg_call
         assert str(src / "build") not in " ".join(cfg_call), "build 不能落在源码树（只读挂载）"
+        # v0.3.1：Kaggle 真实失败 —— CUDA::cuda_driver target 找不到
+        assert "-DGGML_CUDA_NO_VMM=ON" in cfg_call, \
+            "Kaggle T4 上 find_package(CUDAToolkit) 解析不出 CUDA::cuda_driver"
+        assert r["cuda_no_vmm"] is True, r
 
         build_call = calls[1]
         assert "--build" in build_call and "--target" in build_call
@@ -950,7 +959,7 @@ def test_s2_cmake_flags(ns):
         assert r["cuda_arch"] == "75"
         assert r["toolchain"]["nvcc"].startswith("Cuda")
 
-        # BUILD_CUDA=False：不传架构，GGML_CUDA=OFF
+        # BUILD_CUDA=False：不传架构，GGML_CUDA=OFF，也不传 NO_VMM
         calls.clear()
         clear_bins()
         CFG.update(BUILD_CUDA=False)
@@ -958,7 +967,16 @@ def test_s2_cmake_flags(ns):
         cfg2 = calls[0]
         assert "-DGGML_CUDA=OFF" in cfg2
         assert not any(a.startswith("-DCMAKE_CUDA_ARCHITECTURES") for a in cfg2), cfg2
-        assert r2["cuda"] is False
+        assert "-DGGML_CUDA_NO_VMM=ON" not in cfg2, "CPU 版不需要 NO_VMM"
+        assert r2["cuda"] is False and r2["cuda_no_vmm"] is False
+
+        # CUDA_NO_VMM=False：显式关掉时也不传
+        calls.clear()
+        clear_bins()
+        CFG.update(BUILD_CUDA=True, CUDA_NO_VMM=False)
+        r2b = ns["stage_s2_build"](__import__("time").time() + 120)
+        assert "-DGGML_CUDA_NO_VMM=ON" not in calls[0], calls[0]
+        assert r2b["cuda_no_vmm"] is False
 
         # nvcc 不可用 + BUILD_CUDA=True → GuardError，且一次 cmake 都没跑
         calls.clear()
@@ -1406,6 +1424,58 @@ def test_s2_failure_message_actionable(ns):
     assert "日志" in r, r
 
 
+def test_s2_failure_classifier_cuda_driver(ns):
+    """Kaggle 真实失败：CUDA::cuda_driver target 找不到，不能被误判成"找不到 nvcc"。
+
+    用户 2026-10-21 的真实日志尾部同时含 "nvcc"（工具链检测行）与
+    "but the target was not found"，v0.3.0 的全文包含判断把它归类成
+    "找不到 nvcc" 并劝用户关 GPU —— 而 nvcc 12.8.93 明明检测通过了。
+    """
+    f = ns["_explain_s2_failure"]
+    CF = ns["CommandFailed"]
+    real_tail = (
+        "-- The CUDA compiler identification is CUDA 12.8.93\n"
+        "-- Check for working compiler: /usr/local/cuda/bin/nvcc\n"
+        "-- Detecting CUDA compiler ABI info - done\n"
+        "-- Including CUDA backend\n"
+        "CMake Error at ggml/src/ggml-cuda/CMakeLists.txt:181 (target_link_libraries):\n"
+        "  Target \"ggml-cuda\" links to: CUDA::cuda_driver\n"
+        "  but the target was not found.\n"
+        "CMake Generate step failed.\n"
+        "  Error running CMake.\n")
+    r = f(CF(["cmake", "-S", "x", "-B", "y"], 1, real_tail, "/tmp/s2_cmake.log"))
+    assert "CUDA::cuda_driver" in r, r
+    assert "GGML_CUDA_NO_VMM" in r, r
+    assert "找不到 nvcc" not in r, f"误判成 nvcc 缺失：{r}"
+    assert "BUILD_CUDA']=False" not in r, "这条错误不该劝用户关 GPU"
+
+    # 真正的 nvcc 缺失仍然要判成 nvcc（同行匹配，别把 driver 分支吃成 nvcc）
+    r2 = f(CF(["cmake"], 1,
+              "CMake Error at CMakeLists.txt:20 (enable_language):\n"
+              "  No CMAKE_CUDA_COMPILER could be found.\n", "/tmp/x.log"))
+    assert "找不到 nvcc" in r2 or "BUILD_CUDA" in r2, r2
+
+    r3 = f(CF(["cmake"], 1,
+              "-- Could NOT find nvcc (missing: CUDA_NVCC_EXECUTABLE)\n", "/tmp/x.log"))
+    assert "找不到 nvcc" in r3, r3
+
+
+def test_s2_fingerprint_binds_cuda_no_vmm(ns):
+    """CUDA_NO_VMM 必须进 S2 指纹：改了开关不能误 RESUME 上一轮 build。"""
+    CFG = ns["CFG"]
+    snap = CFG["CUDA_NO_VMM"]
+    try:
+        CFG["CUDA_NO_VMM"] = True
+        a = ns["_fingerprint"]("S2_BUILD")
+        CFG["CUDA_NO_VMM"] = False
+        b = ns["_fingerprint"]("S2_BUILD")
+        assert a != b, "CUDA_NO_VMM 不在 S2 指纹里，改开关会复用旧 build"
+        CFG["CUDA_NO_VMM"] = True
+        assert ns["_fingerprint"]("S2_BUILD") == a, "改回去必须还原"
+    finally:
+        CFG["CUDA_NO_VMM"] = snap
+
+
 def test_s2_network_failure_message(ns):
     """真的连不上时给一句人话，且不留下 .partial。"""
     import tempfile as _tf
@@ -1532,6 +1602,8 @@ TESTS = [
     test_s2_dir_name_mismatch_fails,
     test_s2_commit_from_pinned_tarball,
     test_s2_failure_message_actionable,
+    test_s2_failure_classifier_cuda_driver,
+    test_s2_fingerprint_binds_cuda_no_vmm,
     test_s2_network_failure_message,
     test_paired_bootstrap_edges,
     test_ggml_type_table,

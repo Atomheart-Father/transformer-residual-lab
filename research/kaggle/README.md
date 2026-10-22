@@ -2,7 +2,7 @@
 
 `trlab_kaggle.ipynb` —— 一个**可直接上传到 Kaggle** 的独立 Notebook，用来在同一份 `Qwen/Qwen3-8B` 上产出 `IQ2_XS` 与 `IQ4_XS`，并比较**真实文件字节**、**配对 NLL**、**有限配对质量**。
 
-当前版本 **v0.3.0**。首版（v0.1）只做环境检查与短时 smoke test；v0.2 修掉了一轮逐 cell 审查提出的 3 个 P0 + 4 个 P1；v0.2.1 修了 S4 的两个 P0（二次量化门槛、产物复用不看指纹）和 S9 的 rho 符号；v0.2.2 修了 `--allow-requantize` 参数位置（放在位置参数之后等于没传）、S9 快照里 `status=null` 的自相矛盾，并给 S2 加了工具链预检与两个编译期开关；**v0.3.0 把 S2 收敛成一个开关**：`RUN_S2 = True` 之后，源码由 notebook 自己下载（固定 commit 的 tarball，sha256 预登记并强制校验），用户不再需要在 Mac 上下载、解压、传 Dataset、填绝对路径。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
+当前版本 **v0.3.1**。首版（v0.1）只做环境检查与短时 smoke test；v0.2 修掉了一轮逐 cell 审查提出的 3 个 P0 + 4 个 P1；v0.2.1 修了 S4 的两个 P0（二次量化门槛、产物复用不看指纹）和 S9 的 rho 符号；v0.2.2 修了 `--allow-requantize` 参数位置（放在位置参数之后等于没传）、S9 快照里 `status=null` 的自相矛盾，并给 S2 加了工具链预检与两个编译期开关；v0.3.0 把 S2 收敛成一个开关 `RUN_S2`（notebook 自己下载固定 commit 的源码并校验 sha256，用户不再需要在 Mac 上下载、解压、传 Dataset）；**v0.3.1 是真实 Kaggle 失败的热修**：`CUDA::cuda_driver` IMPORTED target 找不到导致 CMake Generate 失败，默认改传 `-DGGML_CUDA_NO_VMM=ON`，同时修掉把该错误误判成"找不到 nvcc"的分类器。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
 
 S2 → S3 的分步操作清单在 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md)：现在以**一页三步网页操作**开头（改一个开关 → Internet=On → Run All），手工 tar / Dataset 路线降级为断网备选。本文件讲"为什么"，那份讲"怎么做"。
 
@@ -102,6 +102,7 @@ commit 的校验强度分三档，写进结果的 `commit_source` / `commit_veri
 | `LLAMA_COMMIT` | `""` | `RUN_S2` | 自动填成 `S2_PINNED["commit"]` |
 | `BUILD_CUDA` | `True` | `RUN_S2` | `False` 只构建 CPU 版。三个工具（imatrix / quantize / perplexity）都有 CPU 路径，只是慢；nvcc 不可用时预检会直接建议改这个 |
 | `CUDA_ARCH` | `"75"` | `RUN_S2` | T4 = sm_75。留空则用上游默认，而 `ggml/src/ggml-cuda/CMakeLists.txt` 的默认值是 `50-virtual 61-virtual 70-virtual 75-virtual 80-virtual 86-real 89-real 90-virtual 120a-real`（CUDA ≥12.9 再加 `121a-real`）—— **九套架构**，4 核上编译量翻几倍 |
+| `CUDA_NO_VMM` | `True` | `RUN_S2` | **v0.3.1 真实失败热修**：Kaggle T4 上 `find_package(CUDAToolkit)` 解析不出 `CUDA::cuda_driver` IMPORTED target，`ggml/src/ggml-cuda/CMakeLists.txt:181` 的 `target_link_libraries` 直接 CMake Error。上游 `ggml/CMakeLists.txt:205` 有 `option(GGML_CUDA_NO_VMM ... OFF)`，`ggml-cuda/CMakeLists.txt:178-182` 据此跳过 libcuda 直链。**代价**：显存池从 `ggml_cuda_pool_vmm` 回退到 `ggml_cuda_pool_leg`（cudaMalloc 池），算力内核与数值不受影响 |
 | `BUILD_JOBS` | `4` | `RUN_S2` | Kaggle 只有 4 核 |
 | （硬编码） | `-DLLAMA_USE_PREBUILT_UI=OFF` | — | 这个 option 在顶层 `CMakeLists.txt:138` 声明、默认 `ON`，经 `tools/ui/CMakeLists.txt` 转成 `HF_ENABLED` 传给 `scripts/ui-assets.cmake`。`llama-ui-assets` 是 `ALL` target，只要 `LLAMA_BUILD_SERVER=ON`（默认）就会在**构建期**执行；本地没有 `dist/` 又没走 npm 构建时，会 `file(DOWNLOAD)` 去 HF bucket 取 `dist.tar.gz`（sha256 那次 `TIMEOUT 30`，包体那次 `TIMEOUT 300`）。Internet Off 时**不会** FATAL_ERROR，只 `message(WARNING)` 然后生成空资产表，但会白等 |
 
@@ -530,13 +531,37 @@ if CFG["LLAMA_COMMIT"] and git_commit is None:
 
 ---
 
+## 九之五、v0.3.1 修了什么（真实 Kaggle 失败的热修）
+
+v0.3.0 在真实 Kaggle T4 上跑到 CMake 阶段才失败（下载和工具链都没问题）：`CUDA 12.8.93 FOUND`、`nvcc` host GNU 13.3.0 检测通过、arch=75、`-- Including CUDA backend`，然后
+
+```text
+CMake Error at ggml/src/ggml-cuda/CMakeLists.txt:181 (target_link_libraries):
+  Target "ggml-cuda" links to: CUDA::cuda_driver
+  but the target was not found.
+CMake Generate step failed.
+```
+
+| ID | 问题 | 修法 |
+|---|---|---|
+| **C-1** | Kaggle 镜像里 `find_package(CUDAToolkit)` 解析不出 `CUDA::cuda_driver` IMPORTED target（libcuda.so 不在它找的位置） | 默认传 `-DGGML_CUDA_NO_VMM=ON`（`CFG["CUDA_NO_VMM"]=True`）。上游 `ggml/CMakeLists.txt:205` 声明这个 option（默认 OFF），`ggml-cuda/CMakeLists.txt:178-182` 据此跳过 `target_link_libraries(... CUDA::cuda_driver)`。**仍然保留 `-DGGML_CUDA=ON` 与 sm_75**，没有退到 CPU |
+| **C-2** | `_explain_s2_failure()` 把上面这条错误误判成"找不到 nvcc"，还劝用户关 GPU | 分类器改成**同行匹配**，并新增 `CUDA::cuda_driver` 专用分支且排在 nvcc 分支之前。误判根因：v0.3.0 用 `"nvcc" in tail and "not found" in tail` 这种全文包含判断，而这条日志里"nvcc"（工具链检测行）和 "not found"（target 行）相隔十几行 |
+
+**`GGML_CUDA_NO_VMM=ON` 的代价是什么**（对着 `d454a204` 源码逐行看过）：`common.cuh:265` 的 `GGML_USE_VMM` 不再定义 → `ggml-cuda.cu:745` 的 `new_pool_for_device` 回退到 `ggml_cuda_pool_leg`（cudaMalloc 池），`:326` 的设备 VMM 属性查询和 `:592` 的 `ggml_cuda_pool_vmm` 整段编译掉。**算力内核、cuBLAS 路径、数值结果都不变**，只是显存池实现从 cuMemCreate/cuMemMap 换成 cudaMalloc。构建产物里会多一条 `NO_VMM=1` 特性标记（`ggml-cuda.cu:6134`）。
+
+**为什么不再生嫌疑**：`CUDA_NO_VMM` 已加进 `STAGE_DEPS["S2_BUILD"]` 的 CFG 键列表，改这个开关会换 S2 指纹、必然重跑；加上 `NOTEBOOK_VERSION`  bump 到 0.3.1 让所有阶段指纹一起失效，不会误 RESUME 上一轮的 build。`test_s2_fingerprint_binds_cuda_no_vmm` 钉住前者。
+
+**没保证的**：`CUDA::cuda_driver` 只是 Generate 阶段的第一道坎，绕过它之后 build 阶段是否还有后续错误，**未实测**（不授权启动实例）。用户网页重跑后把新日志回传即可。
+
+---
+
 ## 十、怎么跑测试
 
 ```bash
 python3 research/kaggle/test_trlab.py
 ```
 
-不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。它在一个临时目录里把 notebook 的 16 个 code cell 按顺序 exec 一遍，然后跑 41 项断言。当前结果：**41/41 通过，约 11 秒**。
+不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。它在一个临时目录里把 notebook 的 16 个 code cell 按顺序 exec 一遍，然后跑 43 项断言。当前结果：**43/43 通过，约 11 秒**。
 
 | 测试 | 钉住的问题 |
 |---|---|
@@ -574,6 +599,8 @@ python3 research/kaggle/test_trlab.py
 | `test_s2_dir_name_mismatch_fails` | digest 对但顶层目录名与 pin 不符 → `GuardError`（pin 信息本身有问题） |
 | `test_s2_commit_from_pinned_tarball` | 自动路径记 `pinned_tarball` + `commit_verified=True`；有 git 且相符记 `git`；不符仍抛 |
 | `test_s2_failure_message_actionable` | 六种编译失败症状各自给出可操作处置（host g++ / nvcc / 磁盘 / 内存 / cmake / 其他） |
+| `test_s2_failure_classifier_cuda_driver` | **C-2**：Kaggle 真实日志尾部（含 nvcc 行 + `CUDA::cuda_driver ... not found`）必须判成 driver 分支，**不能**误判成"找不到 nvcc"；真正的 nvcc 缺失仍然判成 nvcc |
+| `test_s2_fingerprint_binds_cuda_no_vmm` | **C-1**：`CUDA_NO_VMM` 进 S2 指纹，改开关必然重跑，不会误 RESUME 旧 build |
 | `test_s2_network_failure_message` | 真的连不上时消息含"Internet = On"，且不留下 `.partial` |
 | `test_paired_bootstrap_edges` | n=0 / n=1 返回 `ci95=None`；全正差值给不含 0 的 CI |
 | `test_ggml_type_table` | 7 个关键 type 的块尺寸/bpw |
@@ -606,6 +633,8 @@ python3 research/kaggle/test_trlab.py
 16. **tarball 源码没有 `.git`，commit 的校验强度取决于来源**。自动下载路径记 `commit_source="pinned_tarball"` + `commit_verified=True`，它证明"这份 tar.gz 的 sha256 与预登记值一致"，**不等于** git 校验；手动挂载的源码只能记 `declared`。要 git 级校验，需要自己 `git clone` 后保留 `.git` 再挂载（并设 `CFG["LLAMA_SRC"]`）。
 17. **预登记 sha256 本身是自证的**。它写在 notebook 里，校验只能防"上游文件被替换 / 网络返回错误页面"，防不了"notebook 里的预登记值被改坏"。第一次使用时应在报告第 2 节核对那串 sha256 与本文第四节列出的值一致。
 18. **Kaggle 能否直连 github.com 未验证**。自动下载走标准库 `urllib`（不依赖 curl/wget）。如果 Kaggle 网络策略拦了 GitHub，S2 会给出"检查 Settings → Internet = On"的报错，此时用断网备选：手动下载同一 tarball、挂成 Dataset、设 `CFG["LLAMA_SRC"]`。
+19. **`-DGGML_CUDA_NO_VMM=ON` 只跨过了 Generate 阶段的第一道坎**。它让 CMake 不再链接 `CUDA::cuda_driver`，但 build 阶段（nvcc 编译、链接）是否还有后续错误**未实测**。代价已知且有限：显存池从 VMM 回退到 cudaMalloc 池，算力内核不变。真跑通之前，不要在报告里写"Kaggle 编译已通过"。
+20. **错误分类器按关键词匹配，永远可能漏**。v0.3.0 的 `"nvcc" in tail and "not found" in tail` 全文包含判断就把 driver 错误误判成了 nvcc 缺失。现在改成同行匹配 + driver 专用分支，但新的日志形态仍可能落到通用分支 —— 通用分支的处置是"看日志最后 30 行"，这是兜底不是终点。
 
 ---
 
@@ -633,13 +662,18 @@ python3 research/kaggle/test_trlab.py
 | S9 rho 渲染 | ✅ `dNLL(Q4,anchor)=+0.5000`，无负号版本 |
 | S9 快照自一致性 | ✅ `results.json` 的 `S9_REPORT.status = "ok"` + `self_reported: true` |
 | S2 命令形状 | ✅ flag 全在位置参数之前；nvcc 缺失时零外部调用即报错 |
+| S2 cmake 参数（v0.3.1） | ✅ 默认含 `-DGGML_CUDA_NO_VMM=ON`；`CUDA_NO_VMM=False` 或 `BUILD_CUDA=False` 时不传；结果里 `cuda_no_vmm` 与之一致 |
+| S2 错误分类（v0.3.1） | ✅ 真实 Kaggle 的 `CUDA::cuda_driver` 日志判成 driver 分支（含 `GGML_CUDA_NO_VMM` 建议、不含"找不到 nvcc"）；真 nvcc 缺失仍判 nvcc |
+| S2 指纹（v0.3.1） | ✅ `CUDA_NO_VMM` 翻转 → S2 指纹变化；改回去还原 |
 | S2 commit 记录 | ✅ 无 `.git` 时记 `declared`、无预注册值时不编造、有 git 且不符必抛 |
 | S2 自动取源码（mock） | ✅ 默认不联网；只开 S2；digest 不符拒解压并删包；`..` 条目拒解压；三级缓存不重下；目录名不符拒解压；`pinned_tarball` 校验档；六种失败症状各有处置；真断网时消息含 "Internet = On" |
-| `test_trlab.py` | ✅ **41/41，约 11 秒** |
+| `test_trlab.py` | ✅ **43/43，约 11 秒** |
 
 **没有**验证的：S2 的实际编译、S3/S4 的真实量化、S6 的 `llama-perplexity` 真实输出解析（正则已用真实格式字符串测过，但没跑过真实二进制）。这三项必须在 Kaggle 上首跑时人工确认。
 
-**没有**验证的还有：S2 从 Kaggle 实际下载 tarball 能否成功（github.com 直连）、下载与编译的真实耗时、build 目录大小与峰值内存、`-DLLAMA_USE_PREBUILT_UI=OFF` 在当前 pin 上的实际效果、`llama-imatrix` 在 T4 上跑 8B Q8_0 的耗时。runbook 第八节列了完整清单。
+**v0.3.1 的真实进度（来自用户 2026-10-21 的 Kaggle 运行）**：源码下载与 sha256 校验**已通过**，CMake 检测到 CUDA 12.8.93 与 host GNU 13.3.0、arch=75、`-- Including CUDA backend`，随后在 `ggml-cuda/CMakeLists.txt:181` 因 `CUDA::cuda_driver` target 缺失而 Generate 失败。也就是说：**自动下载链路和工具链预检都被真实环境验证过了，失败的只有 CMake 的 driver 链接这一处**，本版针对它做了热修，但热修本身尚未在 Kaggle 上验证。
+
+**没有**验证的还有：S2 从 Kaggle 实际编译能否走完（绕过 driver 链接后的 build 阶段）、编译真实耗时、build 目录大小与峰值内存、`llama-imatrix` 在 T4 上跑 8B Q8_0 的耗时。runbook 第八节列了完整清单。
 
 ---
 

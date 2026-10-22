@@ -1,6 +1,8 @@
 # Kaggle T4 部署清单：S2 编译 → S3 imatrix
 
-**状态：方案文档。S2 / S3 均未在任何真实 Kaggle 实例上运行过，本文件不含"已验证编译/量化"的结论。**
+**状态：方案文档。S2 / S3 均未在任何真实 Kaggle 实例上**完整**跑通，本文件不含"已验证编译/量化"的结论。**
+
+**v0.3.1 热修（2026-10-21 真实失败）**：v0.3.0 在 Kaggle T4 上通过下载与工具链检测后，在 CMake Generate 阶段失败 —— `CUDA::cuda_driver` IMPORTED target 找不到（`ggml/src/ggml-cuda/CMakeLists.txt:181`）。当前版本默认传 `-DGGML_CUDA_NO_VMM=ON` 绕开它，并修掉了把该错误误判成"找不到 nvcc"的分类器。**只跨过 Generate 阶段，build 阶段未实测。**
 
 这份文档只解决一件事：在你已有的 Kaggle GPU Notebook 里，**分两步**把 `llama-imatrix` 编译出来、并生成 `imatrix.gguf`，每一步都有明确的成功标志和停机点。S4 及之后不在本阶段执行，只在第六节给出容量预算。
 
@@ -24,8 +26,8 @@ v0.3.0 起 S2 **不需要你准备任何输入**：把 `RUN_S2` 改成 `True`、
 | CPU | 4 核 | `BUILD_JOBS=4`，编译是瓶颈 |
 | RAM | 31.35 GiB（可用 ≈ **29.67 GiB**） | S2 编译够用；S4 量化要看实际缓冲（第六节） |
 | `/kaggle/working` | 剩余 **19.5 GiB** | 装不下 15.26 GiB 的 BF16 加产物（第六节算账） |
-| CUDA | 12.8，`nvcc` / `cmake` / `g++` 都在 | 决定了 CUDA 架构默认列表（见 S2） |
-| Internet | **Off**（v0.3 起 S2 需临时设为 **On**，只下载 36.6 MiB 源码 tarball） | 不能 pip、不能 `file(DOWNLOAD)`；GitHub 直连**未验证** |
+| CUDA | 12.8.93，`nvcc` / `cmake` / host GNU 13.3.0 **都被真实运行验证过** | 决定了 CUDA 架构默认列表（见 S2）；host g++ 13.3 与 nvcc 12.8 兼容 |
+| Internet | **Off**（S2 需临时设为 **On**，只下载 36.6 MiB 源码 tarball） | GitHub 直连**已被真实运行验证**；pip 与 `file(DOWNLOAD)` 仍不可用 |
 | `/kaggle/input` | 空 | S2 不需要输入；S3 起需要（第三节） |
 
 BF16 1.55 TFLOP/s 是微基准，不能当 LLM 解码性能用；本阶段也不需要它。
@@ -179,6 +181,7 @@ shasum -a 256 llama_src.tar.gz    # 必须等于上面那个 sha256
 |---|---|---|
 | `-DGGML_CUDA=ON` | 编 CUDA 后端 | `ggml/CMakeLists.txt` 的 `option(GGML_CUDA ...)` |
 | `-DCMAKE_CUDA_ARCHITECTURES=75` | **只编 T4 一个架构** | 不指定时 `ggml/src/ggml-cuda/CMakeLists.txt:21` 起给出默认 `50-v 61-v 70-v 75-v 80-v 86-r 89-r 90-v 120a-r`，**九套**；4 核上编译量翻几倍 |
+| `-DGGML_CUDA_NO_VMM=ON` | **v0.3.1 热修**：不链 `CUDA::cuda_driver` | 真实失败：`ggml/src/ggml-cuda/CMakeLists.txt:181` 报 `Target "ggml-cuda" links to: CUDA::cuda_driver but the target was not found`。上游 `ggml/CMakeLists.txt:205` 有 `option(GGML_CUDA_NO_VMM ... OFF)`，`ggml-cuda/CMakeLists.txt:178-182` 据此跳过链接。代价：显存池从 VMM 回退 cudaMalloc 池（`ggml-cuda.cu:745`），算力内核不变。`CFG["CUDA_NO_VMM"]=False` 可关掉 |
 | `-DLLAMA_USE_PREBUILT_UI=OFF` | 不下载预构建 UI | option 在顶层 `CMakeLists.txt:138`（默认 `ON`），经 `tools/ui/CMakeLists.txt:53` 转成 `HF_ENABLED` 传给 `scripts/ui-assets.cmake`；`llama-ui-assets` 是 `ALL` target，本地无 `dist/` 时走 `hf_download()` → `file(DOWNLOAD)`（sha256 `TIMEOUT 30` / 包体 `TIMEOUT 300`）。Internet Off 时**不会失败**，只是白等，然后打一条 `UI: no assets available` 警告 |
 | `-DLLAMA_CURL=OFF` | 兼容旧 pin | 当前 master 里 `LLAMA_CURL` 已被 `llama_option_depr` 标记为 deprecated 并**忽略**（只打一条警告）。保留这一项只为兼容较旧的源码 |
 | `-DLLAMA_BUILD_TESTS=OFF` / `-DLLAMA_BUILD_EXAMPLES=OFF` | 少编一堆东西 | 与 tools 无关；tools 由 `LLAMA_BUILD_TOOLS` 控制（默认 ON） |
@@ -218,6 +221,7 @@ S2 会先跑一次工具链预检（`cmake --version` / `nvcc --version` / `g++ 
 - [ ] `toolchain.nvcc` 记录了实际版本（不是"不可用"）
 - [ ] `source.origin` 是 `downloaded` / `cache` / `cached_archive` / `manual` 之一；`source.archive_sha256` 与本文 4.1 表格里的值**逐字符相同**
 - [ ] `commit` 非空，且 `commit_source` ∈ {`git`, `pinned_tarball`, `declared`}；自动下载应得到 `pinned_tarball` + `commit_verified=true`；如果是 `declared`，**报告里必须写"commit 为声明值、未校验"**
+- [ ] `cuda_no_vmm` 是 `true`（v0.3.1 默认；cmake_args 里应能看到 `-DGGML_CUDA_NO_VMM=ON`）。关掉它只会让上一轮那个 `CUDA::cuda_driver` 错误回来
 - [ ] 报告第 2 节（工具链）写出了源码目录、归档 sha256、四个二进制路径、磁盘剩余
 - [ ] 日志 `trlab/logs/s2_cmake.log` 末尾有 `Configuring done` / `Generating done`；`s2_build.log` 末尾有 `Built target llama-cli`
 - [ ] 日志里如果有 `UI: no assets available`，**可以忽略**（我们不构建 server UI）
@@ -341,7 +345,8 @@ CFG["ALLOW_REQUANTIZE"] = False
 | `GuardError: 找不到 llama.cpp 源码，且没有打开自动获取` | 同上 | 把 `RUN_S2` 改成 `True`（需 Internet=On），或设 `CFG["LLAMA_SRC"]` 走手动源码 |
 | `源码 commit ... 与预注册的 ... 不符` | 同上 | 改 `LLAMA_COMMIT`，或换回你打包的那个 commit |
 | `GuardError: BUILD_CUDA=True 但 nvcc 不可用` | 同上 | `CFG["BUILD_CUDA"]=False` |
-| `S2 编译失败（rc=N）` + 一句"症状 → 处置" | `logs/s2_build.log` / `s2_cmake.log` 尾部 | S2 已把常见症状翻译成一句话（host g++ 不兼容 / 找不到 nvcc / 磁盘满 / 内存不足 / cmake 配置阶段），按那句话做 |
+| `CMake Error at ggml/src/ggml-cuda/CMakeLists.txt:181 (target_link_libraries): Target "ggml-cuda" links to: CUDA::cuda_driver but the target was not found.` | `logs/s2_cmake.log` | v0.3.1 起默认 `-DGGML_CUDA_NO_VMM=ON` 已绕开；若你手动把 `CFG["CUDA_NO_VMM"]` 关成了 `False`，改回 `True` |
+| `S2 编译失败（rc=N）` + 一句"症状 → 处置" | `logs/s2_build.log` / `s2_cmake.log` 尾部 | S2 已把常见症状翻译成一句话（host g++ 不兼容 / 找不到 nvcc / 磁盘满 / 内存不足 / cmake 配置阶段 / CUDA::cuda_driver），按那句话做 |
 | `CommandFailed rc=1` + `CMake Error` | `logs/s2_cmake.log` | 看最后一屏；`unsupported GNU version` → 关 CUDA；缺 `CUDAToolkit` → 同上 |
 | `BudgetExceeded: 命令超预算被杀` | `out/S2_BUILD.json` | 把 `STAGE_BUDGET_SEC["S2_BUILD"]` 调到 5400，`FORCE_RERUN=True` |
 | `编译结束但缺少可执行文件: ['llama-cli']` | `logs/s2_build.log` | 大概率有人关了 `LLAMA_BUILD_SERVER`；恢复默认 |
@@ -365,8 +370,15 @@ CFG["ALLOW_REQUANTIZE"] = False
 7. **31 GiB RAM 跑 15.26 GiB 输入的量化为未实测**（6.3 节）。`--max-buffer-size` 默认 8192 MiB 是从帮助文本读到的，实际峰值没有观测。
 8. **`_base_consistency()` 只能排除形状不符**，不能证明同一 checkpoint —— 三个仓库的 Q8_0 字节数不同就是证据。
 9. **自动下载路径没有端到端跑过**：Kaggle 能否直连 `github.com`、`urllib` 在 Kaggle 网络策略下的行为、下载实际耗时，都未验证。sha256 校验逻辑本身有 mock 测试覆盖（digest 不符 / 目录名不符 / 包被改坏各一条），但那是本地造的包。
-10. **tarball 源码没有 `.git`**，自动下载路径记 `commit_source="pinned_tarball"` + `commit_verified=true` —— 它证明"这份 tar.gz 的 sha256 与预登记值一致"，**不等于** git 校验。手动挂载源码时只能是 `declared`。
-11. **预登记 sha256 本身是自证的**：它写在 notebook 里，防不了"notebook 里的值被改坏"。首次使用请在 S2 结果里核对那串 sha256 与 4.1 表格一致。
+10. **`-DGGML_CUDA_NO_VMM=ON` 只跨过 CMake Generate 阶段**（v0.3.1 热修）。绕过 `CUDA::cuda_driver` 链接后，build 阶段是否还有后续错误未实测；代价已知（显存池从 VMM 回退 cudaMalloc 池，算力内核不变），但"编译通过"本身还没被真实环境确认。
+11. **tarball 源码没有 `.git`**，自动下载路径记 `commit_source="pinned_tarball"` + `commit_verified=true` —— 它证明"这份 tar.gz 的 sha256 与预登记值一致"，**不等于** git 校验。手动挂载源码时只能是 `declared`。
+12. **预登记 sha256 本身是自证的**：它写在 notebook 里，防"上游文件被替换 / 网络返回错误页面"，防不了"notebook 里的值被改坏"。首次使用请在 S2 结果里核对那串 sha256 与 4.1 表格一致。
+
+### 已被真实 Kaggle 运行验证的部分（v0.3.0，2026-10-21）
+
+1. **源码自动下载与 sha256 校验通过** —— GitHub 直连在 Kaggle 上可用，digest 比对通过，安全解压到 `WORK/src/` 成功。
+2. **工具链预检通过** —— CUDA 12.8.93 FOUND、nvcc host GNU 13.3.0 检测通过、arch=75、`-- Including CUDA backend`。
+3. **失败点只有一个**：`ggml/src/ggml-cuda/CMakeLists.txt:181` 的 `CUDA::cuda_driver` target 缺失（v0.3.1 已针对它热修）。
 
 ---
 
