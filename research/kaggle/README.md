@@ -2,11 +2,13 @@
 
 `trlab_kaggle.ipynb` —— 一个**可直接上传到 Kaggle** 的独立 Notebook，用来在同一份 `Qwen/Qwen3-8B` 上产出 `IQ2_XS` 与 `IQ4_XS`，并比较**真实文件字节**、**配对 NLL**、**有限配对质量**。
 
-当前版本 **v0.3.2**。首版（v0.1）只做环境检查与短时 smoke test；v0.2 修掉了一轮逐 cell 审查提出的 3 个 P0 + 4 个 P1；v0.2.1 修了 S4 的两个 P0（二次量化门槛、产物复用不看指纹）和 S9 的 rho 符号；v0.2.2 修了 `--allow-requantize` 参数位置、S9 快照里 `status=null` 的自相矛盾，并给 S2 加了工具链预检与两个编译期开关；v0.3.0 把 S2 收敛成一个开关 `RUN_S2`；v0.3.1 热修真实 Kaggle 失败（`CUDA::cuda_driver` target 找不到 → 默认 `-DGGML_CUDA_NO_VMM=ON`，并修掉把该错误误判成"找不到 nvcc"的分类器）；**v0.3.2：S2 已在真实 Kaggle T4 上完整通过（27 分 52 秒，四个二进制就位）**，同时修掉 `version` 字段取空串的问题（`llama-cli --version` 写 stderr）。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
+当前版本 **v0.4.0**。首版（v0.1）只做环境检查与短时 smoke test；v0.2 修掉了一轮逐 cell 审查提出的 3 个 P0 + 4 个 P1；v0.2.1 修了 S4 的两个 P0（二次量化门槛、产物复用不看指纹）和 S9 的 rho 符号；v0.2.2 修了 `--allow-requantize` 参数位置、S9 快照里 `status=null` 的自相矛盾，并给 S2 加了工具链预检与两个编译期开关；v0.3.0 把 S2 收敛成一个开关 `RUN_S2`；v0.3.1 热修真实 Kaggle 失败（`CUDA::cuda_driver` target 找不到 → 默认 `-DGGML_CUDA_NO_VMM=ON`，并修掉把该错误误判成"找不到 nvcc"的分类器）；v0.3.2 记录 S2 已在真实 Kaggle T4 上完整通过（27 分 52 秒，四个二进制就位）；**v0.4.0：S3 一键化，唯一开关 `RUN_S3 = True`** —— 自动探活/复用/重编 llama.cpp 二进制，自动下载 pinned 的 Q8_0 与 wikitext 校准语料，生成并验证 imatrix，写 provenance，最后才回收 Q8_0。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
 
-**S2 已经不需要再验证了** —— 2026-10-22 的真实运行给出了全部数字（见第九之六）。下一个待办是 S3 的一键化，设计稿在 [`KAGGLE_S3_DESIGN.md`](./KAGGLE_S3_DESIGN.md)：**尚未实现，等用户对决策点逐条确认**。
+**S2 已经不需要再验证了** —— 2026-10-22 的真实运行给出了全部数字（见第九之六）。
 
-S2 → S3 的分步操作清单在 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md)：现在以**一页三步网页操作**开头（改一个开关 → Internet=On → Run All），手工 tar / Dataset 路线降级为断网备选。本文件讲"为什么"，那份讲"怎么做"。
+**S3 的一键化链路（v0.4.0）只有 CPU/mock 测试覆盖（68 项全通过），尚未在真实 Kaggle 上跑过。** 设计 rationale 与五个决策点的落点在 [`KAGGLE_S3_DESIGN.md`](./KAGGLE_S3_DESIGN.md)。
+
+S2 → S3 的操作清单在 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md)：现在以**一页一步网页操作**开头（改 `RUN_S3 = True` → `Internet=On` → `Run All`），手工 tar / Dataset 路线降级为断网备选。本文件讲"为什么"，那份讲"怎么做"。
 
 ---
 
@@ -16,11 +18,12 @@ S2 → S3 的分步操作清单在 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RU
 
 | 不做 | 机制 |
 |---|---|
-| 自动下载大模型 | S3 起全部用 `need()` 检查本地路径，缺失即 `GuardError`。**唯一的联网路径**是 `RUN_S2 = True` 时下载 36.6 MiB 的 llama.cpp 源码 tarball（sha256 预登记并强制校验）；`RUN_S2` 默认 `False` |
-| 自动 `pip install` | 只用 Kaggle 镜像自带的包；llama.cpp 从源码编译；GGUF 解析器是纯 Python，无第三方依赖 |
-| 自动租 GPU / 跑实验 | 阶段开关默认全关；用户手动改 `STAGES` 后在网页上逐段执行 |
+| 自动下载大模型 | 默认 `RUN_S2=False` / `RUN_S3=False`，此时**一个字节都不下载**。`RUN_S3=True` 才允许下载 pinned 的 Q8_0（8,709,519,168 B）+ wikitext 校准语料（6,357,543 B）；`RUN_S2=True` 只下载 36.6 MiB 的 llama.cpp 源码 tarball。三样东西全部 sha256/etag 预登记并强制校验 |
+| 自动 `pip install` | 只用 Kaggle 镜像自带的包；llama.cpp 从源码编译；GGUF 解析器是纯 Python，无第三方依赖。parquet 解析优先 pyarrow、回落 pandas，都没有就报可操作的错（**不**偷偷装） |
+| 自动租 GPU / 跑实验 | 阶段开关默认全关；用户手动改 `RUN_S3` 后在网页上执行 |
 | 上传私有项目文件 | Notebook 不引用 `transformer-residual-lab` 的任何本地数据或脚本 |
 | 在单张 T4 上硬加载 8B BF16 | S8 先算显存，放不下就返回 `status=skipped` 并写明所需/可用 GB，不硬撑到 OOM |
+| 要求用户手动恢复环境 | 二进制探活三档来源，每个候选真跑一次 `--version`；探不到就自动走 S2 重编。**用户不需要手动先跑 S2，也不需要手动配路径或传模型** |
 
 ---
 
@@ -29,8 +32,8 @@ S2 → S3 的分步操作清单在 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RU
 ```
 research/kaggle/
 ├── trlab_kaggle.ipynb        # 唯一需要上传的文件（28 cells：16 code + 12 markdown）
-├── KAGGLE_S2_S3_RUNBOOK.md   # S2 编译 → S3 imatrix 的分步操作清单（网页 GUI 视角）
-├── KAGGLE_S3_DESIGN.md       # S3 一键化的设计稿（未实现、未授权，等用户决策）
+├── KAGGLE_S2_S3_RUNBOOK.md   # S2 编译 → S3 imatrix 的操作清单（网页 GUI 视角）
+├── KAGGLE_S3_DESIGN.md       # S3 一键化的设计 rationale 与五个决策点的落点（已实现）
 ├── test_trlab.py             # CPU-only 回归测试，不联网、不需要 GPU / llama.cpp
 └── README.md                 # 本文件
 ```
@@ -45,15 +48,19 @@ research/kaggle/
 2. 右侧 `Settings`：`Accelerator` = **GPU T4 ×2**（Notebook 只用第 0 张，第二张不会自动用上）；`Internet` = **Off**（默认不需要联网）
 3. 直接 `Run All`。默认只跑 `S0_ENV` / `S1_SMOKE` / `S9_REPORT`，约 2–4 分钟，**不碰任何大文件、不联网**。
 
-**要连 llama.cpp 一起编好**（v0.3.0 起只改一个开关）：
+**要把 imatrix 一起做出来**（v0.4.0 起只改一个开关，**不需要手动先跑 S2，不需要准备任何 Dataset**）：
 
-1. 右上角 `Edit` → 找到 `RUN_S2 = False` 这一行，改成 `RUN_S2 = True`
+1. 找到 `RUN_S3 = False` 这一行，改成 `RUN_S3 = True`
 2. 右侧 `Settings` → `Internet` = **On**
-3. `Run` → `Run all`。S2 会自己下载固定 commit 的源码（36.6 MiB）、校验 sha256、解压到 `WORK/src/`、编译出四个二进制。约 15–30 分钟（含编译，**估算值**）。
+3. `Run` → `Run all`
 
-`RUN_S2 = False` 是默认值，且 `_apply_run_switches()` 在它为 `False` 时**一个字段都不改** —— 导入 notebook 或误点 `Run All` 都不会悄悄联网。想下载必须显式改这一行，并由 `test_s2_default_off_no_network` 钉住。打开 `RUN_S2` 也**只**开 `S2_BUILD`，`S3`–`S8` 保持 `False`（`test_s2_run_switch_only_turns_on_s2` 钉住）。
+notebook 会自己按顺序做：探活四个 llama.cpp 二进制（在就复用，丢了就自动下载 pinned 源码重编，约 28 分钟）→ 磁盘预检 → 下载 pinned 的 Q8_0（8,709,519,168 B）→ 下载 wikitext train parquet 并转纯文本 → 按显存余量选 `-ngl`（OOM 会逐级降）→ 跑 `llama-imatrix` → 验证产物 → 写 provenance → 才删掉 Q8_0 回收磁盘。**S4–S8 与 SX 一律保持关闭。**
 
-跑完后读 `S0_ENV` 的输出，它会列出 `/kaggle/input` 下每个 Dataset 的文件数、大小、以及**所有 `.gguf` 的完整路径**。把这些路径抄进配置 cell 的 `CFG`，再把要跑的阶段改成 `True`，从上到下逐段执行。
+`RUN_S3 = False` 是默认值，且 `_apply_run_switches()` 在两个开关都 `False` 时**一个字段都不改** —— 导入 notebook 或误点 `Run All` 都不会悄悄联网，更不会下 8 GB。想下载必须显式改这一行，由 `test_s2_default_off_no_network` / `test_s3_run_switch_scope` 双重钉住。
+
+**只想编 llama.cpp、先不碰模型**（v0.3.0 路线）：把 `RUN_S2 = False` 改成 `RUN_S2 = True`，`Internet = On`，`Run all`。约 15–30 分钟（含编译，**估算值**）。
+
+跑完后读 `S0_ENV` 的输出，它会列出 `/kaggle/input` 下每个 Dataset 的文件数、大小、以及**所有 `.gguf` 的完整路径**。S4–S8 仍需要你把路径抄进配置 cell 的 `CFG` 再逐段执行 —— 只有 S2/S3 是一键的。
 
 ---
 
@@ -64,7 +71,7 @@ research/kaggle/
 | `S0_ENV` | **开** | — | 120 s | GPU / CPU / RAM / 磁盘 / 工具链 / input 清单 | 这台机器能干什么 |
 | `S1_SMOKE` | **开** | — | 240 s | 合成 GGUF 往返、fp16 vs bf16 TFLOP/s、拷贝带宽、磁盘写速 | 解析器和预算算术对不对 |
 | `S2_BUILD` | 关（`RUN_S2=True` 时自动开） | **不需要任何输入**：源码由 S2 自己下载 | 2400 s | `llama-imatrix` / `llama-quantize` / `llama-perplexity` / `llama-cli` | 工具链能否就位 |
-| `S3_IMATRIX` | 关 | S2 + `IMATRIX_BASE` + 校准语料 | 3600 s | `imatrix.gguf` + sha256 | 校准信息是否对等 |
+| `S3_IMATRIX` | 关（`RUN_S3=True` 时自动开） | S2 + imatrix base + 校准语料，**全部由 S3 自己取** | 3600 s | `imatrix.gguf` + sha256 + provenance | 校准信息是否对等 |
 | `S4_QUANT` | 关 | S2 + S3 + `BASE_GGUF`（f16/bf16） | 1800 s | 两个 GGUF + provenance + 逐文件 bpw | 能否编码、字节多少 |
 | `S5_BYTES` | 关 | S4（或任意 GGUF） | 300 s | 逐张量类型字节、按 attn/ffn/embed 分类 | 哪些张量没被低位量化 |
 | `S6_NLL` | 关 | S2 + S5 + 评测语料 | 5400 s | 分组配对 NLL + bootstrap CI | 2.31 bpw 差多少 nats |
@@ -115,7 +122,52 @@ commit 的校验强度分三档，写进结果的 `commit_source` / `commit_veri
 
 **失败时不让人读编译错误**：`_explain_s2_failure()` 把 `CommandFailed` 的日志尾部翻译成"症状 → 处置"一句话（nvcc 与 host g++ 不兼容 / 找不到 nvcc / 磁盘满 / 内存不足 / cmake 配置阶段 / 其他），并给出日志路径；S9 报告第 2 节单独记 S2 的状态与四个二进制路径。`test_s2_failure_message_actionable` 钉住六种症状。
 
+**S3 的开关与参数（v0.4.0：一个开关 `RUN_S3`，其余自动）**
+
+| 键 | 默认 | 谁设 | 为什么 |
+|---|---|---|---|
+| `RUN_S3` | `False` | **用户** | 唯一需要手改的开关。`True` 时 `_apply_run_switches()` 一次填好 S2 编译参数 + 下面全部 S3 参数；`False` 时一个字段都不改 |
+| `S3_AUTO_FETCH_MODEL` | `False` | `RUN_S3` | `True` 才允许联网下载 pinned 的 Q8_0（8,709,519,168 B，sha256 `0cfbf745…`，revision `a6adef13…`） |
+| `S3_AUTO_FETCH_CALIB` | `False` | `RUN_S3` | `True` 才允许联网下载 wikitext train parquet（6,357,543 B）并转纯文本 |
+| `IMATRIX_BASE_KIND` | `""` | `RUN_S3` | 自动填成 `q8_0`。手动填了 `IMATRIX_BASE` 就以手动为准，且**不下载也不删**那个文件 |
+| `CALIB_SOURCE` | `""` | `RUN_S3` | 自动填成 `wikitext-2-raw/train`，写进 provenance 与 S9 报告 |
+| `NGL_MARGIN_GB` | `1.0` | `RUN_S3` | 提到 `2.0`：`_fit_ngl()` 按「模型字节 + 余量 ≤ 可用显存」判定，T4 上 8.11 + 2.0 = 10.11 < 13.56 GiB → `-ngl 99` |
+| `S3_DELETE_Q8_AFTER` | `False` | `RUN_S3` | `True` = imatrix 验证成功且记录写盘之后回收 Q8_0（磁盘账要求）。改成 `False` 会保留 Q8_0，working 少 8.11 GiB |
+| `IMATRIX_CTX` / `IMATRIX_CHUNKS` | `512` / `32` | 用户 | 32 × 512 = 16,384 token，首轮只作 pilot |
+
+**断点与复用**：Q8_0 与校准语料各有一个 `.stamp.json`（repo / revision / sha256 / bytes），命中就不重下；下载中断时 `.partial` + sidecar 保留断点。**Q8_0 被回收之后，重跑 S3 会重新下载 8.11 GiB** —— 这是"成功后才清理"的直接后果。
+
 **一个容易踩的坑**：不要为了省编译时间去关 `LLAMA_BUILD_SERVER`。上游 `tools/CMakeLists.txt` 里 `add_subdirectory(cli)` 写在 `if (LLAMA_BUILD_SERVER)` 内部，关了就连 `llama-cli` 都没有（S7 要用）。
+
+---
+
+## 五之二、Kaggle Session 与编译产物复用（v0.4.0 新增，重要）
+
+Session 掉线是常态，不是异常。v0.4.0 按"不假设旧状态"设计：
+
+| 官方文档事实 | 对设计的影响 |
+|---|---|
+| 交互 session **空闲 20 分钟**即结束 | 断线随时可能发生 |
+| `/kaggle/working` ≤ 20 GB **自动保存**，可在未来 Notebook 复用 | 编译产物有机会跨 session 复用 |
+| **Save & Run All = 全新干净状态**（12 小时上限） | 不能依赖上一次的内存状态 |
+| Quick Save 只快照、不重跑 | 不能假设它一定存下 build |
+| Add Input 可以搜「任何 Notebook 的输出文件」 | 二进制也能变成只读 Input（可选优化） |
+
+**"掉线后不 commit 是否一定恢复"官方没写** → 每次启动都重新探活，探不到就自动重编。
+
+二进制的查找顺序（`_find_llama_bins()`，每个候选**真跑一次 `--version`**）：
+
+| 顺序 | 来源 | `build_reuse` |
+|---|---|---|
+| 1 | `/kaggle/working/trlab/build-llama/bin/` | `existing_build` |
+| 2 | `CFG["LLAMA_BIN"]` 指向的目录 | `user_bin` |
+| 3 | 扫 `/kaggle/input`（限时 20 s / 20000 目录） | `attached_input` |
+| 4 | 都没有 → 完整走 S2（下载源码 + 编译 ≈ 28 分钟） | `rebuilt` |
+
+**"存在"不等于"能跑"**：动态库缺失、架构不匹配的二进制过不了 `--version` 这一关，会落到下一档。`test_s3_probe_rejects_unrunnable` 钉住这一点。
+
+**挂不挂都跑得通，区别只是要不要等 28 分钟。** 想省这段时间，就在 S2 成功后 `Save Version`，之后在新 Notebook 里 `Add Input` 挂自己上次的输出 —— 但这是可选优化，不是必要步骤。
+
 
 ---
 
@@ -123,13 +175,16 @@ commit 的校验强度分三档，写进结果的 `commit_source` / `commit_veri
 
 全部**只读挂载**到 `/kaggle/input/<slug>/`，不占 `/kaggle/working` 的 20 GB。
 
+> **v0.4.0 起 S3 不需要这里任何一样东西** —— Q8_0 和校准语料都由 notebook 按 pinned revision 自己下载并校验。本节从 S4 起才需要。
+
 | # | 内容 | 建议 | 大小 | 谁需要 |
 |---|---|---|---|---|
-| 1 | **base GGUF** | `Qwen3-8B` 的 f16 或 Q8_0 | f16 = 15.25 GiB；Q8_0 ≈ 8.1 GiB | S3 / S4 / S8 |
-| 2 | **校准语料** `calib.txt` | wikitext-2-raw 的 **train** split | ≥ 200 KB（S3 会警告过短） | S3 |
+| 1 | **base GGUF** | `Qwen3-8B` 的 f16 或 Q8_0 | f16 = 15.25 GiB；Q8_0 ≈ 8.1 GiB | S4 / S8（S3 会自动下自己的 Q8_0） |
+| 2 | **校准语料** `calib.txt` | wikitext-2-raw 的 **train** split | ≥ 200 KB（S3 会警告过短） | S3（仅当镜像里没有 pyarrow/pandas 时的退路） |
 | 3 | **评测语料** `eval.txt` | wikitext-2-raw 的 **test** split | 几十 KB 起 | S6 / S7 / S8 |
-| 4 | **llama.cpp 源码** | **不需要**（v0.3.0：`RUN_S2=True` 时 notebook 自己下载） | 断网备选：把源码挂上来，设 `CFG["LLAMA_SRC"]` | ~36 MB | S2 |
-| 5 | （可选）第三方量化 GGUF | 别人的 IQ2_XS / IQ4_XS | 2–5 GiB | SX |
+| 4 | **llama.cpp 源码** | **不需要**（`RUN_S2`/`RUN_S3=True` 时 notebook 自己下载） | 断网备选：把源码挂上来，设 `CFG["LLAMA_SRC"]` | ~36 MB | S2 |
+| 5 | **llama.cpp 二进制**（可选优化） | 上次 S2 编好的 `build-llama/bin/` 四个文件 | 1.5–3.5 GiB | 让新 Session 零编译；不挂也能跑，只是多等 28 分钟 |
+| 6 | （可选）第三方量化 GGUF | 别人的 IQ2_XS / IQ4_XS | 2–5 GiB | SX |
 
 **两个 base 不是同一个东西（v0.2.1）**
 
@@ -575,7 +630,71 @@ CMake Generate step failed.
 
 顺带修了一个非阻断缺陷（C-3）：结果里 `version` 是空串。根因在上游 —— `common/build-info.h:13` 的签名是 `void llama_print_build_info(const char *, FILE * = stderr);`，`common/arg.cpp:1457` 的 `--version` 分支没传流，所以 build info 写 **stderr**，而代码只取了 stdout。`_probe_version()` 现在两个流都接，stdout 为空时用 stderr，并渲染进 S9 报告第 2 节。**注意**：这只证明二进制能启动并打印版本，不等于验证过任何模型推理。
 
-**S3 的设计方向**见 [`KAGGLE_S3_DESIGN.md`](./KAGGLE_S3_DESIGN.md)（磁盘账、跨 session 是否重编、Quick Save 的诚实结论、五个待用户决策点）。**未实现、未授权。**
+**S3 的一键化实现（v0.4.0）**见 [`KAGGLE_S3_DESIGN.md`](./KAGGLE_S3_DESIGN.md)：磁盘账、Kaggle Session 事实、五个决策点的落点、二进制探活三档来源。**代码与测试已完成，真实 Kaggle 运行待用户执行。**
+
+---
+
+## 九之七、v0.4.0：S3 一键化 + Session 掉线恢复
+
+用户在确认五个决策点之后追加了一条关键情况：**Kaggle Session 已掉线，S2 编译成功的环境可能丢失**。v0.4.0 就是为"全新 Session 点一次 Run All 也能跑通"而做的。
+
+### 唯一开关
+
+```python
+RUN_S3 = True      # 就改这一个；S2 由它自动带上
+```
+
+`_apply_run_switches()` 在两个开关都 `False` 时返回 `{"run_s2": False, "run_s3": False}` 且**一个 CFG 字段都不改**；`RUN_S3=True` 时一次填好 S2 编译参数、`S3_AUTO_FETCH_MODEL` / `S3_AUTO_FETCH_CALIB`、`IMATRIX_BASE_KIND="q8_0"`、`CALIB_SOURCE`、`NGL_MARGIN_GB=2.0`、`S3_DELETE_Q8_AFTER=True`，并**只**开 `S2_BUILD` 与 `S3_IMATRIX`。S4–S8 与 SX 一律不动。
+
+### 二进制：存在 ≠ 能跑
+
+`_find_llama_bins()` 按 `existing_build` → `user_bin`（`CFG["LLAMA_BIN"]`）→ `attached_input`（扫 `/kaggle/input`，限时 20 s / 20000 目录）→ `rebuilt` 顺序找四个可执行文件，**每个候选都真跑一次 `--version`**。动态库缺失、架构不匹配的"存在但不可执行"文件会被这一关拦下，落到下一档。一个都没有才走完整 S2（下载 pinned 源码 + 编译 ≈ 28 分钟）。
+
+没有源码的 session 里 `_resolve_commit_record()` 回落到 `S2_PINNED["commit"]` 并标 `declared` + `commit_verified=false`，日志明说"未校验" —— 复用二进制时**不伪造版本证明**。
+
+### 下载：单副本 + 四重校验 + 断点续传
+
+- 边写 `.partial` 边算 sha256 → `os.replace` 原子落地；**不用 `huggingface_hub`**，杜绝 `~/.cache/huggingface` 里的第二份完整副本；
+- `.partial.json` sidecar 记 `bytes_done` 与已写内容前缀哈希，重跑从断点续传；前缀哈希不符就删掉重下（早期版本在这里有真 bug：垃圾被拼到新内容后面，报"下载得到 8231 B，预登记 8192 B"）；
+- `Content-Length` / 文件 size / `x-linked-etag` / sha256 四重核对，任一不符拒绝落地；
+- 下载前 `_disk_precheck()`，空间不够直接报缺口，不下一半再爆；
+- Q8_0 与语料各有 `.stamp.json`（repo/revision/sha256/bytes），命中即复用不重下。
+
+两个 pin 的 digest 是**双源互证**的：`/api/models/<repo>/tree/<rev>` 的 `lfs.oid` 与 resolve URL 响应头 `x-linked-etag` 互相独立且一致，均等于文件内容 sha256。
+
+### `-ngl` 与 OOM 降级
+
+`NGL_MARGIN_GB=2.0`（v0.3 是 1.0）：`_fit_ngl()` 按「模型字节 + 2 GiB ≤ 可用显存」判定，T4 上 8.11 + 2.0 = 10.11 < 13.56 GiB → `-ngl 99`。OOM 时 `_ngl_ladder()` 给 `[99, 18, 0]` 逐级降，**每次尝试的 `ngl / ok / rc / oom / 日志尾部`全量进 provenance**，不只写最终值。`_is_oom_tail()` 认 `out of memory` / `cudaErrorMemoryAllocation` / `failed to allocate` / `bad_alloc` / `ggml_gallocr_reserve_n` 等特征。
+
+### Q8_0 回收顺序是硬编码的
+
+```
+生成 → 验证（体积 ≥ 100 KB 且 n_tensors > 0）→ 写 OUT/S3_IMATRIX.json
+→ _reclaim_q8() → 再写一次含 q8_reclaimed / q8_reclaimed_bytes / q8_reclaim_reason
+```
+
+失败时 Q8_0、校准语料、下载断点**全部保留**（那些才是"修完重跑不重下"的可恢复状态），只有不可续跑的半成品 `imatrix.gguf.partial` 被删掉 —— 它留着只是白占 working 的 20 GB。
+
+### 前置守卫
+
+`STAGE_REQUIRES_OK`：`S3_IMATRIX` 要求 `S2_BUILD`、`S4_QUANT` 要求 `S2_BUILD` + `S3_IMATRIX`、`S6_NLL`/`S7_QUALITY` 要求 `S2_BUILD`。**只在前置阶段真的失败时拦**；前置根本没开（`False`）不拦 —— 否则手动模式会被自己的默认值卡死。
+
+### 测试
+
+新增 24 项 mock 回归，`test_trlab.py` 总计 **68 项**。覆盖用户点名的五类场景：
+
+| 场景 | 测试 |
+|---|---|
+| 全新 Session 无二进制 | `test_s3_fresh_session_no_binaries` |
+| 已有二进制复用 | `test_s3_existing_build_reused` / `test_s3_attached_input_reused` / `test_s3_probe_rejects_unrunnable` |
+| S2 失败则 S3 不执行 | `test_s3_s2_failure_blocks_s3` |
+| 掉线后重启 | `test_s3_restart_after_disconnect` |
+| 磁盘空间不足 | `test_s3_disk_precheck_insufficient` |
+
+外加下载安全（checksum / etag / 单副本 / 续传 / 坏 partial / 网络失败 / 重复运行复用）、`-ngl` 阶梯与 OOM 降级、失败人话、Q8_0 回收三态、手动 base 不被碰、报告行渲染。
+
+**这一轮抓到并修掉 3 个真 bug**：前缀哈希不符时没删 `.partial`（会把垃圾拼到新内容后面）、复用二进制时 `commit_source` 记成 `null`（看不出"我们认为它是哪个版本"）、半成品 imatrix 在失败后留在 working。
+
 
 ---
 
@@ -585,7 +704,7 @@ CMake Generate step failed.
 python3 research/kaggle/test_trlab.py
 ```
 
-不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。它在一个临时目录里把 notebook 的 16 个 code cell 按顺序 exec 一遍，然后跑 44 项断言。当前结果：**44/44 通过，约 11 秒**。
+不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。它在一个临时目录里把 notebook 的 16 个 code cell 按顺序 exec 一遍，然后跑 68 项断言。当前结果：**68/68 通过，约 25 秒**。
 
 | 测试 | 钉住的问题 |
 |---|---|
@@ -627,6 +746,30 @@ python3 research/kaggle/test_trlab.py
 | `test_s2_fingerprint_binds_cuda_no_vmm` | **C-1**：`CUDA_NO_VMM` 进 S2 指纹，改开关必然重跑，不会误 RESUME 旧 build |
 | `test_s2_probe_version_reads_stderr` | **C-3**：`--version` 输出走 stderr，只取 stdout 会得空串；两个流都空时给 rc 而不是空串 |
 | `test_s2_network_failure_message` | 真的连不上时消息含"Internet = On"，且不留下 `.partial` |
+| `test_s3_run_switch_scope` | **D-3**：`RUN_S3=True` 只开 S2+S3，两个 `S3_AUTO_FETCH_*` 自动置真，S4–S8 与 SX 全 `False` |
+| `test_s3_pins_are_registered` | 两个 pin 的 repo/revision/sha256/bytes/etag_header 都在，且 sha256 是 64 位十六进制 |
+| `test_s3_fresh_session_no_binaries` | **全新 Session**：没有任何二进制 → 走完整 S2 流程，`build_reuse="rebuilt"` |
+| `test_s3_existing_build_reused` | `build-llama/bin` 有四个能跑的假二进制 → 复用，**零下载零编译**，`build_reuse="existing_build"` |
+| `test_s3_attached_input_reused` | `/kaggle/input` 下扫到二进制 → 复用，`build_reuse="attached_input"` |
+| `test_s3_probe_rejects_unrunnable` | 二进制文件存在但 `--version` 跑不通 → **不算复用**，落到下一档（存在 ≠ 能跑） |
+| `test_s3_s2_failure_blocks_s3` | **S2 失败则 S3 不执行**：`STAGE_REQUIRES_OK` 拦下，不会拿残缺文件硬跑 |
+| `test_s3_restart_after_disconnect` | **掉线后重启**：上次的 `.stamp.json` 命中 → Q8_0 与语料都不重下 |
+| `test_s3_disk_precheck_insufficient` | **磁盘不足**：下载前就报缺口，一个字节都不下 |
+| `test_s3_download_checksum_mismatch` | sha256 不符 → 拒绝落地，删 `.partial`，不解压不量化 |
+| `test_s3_download_etag_mismatch_refuses` | `x-linked-etag` 不符同样拒绝（双源校验缺一不可） |
+| `test_s3_download_no_duplicate_full_copy` | **单副本**：全程只有一个 `.partial` 在长大，`os.replace` 之后才出现正式文件；不用 `huggingface_hub` |
+| `test_s3_download_resume_from_partial` | 已有 `.partial` + sidecar 相符 → 发 Range 从断点续传，不重下已传部分 |
+| `test_s3_download_bad_partial_restarts` | sidecar 的前缀哈希与文件内容不符 → 删掉从头下（真 bug：曾把垃圾拼到新内容后面） |
+| `test_s3_download_network_failure_keeps_partial` | 网络中断 → 保留 `.partial` + sidecar，提示重跑续传，**不假装成功** |
+| `test_s3_repeat_run_uses_cache` | 重复 `Run All` → stamp 命中，Q8_0 与语料都不重下 |
+| `test_s3_ngl_ladder` | 阶梯严格递减、以 0（纯 CPU）结尾；1 层模型"折半"仍是 1 层 |
+| `test_s3_ngl_fallback_on_oom` | 第一次 OOM → 自动降 `-ngl` 重试，两次尝试连 `oom` 标记与日志尾部都进 provenance |
+| `test_s3_imatrix_failure_explains` | 三种失败症状（模型打不开 / token 数不够 / 显存不足）各自给出人话 |
+| `test_s3_q8_deleted_only_after_record` | **Q8_0 必须在结果记录写盘之后才删**（用 spy 记录"删除那一刻"记录文件是否已在盘上） |
+| `test_s3_q8_kept_when_imatrix_fails` | imatrix 失败 → Q8_0 原样保留、半成品被清掉、不写成功记录 |
+| `test_s3_q8_not_deleted_when_configured_off` | `S3_DELETE_Q8_AFTER=False` → 保留 Q8_0，并记录原因 |
+| `test_s3_manual_base_not_touched` | 手动指定 `IMATRIX_BASE` 时，S3 既不下载也不删那个文件 |
+| `test_s3_report_lines` | S9 第 4 节的摘要行覆盖回收/未回收/声明/OOM 记录各分支 |
 | `test_paired_bootstrap_edges` | n=0 / n=1 返回 `ci95=None`；全正差值给不含 0 的 CI |
 | `test_ggml_type_table` | 7 个关键 type 的块尺寸/bpw |
 | `test_default_stages_complete` | **默认 S0/S1/S9 三个都必须 `ok`，S9 报告必须有效**；且 `results.json` 里 `S9_REPORT.status` 不能是 `null`（**P0-B**） |
@@ -660,6 +803,14 @@ python3 research/kaggle/test_trlab.py
 18. **Kaggle 能否直连 github.com 未验证**。自动下载走标准库 `urllib`（不依赖 curl/wget）。如果 Kaggle 网络策略拦了 GitHub，S2 会给出"检查 Settings → Internet = On"的报错，此时用断网备选：手动下载同一 tarball、挂成 Dataset、设 `CFG["LLAMA_SRC"]`。
 19. ~~`-DGGML_CUDA_NO_VMM=ON` 只跨过 Generate 阶段~~ **已被实测取代（v0.3.2）**：真实运行里 build 阶段同样通过，四个二进制就位。该开关的代价不变且有限：显存池从 VMM 回退到 cudaMalloc 池（`ggml-cuda.cu:745`），算力内核与数值不变；构建产物会带 `NO_VMM=1` 特性标记。仍未观测的是 build 目录大小与峰值 RAM。
 20. **错误分类器按关键词匹配，永远可能漏**。v0.3.0 的 `"nvcc" in tail and "not found" in tail` 全文包含判断就把 driver 错误误判成了 nvcc 缺失。现在改成同行匹配 + driver 专用分支，但新的日志形态仍可能落到通用分支 —— 通用分支的处置是"看日志最后 30 行"，这是兜底不是终点。
+21. **S3 的一键化链路没有在真实 Kaggle 上跑过**。v0.4.0 的 68 项测试全是 CPU/mock；Q8_0 8.11 GiB 的实际下载耗时、`_fit_ngl` 在真实 T4 上的判定、imatrix 实际耗时、回收后的磁盘账，都还是估算。第一次跑请对照 runbook 5.4 的清单逐条核。
+22. **Kaggle 能否直连 huggingface.co 未验证**（github.com 已实测可达）。HF 的 CDN 域名不同，网络策略可能不同。连不上时 S3 会报可操作的错并保留断点。
+23. **Kaggle 镜像里有没有 `pyarrow` / `pandas` 未验证**。设计上不硬依赖（先 pyarrow 再 pandas，都没有就报错），退路是自己把 parquet 转成 `calib.txt` 挂成 Dataset 并设 `CFG["CALIB_TXT"]`。
+24. **`/kaggle/working` 是否跨 interactive session 保留未验证**。官方只说 ≤ 20 GB 自动保存；"掉线后不 commit 是否一定恢复"没写。v0.4.0 按"不保"做最坏假设，每次启动探活二进制，探不到就自动重编约 28 分钟 —— **首次新 Session 重编是可接受代价，已如实记录**。
+25. **Q8_0 被回收之后，重跑 S3 会重新下载 8.11 GiB**。这是决策 5（成功后才清理）的直接后果。想避免就把 `CFG["S3_DELETE_Q8_AFTER"]` 改成 `False`，代价是 working 少 8.11 GiB。
+26. **imatrix base 是 Q8_0，不是 f16**。激活统计量是对 f16 的近似，比"从 Q8_0 二次量化"好，但不等于 f16 口径。`S3_IMATRIX.json` 里 `imatrix_base_from_approx=True`，S9 报告会声明 —— 别在结论里当成 f16。
+27. **校准规模 32 × 512 = 16,384 token 只是 pilot**。对 IQ2_XS 这种 2.31 bpw 的格式，imatrix 质量对校准量敏感；要更稳需调 `IMATRIX_CHUNKS`，耗时线性增长。
+28. **复用挂载的二进制时，commit 只能是声明值**。`build_reuse` 三档里 `attached_input` 和没有源码的 `existing_build` 都拿不到 git 或 tarball digest，`commit_source="declared"` + `commit_verified=false`。报告里会明说"未校验"，不会伪装成已验证。
 
 ---
 
@@ -694,13 +845,14 @@ python3 research/kaggle/test_trlab.py
 | **S2 真实 Kaggle 运行** | ✅ **27 分 52 秒通过**（v0.3.1，用户回传 `S2_BUILD-3.json`）：四个二进制就位、`commit_source=pinned_tarball`、三个 cmake 开关生效、磁盘剩 19.07 GiB |
 | S2 version 探测 | ✅ stderr 回退 + 双流皆空时给 rc（`_probe_version`） |
 | S2 自动取源码（mock） | ✅ 默认不联网；只开 S2；digest 不符拒解压并删包；`..` 条目拒解压；三级缓存不重下；目录名不符拒解压；`pinned_tarball` 校验档；六种失败症状各有处置；真断网时消息含 "Internet = On" |
-| `test_trlab.py` | ✅ **44/44，约 11 秒** |
+| **S3 一键化（mock，v0.4.0）** | ✅ 24 项新回归全通过：二进制三档复用 + `--version` 真跑 + 不可执行被拒；S2 失败拦下 S3；掉线重启复用断点；磁盘不足拒下；四重完整性校验；`.partial` 续传 / 坏 partial 重下 / 网络失败保留断点 / 重复运行不重下；`-ngl` 阶梯与 OOM 降级；Q8_0 只在记录写盘后删 / 失败保留 / 关开关时保留；手动 base 不碰不删；S9 报告行渲染 |
+| `test_trlab.py` | ✅ **68/68，约 25 秒** |
 
-**没有**验证的：S2 的实际编译、S3/S4 的真实量化、S6 的 `llama-perplexity` 真实输出解析（正则已用真实格式字符串测过，但没跑过真实二进制）。这三项必须在 Kaggle 上首跑时人工确认。
+**没有**验证的：S3 的真实下载与 imatrix 生成、S4 的真实量化、S6 的 `llama-perplexity` 真实输出解析（正则已用真实格式字符串测过，但没跑过真实二进制）。这三项必须在 Kaggle 上首跑时人工确认。
 
-**v0.3.1 的真实进度（来自用户 2026-10-21 的 Kaggle 运行）**：源码下载与 sha256 校验**已通过**，CMake 检测到 CUDA 12.8.93 与 host GNU 13.3.0、arch=75、`-- Including CUDA backend`，随后在 `ggml-cuda/CMakeLists.txt:181` 因 `CUDA::cuda_driver` target 缺失而 Generate 失败。也就是说：**自动下载链路和工具链预检都被真实环境验证过了，失败的只有 CMake 的 driver 链接这一处**，本版针对它做了热修，但热修本身尚未在 Kaggle 上验证。
+**v0.3.1 的真实进度（来自用户 2026-10-21 的 Kaggle 运行）**：源码下载与 sha256 校验**已通过**，CMake 检测到 CUDA 12.8.93 与 host GNU 13.3.0、arch=75、`-- Including CUDA backend`，随后在 `ggml-cuda/CMakeLists.txt:181` 因 `CUDA::cuda_driver` target 缺失而 Generate 失败。也就是说：**自动下载链路和工具链预检都被真实环境验证过了，失败的只有 CMake 的 driver 链接这一处**，本版针对它做了热修；v0.3.2 已确认热修后完整通过。
 
-**没有**验证的还有：S2 从 Kaggle 实际编译能否走完（绕过 driver 链接后的 build 阶段）、编译真实耗时、build 目录大小与峰值内存、`llama-imatrix` 在 T4 上跑 8B Q8_0 的耗时。runbook 第八节列了完整清单。
+**没有**验证的还有：S2 build 目录大小与峰值内存、`llama-imatrix` 在 T4 上跑 8B Q8_0 的耗时、S3 的 HF 下载实际带宽、`/kaggle/working` 是否跨 session 保留。runbook 第八节列了完整清单。
 
 ---
 
@@ -708,8 +860,8 @@ python3 research/kaggle/test_trlab.py
 
 保持 `STAGES` 里只有 `S0_ENV` / `S1_SMOKE` / `S9_REPORT` 为 `True`，其余全 `False`，`Run All`。约 2–4 分钟，不碰大文件、不联网。
 
-**如果 `S0_ENV` 说 `/kaggle/input` 下没有 `.gguf`，那 S3–S7 一定跑不了 —— 这是设计如此，不是 bug。**
+**如果 `S0_ENV` 说 `/kaggle/input` 下没有 `.gguf`，那 S4–S8 一定跑不了 —— 这是设计如此，不是 bug。** 注意 v0.4.0 起 **S3 不再需要任何 `/kaggle/input`**：它自己下载 Q8_0 与校准语料。
 
-确认环境没问题之后，**不要**把 `STAGES` 全改成 `True` 再 `Run All`。下一步按 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md) 走：把 `RUN_S2` 改成 `True`（`Internet` 记得设 On），编译过了再开 `S3_IMATRIX`，每一段都有停机点和人工核对清单。
+确认环境没问题之后，**不要**把 `STAGES` 全改成 `True` 再 `Run All`。下一步按 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md) 走：把 `RUN_S3` 改成 `True`（`Internet` 记得设 On），notebook 会自己处理 S2 依赖、Q8_0 下载、校准语料与 imatrix 生成，每一段都有停机点和人工核对清单。
 
-> v0.3.0 起 `RUN_S2=True` 会自动把 `STAGES["S2_BUILD"]` 打开，所以这一步只需要改一个开关，不用再手改 `STAGES`。
+> v0.4.0 起 `RUN_S3=True` 会自动把 `STAGES["S2_BUILD"]` 和 `STAGES["S3_IMATRIX"]` 都打开，所以这一步只需要改一个开关，不用再手改 `STAGES`，也**不需要**先单独跑一遍 S2。

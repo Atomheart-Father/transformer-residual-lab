@@ -19,6 +19,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import time
 import traceback
 from pathlib import Path
 
@@ -805,7 +806,8 @@ def test_default_stages_complete(ns):
     md = rp.read_text(encoding="utf-8")
     for must in ("# transformer-residual-lab · Kaggle 运行报告",
                  "## 2. 工具链（S2_BUILD）", "## 3. Smoke test",
-                 "## 9. 结论边界",
+                 "## 4. imatrix（S3_IMATRIX）",
+                 "## 10. 结论边界",
                  "SMOKE_OK = **True**"):
         assert must in md, f"报告缺少必要内容：{must!r}"
 
@@ -1139,20 +1141,22 @@ def _fake_downloader(src_file):
 
 
 def test_s2_default_off_no_network(ns):
-    """默认 RUN_S2=False：一个字段都不改，也不许联网。
+    """默认 RUN_S2=False / RUN_S3=False：一个字段都不改，也不许联网。
 
     Kaggle 上"Run All"不应该因为导入 notebook 就悄悄下载。想下载必须显式把
-    RUN_S2 改成 True —— 这一点由 _apply_run_switches 的早退保证。
+    开关改成 True —— 这一点由 _apply_run_switches 的早退保证。
     """
     assert ns["RUN_S2"] is False, "默认值必须是 False"
+    assert ns["RUN_S3"] is False, "默认值必须是 False"
     before_stages = dict(ns["STAGES"])
     before_cfg = {k: ns["CFG"][k] for k in ("S2_AUTO_FETCH_SOURCE", "LLAMA_COMMIT",
-                                           "CUDA_ARCH", "BUILD_JOBS", "BUILD_CUDA")}
+                                           "CUDA_ARCH", "BUILD_JOBS", "BUILD_CUDA",
+                                           "S3_AUTO_FETCH_MODEL", "S3_AUTO_FETCH_CALIB")}
     out = ns["_apply_run_switches"]()
-    assert out == {"run_s2": False}, out
-    assert ns["STAGES"] == before_stages, "RUN_S2=False 时不许改 STAGES"
+    assert out == {"run_s2": False, "run_s3": False}, out
+    assert ns["STAGES"] == before_stages, "两个开关都 False 时不许改 STAGES"
     for k, v in before_cfg.items():
-        assert ns["CFG"][k] == v, f"RUN_S2=False 时不许改 CFG['{k}']"
+        assert ns["CFG"][k] == v, f"两个开关都 False 时不许改 CFG['{k}']"
 
     # 没有手动源码 + 没开自动获取 → GuardError，且消息里要提到 RUN_S2
     CFG = ns["CFG"]
@@ -1594,6 +1598,856 @@ def test_a100_mock_end_to_end(ns):
     assert "T4（CC 7.5）没有原生 bf16" not in md
 
 
+
+
+# ---------------------------------------------------------------- S3 一键化（v0.4）
+
+def _make_fake_bins(dirpath, runnable=True):
+    """在 dirpath 下造四个"能跑/不能跑"的假 llama 二进制。返回路径列表。"""
+    d = Path(dirpath)
+    d.mkdir(parents=True, exist_ok=True)
+    out = []
+    for name in ("llama-imatrix", "llama-quantize", "llama-perplexity", "llama-cli"):
+        p = d / name
+        # 刻意写到 stderr：真实 llama-cli --version 就是把 build info 写 stderr
+        p.write_text("#!/bin/sh\necho 'version: fake build' 1>&2\nexit 0\n",
+                     encoding="utf-8")
+        p.chmod(0o755 if runnable else 0o644)
+        out.append(p)
+    return out
+
+
+def _pin_blob(ns, src_file, sha=None, bytes_=None, url="https://example.invalid/blob"):
+    """把 ns['S3_PINNED'] / ns['CALIB_PINNED'] 指向本地文件，返回 (pin, restore)。"""
+    import hashlib as _hl
+
+    data = Path(src_file).read_bytes()
+    pin = {"repo": "fake/repo", "revision": "b" * 40, "filename": Path(src_file).name,
+           "url": url, "sha256": sha or _hl.sha256(data).hexdigest(),
+           "bytes": bytes_ if bytes_ is not None else len(data),
+           "kind": "q8_0", "etag_header": "x-linked-etag"}
+    orig = ns["S3_PINNED"]
+    ns["S3_PINNED"] = pin
+    return pin, (lambda: ns.__setitem__("S3_PINNED", orig))
+
+
+def _fake_stream(src_file):
+    """假装成 _stream_blob：把本地文件从 offset 处追加写进 path。
+
+    记录每次调用的 offset，用来验证断点续传真的发了 Range。
+    """
+    state = {"calls": [], "offsets": []}
+
+    def fake(url, path, offset, hasher, deadline, tag, expect_bytes):
+        state["calls"].append({"url": url, "offset": offset,
+                               "path": str(path), "tag": tag})
+        state["offsets"].append(offset)
+        data = Path(src_file).read_bytes()
+        with open(path, "ab") as f:
+            f.write(data[offset:])
+            hasher.update(data[offset:])
+        return 206 if offset else 200, len(data) - offset, len(data), None
+
+    fake.state = state
+    return fake
+
+
+def test_s3_run_switch_scope(ns):
+    """RUN_S3=True 只开 S2+S3；S4–S8 必须全部保持 False。"""
+    STAGES, CFG = ns["STAGES"], ns["CFG"]
+    snap_s, snap_c = dict(STAGES), dict(CFG)
+    orig = ns["RUN_S3"]
+    try:
+        ns["RUN_S3"] = True
+        out = ns["_apply_run_switches"]()
+        assert out["run_s3"] is True
+        assert STAGES["S2_BUILD"] is True, "RUN_S3 必须隐含打开 S2（imatrix 要二进制）"
+        assert STAGES["S3_IMATRIX"] is True
+        for k in ("S4_QUANT", "S5_BYTES", "S6_NLL", "S7_QUALITY",
+                  "S8_BF16_ANCHOR", "SX_EXPLORE"):
+            assert STAGES[k] is False, f"{k} 被 RUN_S3 顺手打开了"
+        assert CFG["S3_AUTO_FETCH_MODEL"] is True
+        assert CFG["S3_AUTO_FETCH_CALIB"] is True
+        assert CFG["NGL_MARGIN_GB"] == 2.0, "v0.4 起 -ngl 余量至少 2 GiB"
+        assert CFG["S3_DELETE_Q8_AFTER"] is True
+        assert CFG["BASE_GGUF"] == "", "RUN_S3 不许设 BASE_GGUF（S4 是关闭的）"
+        assert out["imatrix_base"] == ns["S3_PINNED"]["filename"]
+    finally:
+        ns["RUN_S3"] = orig
+        ns["_apply_run_switches"]()
+        STAGES.clear(); STAGES.update(snap_s)
+        CFG.clear(); CFG.update(snap_c)
+
+
+def test_s3_pins_are_registered(ns):
+    """Q8_0 与 wikitext 的预登记值必须与 HF 上核对过的一致（防手滑改坏）。"""
+    q8, cal = ns["S3_PINNED"], ns["CALIB_PINNED"]
+    assert q8["bytes"] == 8709519168, q8["bytes"]
+    assert q8["sha256"] == ("0cfbf745760f07a76ddeb358dd025a27"
+                           "f2e11d1ca9c9a4169a373d52990fe86e")
+    assert q8["revision"] == "a6adef130ffb23ddaf1a62fec9dced968c9bc482"
+    assert q8["url"].endswith(f"/resolve/{q8['revision']}/{q8['filename']}")
+    assert cal["bytes"] == 6357543, cal["bytes"]
+    assert cal["sha256"] == ("e83889baabc497075506f91975be5fac"
+                            "0d45c5290b6b20582c8cd1e853d0c9f7")
+    assert cal["split"] == "train", "校准必须来自 train split（与 S6 的 test 隔离）"
+
+
+def test_s3_fresh_session_no_binaries(ns):
+    """全新 Session、四个二进制都不在 → 必须走到"下载源码 + 编译"那条路。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_s3_fresh_")
+    orig_build, orig_in = ns["BUILD"], ns["IN"]
+    ns["BUILD"] = Path(tmp) / "build-llama"
+    ns["IN"] = Path(tmp) / "input"
+    try:
+        bins, origin, why = ns["_find_llama_bins"]()
+        assert bins is None, "没有二进制时不该返回可复用的构建"
+        assert origin is None
+        assert why and len(why) > 10, "必须说清为什么没找到"
+
+        # 探活没结果 → stage_s2_build 应该继续走 _find_llama_src（下载源码）
+        sentinel = "REACHED_SOURCE_DOWNLOAD_PATH"
+
+        def boom(deadline):
+            raise RuntimeError(sentinel)
+
+        orig_src = ns["_find_llama_src"]
+        ns["_find_llama_src"] = boom
+        try:
+            try:
+                ns["stage_s2_build"](time.time() + 60)
+                raise AssertionError("应当继续走下载源码的分支")
+            except RuntimeError as e:
+                assert sentinel in str(e), e
+        finally:
+            ns["_find_llama_src"] = orig_src
+    finally:
+        ns["BUILD"], ns["IN"] = orig_build, orig_in
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s3_existing_build_reused(ns):
+    """WORK/build-llama 里有四个二进制且跑得通 → 零编译复用，不下载源码。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_s3_exist_")
+    orig_build, orig_in = ns["BUILD"], ns["IN"]
+    ns["BUILD"] = Path(tmp) / "build-llama"
+    ns["IN"] = Path(tmp) / "input"
+    try:
+        _make_fake_bins(ns["BUILD"] / "bin", runnable=True)
+        called = {"src": False}
+
+        def boom(deadline):
+            called["src"] = True
+            raise AssertionError("复用二进制时不该下载源码")
+
+        orig_src = ns["_find_llama_src"]
+        ns["_find_llama_src"] = boom
+        try:
+            r = ns["stage_s2_build"](time.time() + 120)
+        finally:
+            ns["_find_llama_src"] = orig_src
+        assert called["src"] is False
+        assert r["reused"] is True
+        assert r["build_reuse"] == "existing_build", r["build_reuse"]
+        assert len(r["bins"]) == 4
+        # 没有源码 → commit 只能记为声明值，不许谎称已验证
+        assert r["commit_source"] == "declared", r["commit_source"]
+        assert r["commit_verified"] is False
+        assert r["version"], "复用也必须探到版本串"
+    finally:
+        ns["BUILD"], ns["IN"] = orig_build, orig_in
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s3_attached_input_reused(ns):
+    """/kaggle/input 下挂着上次的 Output → 自动扫到并用起来，不用填路径。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_s3_attach_")
+    orig_build, orig_in = ns["BUILD"], ns["IN"]
+    ns["BUILD"] = Path(tmp) / "build-llama"          # 空的：WORK 里没有
+    ns["IN"] = Path(tmp) / "input"
+    try:
+        # Kaggle 会把挂载的东西放在 /kaggle/input/<slug>/...，路径深度不确定
+        deep = ns["IN"] / "my-notebook-output" / "trlab" / "build-llama" / "bin"
+        _make_fake_bins(deep, runnable=True)
+
+        bins, origin, detail = ns["_find_llama_bins"]()
+        assert bins is not None, f"应当自动扫到挂载的二进制：{detail}"
+        assert origin == "attached_input", origin
+        assert bins["llama-cli"] == deep / "llama-cli"
+
+        r = ns["stage_s2_build"](time.time() + 120)
+        assert r["build_reuse"] == "attached_input"
+        assert r["reused"] is True
+        # 复用挂载二进制时源码不在本 Session 内 → 必须标 declared，不能假装 git 校验
+        assert r["commit_source"] == "declared"
+        assert r["commit_verified"] is False
+        assert "源码不在本 Session 内" in (r["source"].get("note") or "")
+    finally:
+        ns["BUILD"], ns["IN"] = orig_build, orig_in
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s3_probe_rejects_unrunnable(ns):
+    """二进制存在但跑不起来（chmod 644）→ 不算可复用，必须继续往下找。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_s3_dead_")
+    orig_build, orig_in = ns["BUILD"], ns["IN"]
+    ns["BUILD"] = Path(tmp) / "build-llama"
+    ns["IN"] = Path(tmp) / "input"
+    try:
+        _make_fake_bins(ns["BUILD"] / "bin", runnable=False)
+        ok, detail = ns["_probe_bin_runnable"](ns["BUILD"] / "bin" / "llama-cli")
+        assert ok is False, f"不可执行的文件必须判为跑不起来：{detail}"
+        bins, origin, why = ns["_find_llama_bins"]()
+        assert bins is None, "跑不起来的二进制不能被复用"
+        assert "跑不起来" in why, why
+    finally:
+        ns["BUILD"], ns["IN"] = orig_build, orig_in
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s3_s2_failure_blocks_s3(ns):
+    """S2 失败 → S3 必须 SKIP，不许启动后报一句"找不到 llama-imatrix"。"""
+    STAGES, STATE = ns["STAGES"], ns["STATE"]
+    snap_s = dict(STAGES)
+    snap_state = dict(STATE)
+    orig_req = ns["STAGE_REQUIRES_OK"]
+    try:
+        STAGES["S2_BUILD"] = True
+        STAGES["S3_IMATRIX"] = True
+        STATE["S2_BUILD"] = {"status": "error",
+                             "error": "RuntimeError: CUDA::cuda_driver target not found"}
+        called = {"s3": False}
+
+        def fn(deadline):
+            called["s3"] = True
+            return {}
+
+        out = ns["run_stage"]("S3_IMATRIX", fn)
+        assert called["s3"] is False, "S2 失败了 S3 不该执行"
+        assert out is None
+        assert STATE.get("S3_IMATRIX") is None, "SKIP 不该写进 STATE"
+    finally:
+        STAGES.clear(); STAGES.update(snap_s)
+        STATE.clear(); STATE.update(snap_state)
+        ns["STAGE_REQUIRES_OK"] = orig_req
+
+
+def test_s3_restart_after_disconnect(ns):
+    """掉线后重启：STATE 清空（新 Session）但磁盘上的二进制还在 → 直接复用。
+
+    Kaggle 交互会话空闲 20 分钟就断。断掉之后内存里的 STATE 没了，
+    但 /kaggle/working 里的文件可能还在。本测试钉住"文件在就能复用、
+    且不依赖任何旧内存状态"这条。
+    """
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_s3_restart_")
+    orig_build, orig_in = ns["BUILD"], ns["IN"]
+    ns["BUILD"] = Path(tmp) / "build-llama"
+    ns["IN"] = Path(tmp) / "input"
+    try:
+        _make_fake_bins(ns["BUILD"] / "bin", runnable=True)
+        # 模拟"新 Session"：STATE 完全为空
+        ns["STATE"].clear()
+        assert ns["STATE"] == {}
+
+        r = ns["stage_s2_build"](time.time() + 120)
+        assert r["reused"] is True
+        assert r["build_reuse"] == "existing_build"
+        # 复用时 _find_llama_src 一次都不该被调用（不下载 36.6 MiB 源码）
+        assert r["source"]["origin"] == "existing_build"
+    finally:
+        ns["BUILD"], ns["IN"] = orig_build, orig_in
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _prep_model_dl(ns, src_file):
+    """把 MODEL_DL 指到临时目录并返回 (tmp, restore)。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_s3_dl_")
+    orig = ns["MODEL_DL"]
+    ns["MODEL_DL"] = Path(tmp) / "models"
+    return Path(tmp), (lambda: ns.__setitem__("MODEL_DL", orig))
+
+
+def test_s3_disk_precheck_insufficient(ns):
+    """磁盘不够 → 下载之前就拒，一个字节都不下。"""
+    tmp, restore = _prep_model_dl(ns, None)
+    try:
+        orig_disk = ns["disk_gb"]
+        ns["disk_gb"] = lambda p: {"total": 20.0, "used": 19.5, "free": 0.5}
+        called = {"stream": False}
+
+        def boom(*a, **k):
+            called["stream"] = True
+            raise AssertionError("磁盘不够时不该开始下载")
+
+        orig_stream = ns["_stream_blob"]
+        ns["_stream_blob"] = boom
+        try:
+            try:
+                ns["_disk_precheck"](ns["S3_PINNED"]["bytes"], "S3 下载")
+                raise AssertionError("磁盘不足时必须抛 GuardError")
+            except ns["GuardError"] as e:
+                assert "磁盘不够" in str(e), e
+            assert called["stream"] is False
+
+            # 完整路径：_ensure_q8 也必须被同一道预检拦下
+            try:
+                ns["_ensure_q8"](time.time() + 60)
+                raise AssertionError("_ensure_q8 必须被磁盘预检拦下")
+            except ns["GuardError"] as e:
+                assert "磁盘不够" in str(e), e
+            assert called["stream"] is False
+        finally:
+            ns["_stream_blob"] = orig_stream
+            ns["disk_gb"] = orig_disk
+    finally:
+        restore()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s3_download_checksum_mismatch(ns):
+    """下载完 sha256 对不上 → 删文件、删 sidecar、报错，不留半成品。"""
+    tmp, restore = _prep_model_dl(ns, None)
+    src = tmp / "payload.bin"
+    src.write_bytes(os.urandom(4096))
+    pin, restore_pin = _pin_blob(ns, src)
+    pin["sha256"] = "1" * 64                      # 故意对不上
+    try:
+        fake = _fake_stream(src)
+        orig_stream = ns["_stream_blob"]
+        ns["_stream_blob"] = fake
+        try:
+            dst = ns["_s3_base_path"]()
+            try:
+                ns["_fetch_pinned_blob"](pin, dst, time.time() + 60, "S3/test")
+                raise AssertionError("sha256 不符必须抛 GuardError")
+            except ns["GuardError"] as e:
+                assert "sha256 不匹配" in str(e), e
+            assert not dst.exists(), "校验不过不许留下成品"
+            assert not dst.with_name(dst.name + ".partial").exists(), "半成品也必须删"
+            assert not dst.with_name(dst.name + ".partial.json").exists()
+        finally:
+            ns["_stream_blob"] = orig_stream
+    finally:
+        restore_pin()
+        restore()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s3_download_etag_mismatch_refuses(ns):
+    """响应头 x-linked-etag 与预登记值不一致 → 拒收（上游换过文件）。"""
+    tmp, restore = _prep_model_dl(ns, None)
+    src = tmp / "payload.bin"
+    src.write_bytes(os.urandom(2048))
+    pin, restore_pin = _pin_blob(ns, src)
+    try:
+        def fake(url, path, offset, hasher, deadline, tag, expect_bytes):
+            data = Path(src).read_bytes()
+            with open(path, "ab") as f:
+                f.write(data)
+                hasher.update(data)
+            return 200, len(data), len(data), "f" * 64   # 错的 etag
+
+        orig_stream = ns["_stream_blob"]
+        ns["_stream_blob"] = fake
+        try:
+            dst = ns["_s3_base_path"]()
+            try:
+                ns["_fetch_pinned_blob"](pin, dst, time.time() + 60, "S3/test")
+                raise AssertionError("etag 不符必须抛 GuardError")
+            except ns["GuardError"] as e:
+                assert "x-linked-etag" in str(e), e
+            assert not dst.exists()
+        finally:
+            ns["_stream_blob"] = orig_stream
+    finally:
+        restore_pin()
+        restore()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s3_download_no_duplicate_full_copy(ns):
+    """下载全程磁盘上只有一份完整副本（不允许缓存一份 + working 一份）。"""
+    tmp, restore = _prep_model_dl(ns, None)
+    src = tmp / "payload.bin"
+    src.write_bytes(os.urandom(8192))
+    pin, restore_pin = _pin_blob(ns, src)
+    try:
+        seen = {"max_big": 0, "files_at_end": None}
+        real = _fake_stream(src)
+
+        def spy(url, path, offset, hasher, deadline, tag, expect_bytes):
+            r = real(url, path, offset, hasher, deadline, tag, expect_bytes)
+            big = [p.name for p in Path(path).parent.iterdir()
+                   if p.is_file() and p.stat().st_size >= expect_bytes * 0.5]
+            seen["max_big"] = max(seen["max_big"], len(big))
+            return r
+
+        orig_stream = ns["_stream_blob"]
+        ns["_stream_blob"] = spy
+        try:
+            dst = ns["_s3_base_path"]()
+            meta = ns["_fetch_pinned_blob"](pin, dst, time.time() + 60, "S3/test")
+            assert meta["sha256"] == pin["sha256"]
+            seen["files_at_end"] = sorted(p.name for p in dst.parent.iterdir())
+            assert seen["max_big"] <= 1, f"同时存在多个大文件：{seen}"
+            assert seen["files_at_end"] == [dst.name], seen["files_at_end"]
+        finally:
+            ns["_stream_blob"] = orig_stream
+    finally:
+        restore_pin()
+        restore()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s3_download_resume_from_partial(ns):
+    """中断后重跑：从 .partial 的偏移处续传，不把 8 GiB 重下一遍。"""
+    tmp, restore = _prep_model_dl(ns, None)
+    src = tmp / "payload.bin"
+    src.write_bytes(os.urandom(16384))
+    pin, restore_pin = _pin_blob(ns, src)
+    try:
+        dst = ns["_s3_base_path"]()
+        part = dst.with_name(dst.name + ".partial")
+        side = dst.with_name(dst.name + ".partial.json")
+        part.parent.mkdir(parents=True, exist_ok=True)
+        cut = 6000
+        part.write_bytes(src.read_bytes()[:cut])
+        import hashlib as _hl
+        ns["_write_stamp"](side, url=pin["url"], bytes_done=cut,
+                           sha256_prefix=_hl.sha256(src.read_bytes()[:cut]).hexdigest(),
+                           expect_bytes=pin["bytes"], expect_sha256=pin["sha256"])
+
+        fake = _fake_stream(src)
+        orig_stream = ns["_stream_blob"]
+        ns["_stream_blob"] = fake
+        try:
+            meta = ns["_fetch_pinned_blob"](pin, dst, time.time() + 60, "S3/test")
+            assert fake.state["offsets"] == [cut], fake.state["offsets"]
+            assert meta["sha256"] == pin["sha256"]
+            assert dst.read_bytes() == src.read_bytes()
+            assert not part.exists() and not side.exists()
+        finally:
+            ns["_stream_blob"] = orig_stream
+    finally:
+        restore_pin()
+        restore()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s3_download_bad_partial_restarts(ns):
+    """.partial 与 sidecar 对不上（前缀哈希不符）→ 不信它，从头下。"""
+    tmp, restore = _prep_model_dl(ns, None)
+    src = tmp / "payload.bin"
+    src.write_bytes(os.urandom(8192))
+    pin, restore_pin = _pin_blob(ns, src)
+    try:
+        dst = ns["_s3_base_path"]()
+        part = dst.with_name(dst.name + ".partial")
+        side = dst.with_name(dst.name + ".partial.json")
+        part.parent.mkdir(parents=True, exist_ok=True)
+        part.write_bytes(b"garbage that does not match the sidecar")
+        ns["_write_stamp"](side, url=pin["url"], bytes_done=42,
+                           sha256_prefix="0" * 64,
+                           expect_bytes=pin["bytes"], expect_sha256=pin["sha256"])
+        fake = _fake_stream(src)
+        orig_stream = ns["_stream_blob"]
+        ns["_stream_blob"] = fake
+        try:
+            meta = ns["_fetch_pinned_blob"](pin, dst, time.time() + 60, "S3/test")
+            assert fake.state["offsets"] == [0], fake.state["offsets"]
+            assert meta["sha256"] == pin["sha256"]
+        finally:
+            ns["_stream_blob"] = orig_stream
+    finally:
+        restore_pin()
+        restore()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s3_download_network_failure_keeps_partial(ns):
+    """网络失败 → 保留 .partial 与 sidecar，消息说清"重跑会续传"。"""
+    tmp, restore = _prep_model_dl(ns, None)
+    src = tmp / "payload.bin"
+    src.write_bytes(os.urandom(4096))
+    pin, restore_pin = _pin_blob(ns, src)
+    try:
+        dst = ns["_s3_base_path"]()
+        part = dst.with_name(dst.name + ".partial")
+        side = dst.with_name(dst.name + ".partial.json")
+        part.parent.mkdir(parents=True, exist_ok=True)
+
+        def boom(url, path, offset, hasher, deadline, tag, expect_bytes):
+            with open(path, "ab") as f:
+                f.write(b"half")
+                hasher.update(b"half")
+            raise OSError("connection reset by peer")
+
+        orig_stream = ns["_stream_blob"]
+        ns["_stream_blob"] = boom
+        try:
+            try:
+                ns["_fetch_pinned_blob"](pin, dst, time.time() + 60, "S3/test")
+                raise AssertionError("网络失败必须抛 GuardError")
+            except ns["GuardError"] as e:
+                assert "续传" in str(e), e
+                assert "Internet" in str(e), e
+            assert part.exists(), "必须保留断点"
+            assert side.exists(), "必须保留 sidecar"
+            assert side.read_text(encoding="utf-8").find("bytes_done") > 0
+        finally:
+            ns["_stream_blob"] = orig_stream
+    finally:
+        restore_pin()
+        restore()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s3_repeat_run_uses_cache(ns):
+    """已经下载并校验过 → 第二次 _ensure_q8 一次都不下载。"""
+    tmp, restore = _prep_model_dl(ns, None)
+    src = tmp / "payload.bin"
+    src.write_bytes(os.urandom(4096))
+    pin, restore_pin = _pin_blob(ns, src)
+    try:
+        fake = _fake_stream(src)
+        orig_stream = ns["_stream_blob"]
+        ns["_stream_blob"] = fake
+        try:
+            p1, m1 = ns["_ensure_q8"](time.time() + 60)
+            assert m1["origin"] == "downloaded"
+            assert fake.state["offsets"] == [0]
+            p2, m2 = ns["_ensure_q8"](time.time() + 60)
+            assert p1 == p2
+            assert m2["origin"] == "cache"
+            assert fake.state["offsets"] == [0], "第二次不该再下载"
+        finally:
+            ns["_stream_blob"] = orig_stream
+    finally:
+        restore_pin()
+        restore()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s3_ngl_ladder(ns):
+    """-ngl 阶梯：99 折算成真实层数再对折；0 只有一级。"""
+    f = ns["_ngl_ladder"]
+    assert f(99, 36) == [99, 18, 0], f(99, 36)
+    assert f(0, 36) == [0], f(0, 36)
+    assert f(24, 36) == [24, 12, 0], f(24, 36)
+    assert f(1, 36) == [1, 0], f(1, 36)
+    assert f(99, 1) == [99, 1, 0], f(99, 1)   # 1 层模型："一半"仍是 1 层
+    assert f(99, 2) == [99, 1, 0], f(99, 2)
+    # 阶梯必须严格递减且以 0 结尾（纯 CPU 兜底）
+    for fitted in (0, 1, 5, 18, 36, 99):
+        lad = f(fitted, 36)
+        assert lad == sorted(set(lad), reverse=True), lad
+        assert lad[-1] == 0, lad
+
+
+def test_s3_ngl_fallback_on_oom(ns):
+    """第一次 OOM → 自动降 -ngl 重试，并把两次尝试都记进 provenance。"""
+    calls = []
+
+    def fake_run_cmd(cmd, log_path, deadline, cwd=None, env=None):
+        calls.append(list(cmd))
+        ngl = cmd[cmd.index("-ngl") + 1]
+        if str(ngl) == "99":                 # 第一次：显存不够
+            Path(log_path).write_text(
+                "llama_model_load: ...\n"
+                "ggml_cuda_reserve: failed to allocate GPU memory\n"
+                "error: out of memory\n", encoding="utf-8")
+            raise ns["CommandFailed"](cmd, 2, "out of memory", log_path)
+        Path(log_path).write_text("done\n", encoding="utf-8")
+        return 0, "done"
+
+    orig = ns["run_cmd"]
+    ns["run_cmd"] = fake_run_cmd
+    tmp = Path(ns["MDLS"]) / "_ngl_test_out.gguf"
+    try:
+        ngl, attempts = ns["_run_imatrix_with_fallback"](
+            "m.gguf", "c.txt", tmp, time.time() + 120, 99)
+        assert ngl == 18, ngl                 # 36 层的一半
+        assert len(calls) == 2, calls
+        assert [a["ok"] for a in attempts] == [False, True]
+        assert attempts[0]["ngl"] == 99 and attempts[0]["oom"] is True
+        assert attempts[1]["ngl"] == 18
+        assert attempts[0]["tail"], "失败尝试必须留日志尾部"
+    finally:
+        ns["run_cmd"] = orig
+
+
+def test_s3_imatrix_failure_explains(ns):
+    """imatrix 失败要给人话，而不是把日志丢给用户。"""
+    f = ns["_explain_imatrix_failure"]
+
+    class E:
+        rc = 1
+        tail = "llama_model_load: failed to open /x/y.gguf"
+
+    assert "打不开" in f(E())
+
+    class E2:
+        rc = 1
+        tail = ("error: you need at least 16384 tokens for a context of 512 tokens\n"
+                "the data file you provided tokenizes to only 100 tokens")
+
+    assert "token 数不够" in f(E2())
+
+    class E3:
+        rc = 1
+        tail = "ggml_gallocr_reserve_n: failed to allocate 8192 MiB"
+
+    assert "显存不足" in f(E3())
+
+
+def _stub_s3(ns, tmp, *, imatrix_ok=True, q8_bytes=12345678):
+    """把 stage_s3_imatrix 的外部依赖全部换成桩，只留真逻辑。
+
+    返回 (patches, restore)。imatrix_ok=False 时模拟 llama-imatrix 失败。
+    """
+    patches = []
+
+    def patch(name, value):
+        patches.append((name, ns[name]))
+        ns[name] = value
+
+    q8 = Path(tmp) / "dl" / "models" / ns["S3_PINNED"]["filename"]
+    q8.parent.mkdir(parents=True, exist_ok=True)
+    q8.write_bytes(b"x" * q8_bytes)
+    patch("_s3_base_path", lambda: q8)
+    patch("_ensure_q8", lambda deadline: (q8, {"origin": "downloaded",
+                                               "sha256": "a" * 64,
+                                               "bytes": q8_bytes}))
+    calib = Path(tmp) / "calib.txt"
+    calib.write_text("some calibration text\n" * 200, encoding="utf-8")
+    patch("_ensure_calib_txt", lambda deadline: (calib, {"origin": "downloaded",
+                                                         "nonempty_rows": 200}))
+    patch("_calib_txt_path", lambda: calib)
+    patch("vram_gb", lambda: {"total": 15.0, "free": 14.0, "used": 1.0})
+    patch("_fit_ngl", lambda n, u, m=2.0: 99 if n + m * 2**30 < u * 2**30 else 0)
+    # 让 _imatrix_base_kind() 有值：S3 自动下载路径固定是 q8_0
+    patch("CFG", {**ns["CFG"], "IMATRIX_BASE_KIND": "q8_0"})
+
+    def fake_cmd(cmd, log_path, deadline, cwd=None, env=None):
+        Path(log_path).write_text("ok\n", encoding="utf-8")
+        if imatrix_ok:
+            out = cmd[cmd.index("-o") + 1]
+            # 必须 > 100_000 B，否则 stage_s3_imatrix 的产物体检会拒收
+            Path(out).write_bytes(b"IMATRIX" + b"\0" * (200 * 1024))
+        return 0, "ok"
+
+    patch("run_cmd", fake_cmd)
+    patch("gguf_scan", lambda p: {"n_tensors": 361})
+    patch("sha256_of", lambda p, deadline=None: "b" * 64)
+    patch("_path_fp", lambda p: "fp" + "c" * 29)
+
+    def restore():
+        for name, value in reversed(patches):
+            ns[name] = value
+
+    return q8, calib, restore
+
+
+def test_s3_q8_deleted_only_after_record(ns):
+    """Q8_0 必须在"结果记录写盘之后"才删 —— 删除那一刻记录文件必须已存在。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_s3_reclaim_")
+    orig_out = ns["OUT"]
+    ns["OUT"] = Path(tmp) / "out"
+    ns["OUT"].mkdir(parents=True, exist_ok=True)
+    snap_cfg = dict(ns["CFG"])
+    try:
+        q8, calib, restore = _stub_s3(ns, tmp, imatrix_ok=True)
+        # 记录"删除那一刻"报告文件是否已在盘上
+        seen = {"record_at_delete": None}
+        # 用包装版替换：先观察"删除那一刻记录是否已在盘上"，再真的删
+        real_reclaim = ns["_reclaim_q8"]
+
+        def spy(path, stamp, rec):
+            seen["record_at_delete"] = (ns["OUT"] / "S3_IMATRIX.json").exists()
+            return real_reclaim(path, stamp, rec)
+
+        ns["_reclaim_q8"] = spy
+        ns["CFG"]["S3_AUTO_FETCH_MODEL"] = True
+        ns["CFG"]["S3_AUTO_FETCH_CALIB"] = True
+        ns["CFG"]["IMATRIX_BASE"] = ""
+        ns["CFG"]["CALIB_TXT"] = ""
+        ns["CFG"]["IMATRIX_GGUF"] = ""
+        try:
+            rec = ns["stage_s3_imatrix"](time.time() + 120)
+        finally:
+            restore()
+            ns["_reclaim_q8"] = real_reclaim
+
+        assert seen["record_at_delete"] is True, \
+            "删除 Q8_0 时结果记录还没写盘 —— 会把可恢复状态毁掉"
+        assert not q8.exists(), "成功后 Q8_0 应被回收"
+        assert rec["q8_reclaimed"] is True
+        assert rec["q8_reclaimed_bytes"] == 12345678
+        assert rec["ngl"] == 99 and rec["on_gpu"] is True
+        assert rec["n_tensors"] == 361
+        assert (ns["OUT"] / "S3_IMATRIX.json").exists()
+    finally:
+        ns["CFG"].clear(); ns["CFG"].update(snap_cfg)
+        ns["OUT"] = orig_out
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s3_q8_kept_when_imatrix_fails(ns):
+    """imatrix 失败 → Q8_0 必须留着，让用户修完直接重跑。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_s3_keep_")
+    orig_out = ns["OUT"]
+    ns["OUT"] = Path(tmp) / "out"
+    ns["OUT"].mkdir(parents=True, exist_ok=True)
+    snap_cfg = dict(ns["CFG"])
+    # ns 在所有用例间共享，先清掉别的用例留下的 imatrix，否则测的不是自己
+    stale = ns["MDLS"] / "imatrix.gguf"
+    for p in (stale, stale.with_name(stale.name + ".partial")):
+        p.unlink(missing_ok=True)
+    try:
+        q8, calib, restore = _stub_s3(ns, tmp, imatrix_ok=False)
+        ns["CFG"]["S3_AUTO_FETCH_MODEL"] = True
+        ns["CFG"]["S3_AUTO_FETCH_CALIB"] = True
+        ns["CFG"]["IMATRIX_BASE"] = ""
+        ns["CFG"]["CALIB_TXT"] = ""
+        ns["CFG"]["IMATRIX_GGUF"] = ""
+        try:
+            try:
+                ns["stage_s3_imatrix"](time.time() + 120)
+                raise AssertionError("imatrix 失败必须抛异常")
+            except Exception:
+                pass
+        finally:
+            restore()
+        assert q8.exists(), "失败时 Q8_0 必须保留"
+        assert q8.stat().st_size == 12345678
+        # 半成品既不能当结果、也不能续跑，必须清掉，别占 working 的 20 GB
+        assert not stale.exists(), "失败不该留下 imatrix.gguf"
+        assert not stale.with_name(stale.name + ".partial").exists(), \
+            "失败必须清掉 imatrix.gguf.partial（不可续跑）"
+        assert not (ns["OUT"] / "S3_IMATRIX.json").exists(), \
+            "失败不该写成功记录"
+    finally:
+        ns["CFG"].clear(); ns["CFG"].update(snap_cfg)
+        ns["OUT"] = orig_out
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s3_q8_not_deleted_when_configured_off(ns):
+    """CFG['S3_DELETE_Q8_AFTER']=False → 保留 Q8_0，并记录原因。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_s3_keepcfg_")
+    orig_out = ns["OUT"]
+    ns["OUT"] = Path(tmp) / "out"
+    ns["OUT"].mkdir(parents=True, exist_ok=True)
+    snap_cfg = dict(ns["CFG"])
+    try:
+        q8, calib, restore = _stub_s3(ns, tmp, imatrix_ok=True)
+        ns["CFG"]["S3_DELETE_Q8_AFTER"] = False
+        ns["CFG"]["S3_AUTO_FETCH_MODEL"] = True
+        ns["CFG"]["S3_AUTO_FETCH_CALIB"] = True
+        ns["CFG"]["IMATRIX_BASE"] = ""
+        ns["CFG"]["CALIB_TXT"] = ""
+        ns["CFG"]["IMATRIX_GGUF"] = ""
+        try:
+            rec = ns["stage_s3_imatrix"](time.time() + 120)
+        finally:
+            restore()
+        assert q8.exists(), "关掉回收开关时必须保留"
+        assert rec["q8_reclaimed"] is False
+        assert "S3_DELETE_Q8_AFTER" in rec["q8_reclaim_reason"]
+    finally:
+        ns["CFG"].clear(); ns["CFG"].update(snap_cfg)
+        ns["OUT"] = orig_out
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s3_manual_base_not_touched(ns):
+    """用户手动指定 IMATRIX_BASE 时，S3 不许下载也不许删那个文件。"""
+    import tempfile as _tf
+
+    tmp = _tf.mkdtemp(prefix="trlab_s3_manual_")
+    orig_out = ns["OUT"]
+    ns["OUT"] = Path(tmp) / "out"
+    ns["OUT"].mkdir(parents=True, exist_ok=True)
+    snap_cfg = dict(ns["CFG"])
+    try:
+        q8, calib, restore = _stub_s3(ns, tmp, imatrix_ok=True)
+        ns["CFG"]["S3_AUTO_FETCH_MODEL"] = False
+        ns["CFG"]["S3_AUTO_FETCH_CALIB"] = False
+        ns["CFG"]["IMATRIX_BASE"] = str(q8)          # 手动指过去
+        ns["CFG"]["IMATRIX_BASE_KIND"] = "q8_0"
+        ns["CFG"]["CALIB_TXT"] = str(calib)
+        ns["CFG"]["IMATRIX_GGUF"] = ""
+        called = {"q8": False, "calib": False}
+        real_q8, real_calib = ns["_ensure_q8"], ns["_ensure_calib_txt"]
+
+        def spy_q8(d):
+            called["q8"] = True
+            return real_q8(d)
+
+        def spy_calib(d):
+            called["calib"] = True
+            return real_calib(d)
+
+        ns["_ensure_q8"] = spy_q8
+        ns["_ensure_calib_txt"] = spy_calib
+        try:
+            rec = ns["stage_s3_imatrix"](time.time() + 120)
+        finally:
+            restore()
+        assert called["q8"] is False and called["calib"] is False
+        assert rec["base_origin"] == "manual"
+        assert q8.exists(), "手动指定的 base 一律不许删"
+        assert "q8_reclaimed" not in rec
+    finally:
+        ns["CFG"].clear(); ns["CFG"].update(snap_cfg)
+        ns["OUT"] = orig_out
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s3_report_lines(ns):
+    """S9 的 imatrix 小节要覆盖 provenance 的关键字段。"""
+    r = {
+        "imatrix": "/x/imatrix.gguf", "bytes": 300 * 1024, "n_tensors": 361,
+        "sha256": "a" * 64, "base_gguf": "/dl/models/Qwen3-8B-Q8_0.gguf",
+        "base_kind": "q8_0", "base_bytes": 8709519168, "base_origin": "auto_download",
+        "base_download": {"sha256": "a" * 64, "origin": "downloaded"},
+        "calib_txt": "/w/calib.txt", "calib_bytes": 11 * 1024 * 1024,
+        "calib_origin": "auto_download", "calib_source": "wikitext-2-raw/train",
+        "ctx": 512, "chunks": 32, "need_tokens": 16384,
+        "ngl": 18, "ngl_initial": 99, "on_gpu": True,
+        "vram_total_gb": 15.0, "vram_margin_gb": 2.0,
+        "ngl_attempts": [{"ngl": 99, "ok": False, "oom": True},
+                         {"ngl": 18, "ok": True}],
+        "q8_reclaimed": True, "q8_reclaimed_bytes": 8709519168,
+        "q8_reclaim_reason": "imatrix 已验证且结果记录已写盘",
+        "imatrix_base_from_approx": True,
+    }
+    L = ns["_s3_report_lines"](r)
+    md = "\n".join(L)
+    for must in ("Qwen3-8B-Q8_0.gguf", "wikitext-2-raw/train", "16384 token",
+                 "初判 99 → 实际 **18**", "已回收", "361 个张量",
+                 "是对 f16 的近似", "尝试记录", '"oom": true'):
+        assert must in md, f"报告缺少 {must!r}"
+
+
 # ---------------------------------------------------------------- runner
 
 TESTS = [
@@ -1641,6 +2495,30 @@ TESTS = [
     test_s9_report_bf16_both_ways,
     test_t4_mock_end_to_end,
     test_a100_mock_end_to_end,
+    test_s3_run_switch_scope,
+    test_s3_pins_are_registered,
+    test_s3_fresh_session_no_binaries,
+    test_s3_existing_build_reused,
+    test_s3_attached_input_reused,
+    test_s3_probe_rejects_unrunnable,
+    test_s3_s2_failure_blocks_s3,
+    test_s3_restart_after_disconnect,
+    test_s3_disk_precheck_insufficient,
+    test_s3_download_checksum_mismatch,
+    test_s3_download_etag_mismatch_refuses,
+    test_s3_download_no_duplicate_full_copy,
+    test_s3_download_resume_from_partial,
+    test_s3_download_bad_partial_restarts,
+    test_s3_download_network_failure_keeps_partial,
+    test_s3_repeat_run_uses_cache,
+    test_s3_ngl_ladder,
+    test_s3_ngl_fallback_on_oom,
+    test_s3_imatrix_failure_explains,
+    test_s3_q8_deleted_only_after_record,
+    test_s3_q8_kept_when_imatrix_fails,
+    test_s3_q8_not_deleted_when_configured_off,
+    test_s3_manual_base_not_touched,
+    test_s3_report_lines,
 ]
 
 
