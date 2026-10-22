@@ -2,7 +2,9 @@
 
 **状态：方案文档。S2 / S3 均未在任何真实 Kaggle 实例上**完整**跑通，本文件不含"已验证编译/量化"的结论。**
 
-**v0.3.1 热修（2026-10-21 真实失败）**：v0.3.0 在 Kaggle T4 上通过下载与工具链检测后，在 CMake Generate 阶段失败 —— `CUDA::cuda_driver` IMPORTED target 找不到（`ggml/src/ggml-cuda/CMakeLists.txt:181`）。当前版本默认传 `-DGGML_CUDA_NO_VMM=ON` 绕开它，并修掉了把该错误误判成"找不到 nvcc"的分类器。**只跨过 Generate 阶段，build 阶段未实测。**
+**v0.3.2 更新（2026-10-22）**：S2 已在真实 Kaggle T4 上**完整通过** —— 27 分 52 秒，四个二进制就位（用户回传 `S2_BUILD-3.json`）。v0.3.1 的 `CUDA::cuda_driver` 热修与 `-DGGML_CUDA_NO_VMM=ON` 已被实测确认。**本节剩下的估算只有峰值 RAM 与 build 目录大小。**
+
+S3 的一键化设计（含磁盘账与五个待决策点）在 [`KAGGLE_S3_DESIGN.md`](./KAGGLE_S3_DESIGN.md)：**未实现、未授权。**
 
 这份文档只解决一件事：在你已有的 Kaggle GPU Notebook 里，**分两步**把 `llama-imatrix` 编译出来、并生成 `imatrix.gguf`，每一步都有明确的成功标志和停机点。S4 及之后不在本阶段执行，只在第六节给出容量预算。
 
@@ -197,12 +199,12 @@ S2 会先跑一次工具链预检（`cmake --version` / `nvcc --version` / `g++ 
 
 ### 4.3 预算与回滚
 
-| 项 | 估算 | 依据 |
+| 项 | 值 | 依据 |
 |---|---|---|
-| 编译时间 | 15–30 分钟 | 单架构（75）约 40 个 `.cu` + C++ 部分，4 核并行；**未实测** |
-| build 目录占用 | 1.5–3.5 GiB | CUDA 目标文件较大；**未实测** |
-| 峰值 RAM | 8–16 GiB | 4 个 nvcc 并行；**未实测** |
-| 阶段预算 | `STAGE_BUDGET_SEC["S2_BUILD"] = 2400` 秒 | 超时会被 kill |
+| 编译时间 | **27 分 52 秒**（1672.29 s） | **实测**（v0.3.2，真实 Kaggle T4）|
+| build 目录占用 | 未观测 | S2 后 working 剩 19.07 GiB（实测），反推占用 < 0.5 GiB 含源码与 dl 缓存 |
+| 峰值 RAM | 未观测 | 31.35 GiB 的实例没被 OOM |
+| 阶段预算 | `STAGE_BUDGET_SEC["S2_BUILD"] = 2400` 秒 | 对 27 分 52 秒仍有余量；超时会被 kill |
 
 **回滚方案（按顺序试）**：
 
@@ -216,7 +218,7 @@ S2 会先跑一次工具链预检（`cmake --version` / `nvcc --version` / `g++ 
 
 - [ ] `trlab/out/S2_BUILD.json` 里 `meta.status == "ok"`
 - [ ] `trlab/build-llama/bin/` 下有 `llama-imatrix`、`llama-quantize`、`llama-perplexity`、`llama-cli` 四个文件
-- [ ] 结果里 `bins` 四项都非空，`version` 不是空串
+- [ ] 结果里 `bins` 四项都非空，`version` 不是空串（v0.3.2 起 `--version` 走 stderr 也能取到）
 - [ ] 结果里 `cmake_args` 含 `-DLLAMA_USE_PREBUILT_UI=OFF` 和 `-DCMAKE_CUDA_ARCHITECTURES=75`
 - [ ] `toolchain.nvcc` 记录了实际版本（不是"不可用"）
 - [ ] `source.origin` 是 `downloaded` / `cache` / `cached_archive` / `manual` 之一；`source.archive_sha256` 与本文 4.1 表格里的值**逐字符相同**
@@ -361,8 +363,8 @@ CFG["ALLOW_REQUANTIZE"] = False
 
 ## 八、未验证清单（不要在报告里写成已验证）
 
-1. **S2 从未在 Kaggle 上编译过。** 编译时间、build 目录占用、峰值 RAM 全是估算。
-2. **Kaggle 镜像的 nvcc 与 g++ 版本兼容性未验证。** CUDA 12.8 对 host gcc 有上限；不兼容时的降级路径是 `BUILD_CUDA=False`。
+1. ~~S2 从未在 Kaggle 上编译过~~ **已被实测取代（v0.3.2，27 分 52 秒通过）**。仍未观测：build 目录大小、峰值 RAM。
+2. ~~Kaggle 镜像的 nvcc 与 g++ 版本兼容性未验证~~ **已实测**：CUDA 12.8.93 × host GNU 13.3.0 兼容。
 3. **S3 的 imatrix 运行时间未实测。**
 4. **"notebook 输出当输入" 的界面入口与 Quick Save 是否保存 working 未验证**（3.3 节标了待核）。
 5. **没有找到公开的 Qwen3-8B Q8_0 / BF16 Kaggle Dataset**（检索了 5 组关键词，2026-10-21）；检索 API 不穷举。
@@ -370,15 +372,16 @@ CFG["ALLOW_REQUANTIZE"] = False
 7. **31 GiB RAM 跑 15.26 GiB 输入的量化为未实测**（6.3 节）。`--max-buffer-size` 默认 8192 MiB 是从帮助文本读到的，实际峰值没有观测。
 8. **`_base_consistency()` 只能排除形状不符**，不能证明同一 checkpoint —— 三个仓库的 Q8_0 字节数不同就是证据。
 9. **自动下载路径没有端到端跑过**：Kaggle 能否直连 `github.com`、`urllib` 在 Kaggle 网络策略下的行为、下载实际耗时，都未验证。sha256 校验逻辑本身有 mock 测试覆盖（digest 不符 / 目录名不符 / 包被改坏各一条），但那是本地造的包。
-10. **`-DGGML_CUDA_NO_VMM=ON` 只跨过 CMake Generate 阶段**（v0.3.1 热修）。绕过 `CUDA::cuda_driver` 链接后，build 阶段是否还有后续错误未实测；代价已知（显存池从 VMM 回退 cudaMalloc 池，算力内核不变），但"编译通过"本身还没被真实环境确认。
+10. ~~`-DGGML_CUDA_NO_VMM=ON` 只跨过 Generate 阶段~~ **已被实测取代（v0.3.2）**：build 阶段同样通过。仍未观测：build 目录大小、峰值 RAM。
 11. **tarball 源码没有 `.git`**，自动下载路径记 `commit_source="pinned_tarball"` + `commit_verified=true` —— 它证明"这份 tar.gz 的 sha256 与预登记值一致"，**不等于** git 校验。手动挂载源码时只能是 `declared`。
 12. **预登记 sha256 本身是自证的**：它写在 notebook 里，防"上游文件被替换 / 网络返回错误页面"，防不了"notebook 里的值被改坏"。首次使用请在 S2 结果里核对那串 sha256 与 4.1 表格一致。
 
-### 已被真实 Kaggle 运行验证的部分（v0.3.0，2026-10-21）
+### 已被真实 Kaggle 运行验证的部分（v0.3.0–v0.3.2，2026-10-21/22）
 
 1. **源码自动下载与 sha256 校验通过** —— GitHub 直连在 Kaggle 上可用，digest 比对通过，安全解压到 `WORK/src/` 成功。
 2. **工具链预检通过** —— CUDA 12.8.93 FOUND、nvcc host GNU 13.3.0 检测通过、arch=75、`-- Including CUDA backend`。
-3. **失败点只有一个**：`ggml/src/ggml-cuda/CMakeLists.txt:181` 的 `CUDA::cuda_driver` target 缺失（v0.3.1 已针对它热修）。
+3. **`CUDA::cuda_driver` 热修有效** —— `-DGGML_CUDA_NO_VMM=ON` 之后 Generate 与 build 全部通过。
+4. **S2 完整通过** —— 27 分 52 秒，四个二进制就位，S2 后 working 剩 19.07 GiB，`commit_source=pinned_tarball` + `commit_verified=true`。
 
 ---
 

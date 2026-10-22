@@ -2,7 +2,9 @@
 
 `trlab_kaggle.ipynb` —— 一个**可直接上传到 Kaggle** 的独立 Notebook，用来在同一份 `Qwen/Qwen3-8B` 上产出 `IQ2_XS` 与 `IQ4_XS`，并比较**真实文件字节**、**配对 NLL**、**有限配对质量**。
 
-当前版本 **v0.3.1**。首版（v0.1）只做环境检查与短时 smoke test；v0.2 修掉了一轮逐 cell 审查提出的 3 个 P0 + 4 个 P1；v0.2.1 修了 S4 的两个 P0（二次量化门槛、产物复用不看指纹）和 S9 的 rho 符号；v0.2.2 修了 `--allow-requantize` 参数位置（放在位置参数之后等于没传）、S9 快照里 `status=null` 的自相矛盾，并给 S2 加了工具链预检与两个编译期开关；v0.3.0 把 S2 收敛成一个开关 `RUN_S2`（notebook 自己下载固定 commit 的源码并校验 sha256，用户不再需要在 Mac 上下载、解压、传 Dataset）；**v0.3.1 是真实 Kaggle 失败的热修**：`CUDA::cuda_driver` IMPORTED target 找不到导致 CMake Generate 失败，默认改传 `-DGGML_CUDA_NO_VMM=ON`，同时修掉把该错误误判成"找不到 nvcc"的分类器。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
+当前版本 **v0.3.2**。首版（v0.1）只做环境检查与短时 smoke test；v0.2 修掉了一轮逐 cell 审查提出的 3 个 P0 + 4 个 P1；v0.2.1 修了 S4 的两个 P0（二次量化门槛、产物复用不看指纹）和 S9 的 rho 符号；v0.2.2 修了 `--allow-requantize` 参数位置、S9 快照里 `status=null` 的自相矛盾，并给 S2 加了工具链预检与两个编译期开关；v0.3.0 把 S2 收敛成一个开关 `RUN_S2`；v0.3.1 热修真实 Kaggle 失败（`CUDA::cuda_driver` target 找不到 → 默认 `-DGGML_CUDA_NO_VMM=ON`，并修掉把该错误误判成"找不到 nvcc"的分类器）；**v0.3.2：S2 已在真实 Kaggle T4 上完整通过（27 分 52 秒，四个二进制就位）**，同时修掉 `version` 字段取空串的问题（`llama-cli --version` 写 stderr）。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
+
+**S2 已经不需要再验证了** —— 2026-10-22 的真实运行给出了全部数字（见第九之六）。下一个待办是 S3 的一键化，设计稿在 [`KAGGLE_S3_DESIGN.md`](./KAGGLE_S3_DESIGN.md)：**尚未实现，等用户对决策点逐条确认**。
 
 S2 → S3 的分步操作清单在 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md)：现在以**一页三步网页操作**开头（改一个开关 → Internet=On → Run All），手工 tar / Dataset 路线降级为断网备选。本文件讲"为什么"，那份讲"怎么做"。
 
@@ -28,6 +30,7 @@ S2 → S3 的分步操作清单在 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RU
 research/kaggle/
 ├── trlab_kaggle.ipynb        # 唯一需要上传的文件（28 cells：16 code + 12 markdown）
 ├── KAGGLE_S2_S3_RUNBOOK.md   # S2 编译 → S3 imatrix 的分步操作清单（网页 GUI 视角）
+├── KAGGLE_S3_DESIGN.md       # S3 一键化的设计稿（未实现、未授权，等用户决策）
 ├── test_trlab.py             # CPU-only 回归测试，不联网、不需要 GPU / llama.cpp
 └── README.md                 # 本文件
 ```
@@ -555,13 +558,34 @@ CMake Generate step failed.
 
 ---
 
+## 九之六、v0.3.2：S2 真实通过（2026-10-22）
+
+用户回传 `S2_BUILD-3.json`，**这是实测，不是 mock**：
+
+| 项 | 值 |
+|---|---|
+| 状态 | `meta.status = "ok"`，`elapsed_sec = 1672.29`（**27 分 52 秒**） |
+| 源码 | `d454a204…`，`commit_source = "pinned_tarball"`，`commit_verified = true` |
+| 工具链 | cmake 3.31.10、nvcc CUDA 12.8、host GCC 13 |
+| cmake 开关 | `-DGGML_CUDA=ON` + `-DCMAKE_CUDA_ARCHITECTURES=75` + `-DGGML_CUDA_NO_VMM=ON` 全部生效 |
+| 产物 | 四个二进制都在 `/kaggle/working/trlab/build-llama/bin/` |
+| 磁盘 | S2 后剩余 `19.07 GiB` |
+
+到此，v0.3.0/v0.3.1 引入的每一条链路都被真实环境验证过：GitHub 直连、tarball sha256 校验、安全解压、工具链兼容性、CUDA 单架构编译、`NO_VMM` 热修。**第二节"编译时间 15–30 分钟 / build 1.5–3.5 GiB / 峰值 RAM 8–16 GiB"的估算可以退役了**，实际是 27 分 52 秒。
+
+顺带修了一个非阻断缺陷（C-3）：结果里 `version` 是空串。根因在上游 —— `common/build-info.h:13` 的签名是 `void llama_print_build_info(const char *, FILE * = stderr);`，`common/arg.cpp:1457` 的 `--version` 分支没传流，所以 build info 写 **stderr**，而代码只取了 stdout。`_probe_version()` 现在两个流都接，stdout 为空时用 stderr，并渲染进 S9 报告第 2 节。**注意**：这只证明二进制能启动并打印版本，不等于验证过任何模型推理。
+
+**S3 的设计方向**见 [`KAGGLE_S3_DESIGN.md`](./KAGGLE_S3_DESIGN.md)（磁盘账、跨 session 是否重编、Quick Save 的诚实结论、五个待用户决策点）。**未实现、未授权。**
+
+---
+
 ## 十、怎么跑测试
 
 ```bash
 python3 research/kaggle/test_trlab.py
 ```
 
-不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。它在一个临时目录里把 notebook 的 16 个 code cell 按顺序 exec 一遍，然后跑 43 项断言。当前结果：**43/43 通过，约 11 秒**。
+不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。它在一个临时目录里把 notebook 的 16 个 code cell 按顺序 exec 一遍，然后跑 44 项断言。当前结果：**44/44 通过，约 11 秒**。
 
 | 测试 | 钉住的问题 |
 |---|---|
@@ -601,6 +625,7 @@ python3 research/kaggle/test_trlab.py
 | `test_s2_failure_message_actionable` | 六种编译失败症状各自给出可操作处置（host g++ / nvcc / 磁盘 / 内存 / cmake / 其他） |
 | `test_s2_failure_classifier_cuda_driver` | **C-2**：Kaggle 真实日志尾部（含 nvcc 行 + `CUDA::cuda_driver ... not found`）必须判成 driver 分支，**不能**误判成"找不到 nvcc"；真正的 nvcc 缺失仍然判成 nvcc |
 | `test_s2_fingerprint_binds_cuda_no_vmm` | **C-1**：`CUDA_NO_VMM` 进 S2 指纹，改开关必然重跑，不会误 RESUME 旧 build |
+| `test_s2_probe_version_reads_stderr` | **C-3**：`--version` 输出走 stderr，只取 stdout 会得空串；两个流都空时给 rc 而不是空串 |
 | `test_s2_network_failure_message` | 真的连不上时消息含"Internet = On"，且不留下 `.partial` |
 | `test_paired_bootstrap_edges` | n=0 / n=1 返回 `ci95=None`；全正差值给不含 0 的 CI |
 | `test_ggml_type_table` | 7 个关键 type 的块尺寸/bpw |
@@ -628,12 +653,12 @@ python3 research/kaggle/test_trlab.py
 11. **imatrix 与量化 base 可以不同文件，但必须同源**。S4 核对 architecture / 张量名 / 形状 / 参数量；这只保证结构一致，不能证明是同一个 checkpoint 的权重（同一模型的两个不同 finetune 也能通过）。`IMATRIX_BASE_KIND` 是量化类型时，报告里会声明"imatrix 的激活是对高精度的近似"。
 12. **旧产物会留在 working**。指纹不符的 GGUF 被改名成 `.stale-<fp8>`，每种格式最多留一份。确认新结果没问题后可以手动删，`CODE_FINAL` 会把它们列出来。
 13. **不能关 `LLAMA_BUILD_SERVER`**。上游 `tools/CMakeLists.txt` 把 `add_subdirectory(cli)` 写在 `if (LLAMA_BUILD_SERVER)` 里，关了就没有 `llama-cli`，S7 会缺工具。省编译时间请改 `CUDA_ARCH` / `BUILD_JOBS`，别动 SERVER。
-14. **S2 的编译时间与峰值内存全是估算**。`2400 s` 预算、`1.5–3.5 GiB` build 目录、`8–16 GiB` 峰值 RAM 都没有在真实 Kaggle T4 上验证过（本轮不允许启动实例）。runbook 第六节给了止损值，超了就降 `BUILD_JOBS` 或改 `BUILD_CUDA=False`。
+14. ~~S2 的编译时间与峰值内存全是估算~~ **已被实测取代（v0.3.2）**：真实 Kaggle T4 上 27 分 52 秒，S2 后 working 剩 19.07 GiB。`STAGE_BUDGET_SEC["S2_BUILD"]=2400 s` 的预算对这个耗时仍有余量；峰值 RAM 与 build 目录大小仍未观测，超时仍可按 runbook 4.3 降 `BUILD_JOBS` 或改 `BUILD_CUDA=False`。
 15. **`-DLLAMA_USE_PREBUILT_UI=OFF` 依赖上游有这个选项名**。它在顶层 `CMakeLists.txt:138` 用 `option()` 声明；如果将来改名，cmake 只会对未知的 `-D` 变量警告一句然后忽略，后果回到"构建期尝试下载 UI"——不会失败，只是慢。runbook 的核对清单里有这一项。
 16. **tarball 源码没有 `.git`，commit 的校验强度取决于来源**。自动下载路径记 `commit_source="pinned_tarball"` + `commit_verified=True`，它证明"这份 tar.gz 的 sha256 与预登记值一致"，**不等于** git 校验；手动挂载的源码只能记 `declared`。要 git 级校验，需要自己 `git clone` 后保留 `.git` 再挂载（并设 `CFG["LLAMA_SRC"]`）。
 17. **预登记 sha256 本身是自证的**。它写在 notebook 里，校验只能防"上游文件被替换 / 网络返回错误页面"，防不了"notebook 里的预登记值被改坏"。第一次使用时应在报告第 2 节核对那串 sha256 与本文第四节列出的值一致。
 18. **Kaggle 能否直连 github.com 未验证**。自动下载走标准库 `urllib`（不依赖 curl/wget）。如果 Kaggle 网络策略拦了 GitHub，S2 会给出"检查 Settings → Internet = On"的报错，此时用断网备选：手动下载同一 tarball、挂成 Dataset、设 `CFG["LLAMA_SRC"]`。
-19. **`-DGGML_CUDA_NO_VMM=ON` 只跨过了 Generate 阶段的第一道坎**。它让 CMake 不再链接 `CUDA::cuda_driver`，但 build 阶段（nvcc 编译、链接）是否还有后续错误**未实测**。代价已知且有限：显存池从 VMM 回退到 cudaMalloc 池，算力内核不变。真跑通之前，不要在报告里写"Kaggle 编译已通过"。
+19. ~~`-DGGML_CUDA_NO_VMM=ON` 只跨过 Generate 阶段~~ **已被实测取代（v0.3.2）**：真实运行里 build 阶段同样通过，四个二进制就位。该开关的代价不变且有限：显存池从 VMM 回退到 cudaMalloc 池（`ggml-cuda.cu:745`），算力内核与数值不变；构建产物会带 `NO_VMM=1` 特性标记。仍未观测的是 build 目录大小与峰值 RAM。
 20. **错误分类器按关键词匹配，永远可能漏**。v0.3.0 的 `"nvcc" in tail and "not found" in tail` 全文包含判断就把 driver 错误误判成了 nvcc 缺失。现在改成同行匹配 + driver 专用分支，但新的日志形态仍可能落到通用分支 —— 通用分支的处置是"看日志最后 30 行"，这是兜底不是终点。
 
 ---
@@ -666,8 +691,10 @@ python3 research/kaggle/test_trlab.py
 | S2 错误分类（v0.3.1） | ✅ 真实 Kaggle 的 `CUDA::cuda_driver` 日志判成 driver 分支（含 `GGML_CUDA_NO_VMM` 建议、不含"找不到 nvcc"）；真 nvcc 缺失仍判 nvcc |
 | S2 指纹（v0.3.1） | ✅ `CUDA_NO_VMM` 翻转 → S2 指纹变化；改回去还原 |
 | S2 commit 记录 | ✅ 无 `.git` 时记 `declared`、无预注册值时不编造、有 git 且不符必抛 |
+| **S2 真实 Kaggle 运行** | ✅ **27 分 52 秒通过**（v0.3.1，用户回传 `S2_BUILD-3.json`）：四个二进制就位、`commit_source=pinned_tarball`、三个 cmake 开关生效、磁盘剩 19.07 GiB |
+| S2 version 探测 | ✅ stderr 回退 + 双流皆空时给 rc（`_probe_version`） |
 | S2 自动取源码（mock） | ✅ 默认不联网；只开 S2；digest 不符拒解压并删包；`..` 条目拒解压；三级缓存不重下；目录名不符拒解压；`pinned_tarball` 校验档；六种失败症状各有处置；真断网时消息含 "Internet = On" |
-| `test_trlab.py` | ✅ **43/43，约 11 秒** |
+| `test_trlab.py` | ✅ **44/44，约 11 秒** |
 
 **没有**验证的：S2 的实际编译、S3/S4 的真实量化、S6 的 `llama-perplexity` 真实输出解析（正则已用真实格式字符串测过，但没跑过真实二进制）。这三项必须在 Kaggle 上首跑时人工确认。
 

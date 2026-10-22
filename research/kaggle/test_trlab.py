@@ -1476,6 +1476,35 @@ def test_s2_fingerprint_binds_cuda_no_vmm(ns):
         CFG["CUDA_NO_VMM"] = snap
 
 
+def test_s2_probe_version_reads_stderr(ns):
+    """`llama-cli --version` 把 build info 写到 stderr（build-info.h:13 默认 FILE*=stderr），
+    只取 stdout 会得到空串 —— v0.3.0 真实 Kaggle 运行就是这样。"""
+    probe = ns["_probe_version"]
+    orig_run = ns["subprocess"].run
+
+    class R:
+        def __init__(self, out, err, rc=0):
+            self.stdout, self.stderr, self.returncode = out, err, rc
+
+    try:
+        ns["subprocess"].run = lambda *a, **k: R("", "build: 1a2b3c (1234)\n")
+        v = probe("/fake/llama-cli")
+        assert "1a2b3c" in v, f"stderr 没被接上：{v!r}"
+
+        ns["subprocess"].run = lambda *a, **k: R("version 0.3.2\n", "")
+        assert "0.3.2" in probe("/fake/llama-cli")
+
+        ns["subprocess"].run = lambda *a, **k: R("", "")
+        assert "rc=" in probe("/fake/llama-cli"), "两个流都空时要给出 rc 而不是空串"
+
+        def boom(*a, **k):
+            raise OSError("no such file")
+        ns["subprocess"].run = boom
+        assert "不可用" in probe("/nonexistent/llama-cli")
+    finally:
+        ns["subprocess"].run = orig_run
+
+
 def test_s2_network_failure_message(ns):
     """真的连不上时给一句人话，且不留下 .partial。"""
     import tempfile as _tf
@@ -1604,6 +1633,7 @@ TESTS = [
     test_s2_failure_message_actionable,
     test_s2_failure_classifier_cuda_driver,
     test_s2_fingerprint_binds_cuda_no_vmm,
+    test_s2_probe_version_reads_stderr,
     test_s2_network_failure_message,
     test_paired_bootstrap_edges,
     test_ggml_type_table,
