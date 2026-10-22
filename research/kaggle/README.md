@@ -2,11 +2,11 @@
 
 `trlab_kaggle.ipynb` —— 一个**可直接上传到 Kaggle** 的独立 Notebook，用来在同一份 `Qwen/Qwen3-8B` 上产出 `IQ2_XS` 与 `IQ4_XS`，并比较**真实文件字节**、**配对 NLL**、**有限配对质量**。
 
-当前版本 **v1.0.0**。v1.0 是一次**执行方式重构**（Issue #5）：notebook 本体从 253 KB / 28 cells 的巨物缩成 **7.3 KB / 5 cells** 的薄入口，全部逻辑搬进 `trlab/` 包的 16 个 `.py` 模块；执行包不再靠人工搬运，而是 notebook 的引导格按**钉死的 commit** 从公开仓库 sparse fetch `research/kaggle/trlab/`（约 200 KB、1–3 秒，`git rev-parse HEAD` 强校验）后再 import。用户操作收敛为**一个开关 + Run All**，取代原来的六步人工流程（取 BF16 notebook → Run All → Save Version → Add Input → 配路径 → 主 notebook）。版本史：v0.1 只做环境检查与 smoke；v0.2–v0.2.2 修掉三轮逐 cell 审查的问题（S4 二次量化门槛、`--allow-requantize` 参数位置、S2 工具链预检）；v0.3.x 把 S2 收敛成开关 `RUN_S2` 并记录真实 Kaggle T4 通过；v0.4.0 把 S3 收敛成开关 `RUN_S3`；v0.5.0 把 S4 收敛成开关 `RUN_S4`（从原始 BF16 量化 IQ2_XS/IQ4_XS，禁止 Q8_0 二次量化，imatrix 命中即整段跳过 S3，量化 base 四级自取）。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
+当前版本 **v1.0.1**（v1.0 的执行方式重构 + 一次 S4 预检补丁）。v1.0 是一次**执行方式重构**（Issue #5）：notebook 本体从 253 KB / 28 cells 的巨物缩成 **7.3 KB / 5 cells** 的薄入口，全部逻辑搬进 `trlab/` 包的 16 个 `.py` 模块；执行包不再靠人工搬运，而是 notebook 的引导格按**钉死的 commit** 从公开仓库 sparse fetch `research/kaggle/trlab/`（约 200 KB、1–3 秒，`git rev-parse HEAD` 强校验）后再 import。用户操作收敛为**一个开关 + Run All**，取代原来的六步人工流程（取 BF16 notebook → Run All → Save Version → Add Input → 配路径 → 主 notebook）。v1.0.1 只加一个**运行前预检** `S4_PREFLIGHT`：`RUN_S4=True` 会在任何编译、任何下载之前用几秒钟核查 working 与工作区外暂存盘的挂载/容量/写权限、BF16 有没有落点、imatrix 能不能复用，不过就地 fail-closed 并只给一步要做的；同时把 `S4_QUANT` 的墙钟预算从 1800 s 提到 5400 s 并加单格式帽，降低 CPU 量化被误杀的风险。版本史：v0.1 只做环境检查与 smoke；v0.2–v0.2.2 修掉三轮逐 cell 审查的问题（S4 二次量化门槛、`--allow-requantize` 参数位置、S2 工具链预检）；v0.3.x 把 S2 收敛成开关 `RUN_S2` 并记录真实 Kaggle T4 通过；v0.4.0 把 S3 收敛成开关 `RUN_S3`；v0.5.0 把 S4 收敛成开关 `RUN_S4`（从原始 BF16 量化 IQ2_XS/IQ4_XS，禁止 Q8_0 二次量化，imatrix 命中即整段跳过 S3，量化 base 四级自取）。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
 
 **S2、S3 都已在真实 Kaggle T4 上通过**（S2 见第九之六；S3 于 2026-10-22 跑出 10,701,952 B / 1008 个张量的 imatrix.gguf，sha256 `34062ab6…`，耗时 57.95 s，产物已备份并 pin 进 `IMATRIX_PINNED`）。
 
-**v1.0 已本地验证 / 尚未验证的边界**：短 notebook 生成器、钉 commit sparse fetch 引导（已在干净目录真实冷启动跑通：GitHub → import → S0/S1/S9 → 产物落盘，全程约 3 秒）、`--embed` 内嵌回退与 sha256 篡改 fail-closed、108 项 CPU 测试（不联网）。**尚未在真实 Kaggle 上跑过**：S4/S5 一键链路本身，以及 BF16 的 15.26 GiB 下载、`llama-quantize` 的 CPU 耗时与峰值 RAM。BF16 与两个产物（≈ 6.7 GiB）放不进 20 GB 的 `/kaggle/working`（15.26 + 2.36 + 4.34 = 21.96 GiB），所以第一次跑 `RUN_S4=True` 前需要把 BF16 挂成只读 Input —— 最少点击方案见 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md) 第 6 节；若 Kaggle 提供了 working 之外的暂存盘，notebook 会自己探测并直接下到那里。
+**v1.0 已本地验证 / 尚未验证的边界**：短 notebook 生成器、钉 commit sparse fetch 引导（已在干净目录真实冷启动跑通：GitHub → import → S0/S1/S9 → 产物落盘，全程约 3 秒）、`--embed` 内嵌回退与 sha256 篡改 fail-closed、118 项 CPU 测试（不联网）、`S4_PREFLIGHT` 本机真跑（0.11 s，判定与摘要都正常）。**尚未在真实 Kaggle 上跑过**：S4/S5 一键链路本身，预检在 Kaggle 上的判定（`/kaggle/tmp` 到底存不存在、是不是独立文件系统、有多少空闲），以及 BF16 的 15.26 GiB 下载、`llama-quantize` 的 CPU 耗时与峰值 RAM。BF16 与两个产物（≈ 6.7 GiB）放不进 20 GB 的 `/kaggle/working`（15.26 + 2.36 + 4.34 = 21.96 GiB），所以第一次跑 `RUN_S4=True` 前需要把 BF16 挂成只读 Input —— 最少点击方案见 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md) 第 6 节；若 Kaggle 提供了 working 之外的暂存盘，notebook 会自己探测并直接下到那里。
 
 S2 → S3 → S4 的操作清单在 [`KAGGLE_S2_S3_RUNBOOK.md`](./KAGGLE_S2_S3_RUNBOOK.md)：以**一页一步网页操作**开头。本文件讲"为什么"，那份讲"怎么做"。
 
@@ -37,7 +37,7 @@ research/kaggle/
 ├── trlab_fetch_bf16.ipynb   # 例外降级：一次性取数 notebook，把 pinned BF16 下成 Kaggle Output（v0.5）
 ├── KAGGLE_S2_S3_RUNBOOK.md   # S2 编译 → S3 imatrix → S4 量化的操作清单（网页 GUI 视角）
 ├── KAGGLE_S3_DESIGN.md       # S3 一键化的设计 rationale 与五个决策点的落点（已实现）
-├── test_trlab.py             # CPU-only 回归测试（108 项），不联网、不需要 GPU / llama.cpp
+├── test_trlab.py             # CPU-only 回归测试（118 项），不联网、不需要 GPU / llama.cpp
 └── README.md                 # 本文件
 ```
 
@@ -692,6 +692,8 @@ RUN_S3 = True      # 就改这一个；S2 由它自动带上
 
 `STAGE_REQUIRES_OK`：`S3_IMATRIX` 要求 `S2_BUILD`、`S4_QUANT` 要求 `S2_BUILD` + `S3_IMATRIX`、`S6_NLL`/`S7_QUALITY` 要求 `S2_BUILD`。**只在前置阶段真的失败时拦**；前置根本没开（`False`）不拦 —— 否则手动模式会被自己的默认值卡死。
 
+**v1.0.1 起 `S4_PREFLIGHT` 是 S2/S3/S4/S5 的共同前置**：预检失败就不编译、不下载、不量化。它同时进 `ALWAYS_RERUN` —— 磁盘状态每个 Session 都不一样，缓存一个 `ok` 等于没查。
+
 ### 测试
 
 新增 24 项 mock 回归，`test_trlab.py` 总计 **68 项**。覆盖用户点名的五类场景：
@@ -768,7 +770,7 @@ S3 按设计会回收 8.11 GiB 的 Q8_0，所以 `_base_consistency()` 要求"�
 
 ### 测试
 
-新增 30 项 mock 回归，`test_trlab.py` 到此为止 **98 项**（v1.0 又加 10 项架构回归，现为 **108 项**）。除上表各分支外还覆盖：开关作用域（只开 S2/S3/S4/S5）、默认全关一个字段都不改、pin 值防手滑、暂存盘 `st_dev` 判定（同设备不算）、磁盘算术拒绝、遗留 Q8_0 回收三态、S3 跳过/重生成、S4 两道门（无 imatrix / 不可信）、S5 用 S4 实际取的 base、报告行渲染。
+新增 30 项 mock 回归，`test_trlab.py` 到此为止 **98 项**（v1.0 又加 10 项架构回归，v1.0.1 再加 10 项预检回归，现为 **118 项**）。除上表各分支外还覆盖：开关作用域（只开 S2/S3/S4/S5）、默认全关一个字段都不改、pin 值防手滑、暂存盘 `st_dev` 判定（同设备不算）、磁盘算术拒绝、遗留 Q8_0 回收三态、S3 跳过/重生成、S4 两道门（无 imatrix / 不可信）、S5 用 S4 实际取的 base、报告行渲染。
 
 **这一轮还抓到 1 个真 bug**：`stage_s4_quant` 里 `imatrix_base_kind` 变量名笔误（`imat_base_kind` vs `imatrix_base_kind`）→ `NameError`，由 `test_t4_split_base_path` 抓出。
 
@@ -781,7 +783,7 @@ S3 按设计会回收 8.11 GiB 的 Q8_0，所以 `_base_consistency()` 要求"�
 python3 research/kaggle/test_trlab.py
 ```
 
-不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。v1.0 起它**直接 import `trlab/` 包**（不再解析 notebook 字符串），在临时工作目录里补齐默认三阶段，然后跑 108 项断言。当前结果：**108/108 通过，约 40 秒**。
+不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。v1.0 起它**直接 import `trlab/` 包**（不再解析 notebook 字符串），在临时工作目录里补齐默认三阶段，然后跑 118 项断言。当前结果：**118/118 通过，约 31 秒**。
 
 v1.0 新增的 10 项架构回归（对应 Issue #5 的验收清单）：
 

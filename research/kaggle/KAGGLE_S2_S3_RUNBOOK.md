@@ -1,5 +1,7 @@
 # Kaggle T4 部署清单：S2 编译 → S3 imatrix → S4 量化
 
+**v1.0.1 更新（2026-10-22）**：加一道**运行前预检**。`RUN_S4 = True` 的 `Run All` 会在**任何 S2 编译、S3 的 8.11 GiB Q8_0 下载、BF16 15.26 GiB 下载之前**先跑几秒的 `S4_PREFLIGHT`（只读）：核查 working 与工作区外暂存盘的挂载标识/容量/写权限、BF16 有没有落点、imatrix 能不能复用，并证明两个产物在 working 存得下。不过就**就地停下**，只给**一步**要做的（通常是 6.1 那条，或者清掉 working 里的旧产物）。只想做检查不动工：执行格最后一行改成 `trlab.run(preflight_only=True)`。同时 `S4_QUANT` 的墙钟预算 1800 → 5400 s，另加单格式 3600 s 帽 —— 那是**保护上限，不是耗时承诺**。
+
 **v1.0.0 更新（2026-10-22）**：**执行方式重构。** notebook 从 253 KB / 28 cells 的巨物缩成 **7.3 KB / 5 cells** 的薄入口，全部逻辑在 `trlab/` 包的 16 个 `.py` 模块里；执行包由引导格按**钉死的 commit** 从公开仓库 sparse fetch（约 200 KB、1–3 秒，`git rev-parse HEAD` 强校验）后 import。**你的操作从六步（取 BF16 notebook → Run All → Save Version → Add Input → 配路径 → 主 notebook）收敛成"一个开关 + Run All"**：改 `RUN_S4 = True`，`Internet = On`，`Run all`。S6–S8 与 SX 默认关闭，要跑就把执行格最后一行改成 `trlab.run(run_s4=True, S6_NLL=True)`。
 
 **v0.5.0 的量化链路本身不变**：`RUN_S4 = True` 自动打开 S2 + S3 + S4 + S5，从与 S3 同仓库同 revision 的**原始 BF16** 量化出 `IQ2_XS` / `IQ4_XS`（禁止 Q8_0 二次量化）。已有的 imatrix 会按 sha256 复用，**整段跳过 S3，不重下 8.11 GiB、不重算**。
@@ -7,7 +9,8 @@
 **状态说明**：
 - **S2 已被真实 Kaggle 运行完整验证**（v0.3.2，27 分 52 秒，四个二进制就位，见用户回传 `S2_BUILD-3.json`）。
 - **S3 已被真实 Kaggle 运行完整验证**（2026-10-22，imatrix 10,701,952 B / 1008 张量 / 57.95 s，`-ngl 99` 全上 GPU，产物 sha256 `34062ab6…` 已 pin 进 `IMATRIX_PINNED`）。
-- **S4/S5 的一键化链路只有 CPU/mock 测试覆盖（108 项全通过），尚未在真实 Kaggle 上跑过。** BF16 下载、`llama-quantize` 的 CPU 耗时与峰值 RAM、S5 的真实字节账都还是**估算/待核**，本文一律如实标注。
+- **S4/S5 的一键化链路只有 CPU/mock 测试覆盖（v1.0.1 起 118 项全通过，含 10 项预检），尚未在真实 Kaggle 上跑过。** BF16 下载、`llama-quantize` 的 CPU 耗时与峰值 RAM、S5 的真实字节账都还是**估算/待核**，本文一律如实标注。
+- **预检本身也未在真实 Kaggle 上跑过**：`/kaggle/tmp` 到底存不存在、是不是另一个文件系统、有多少空闲，只有真跑才知道。本地只验证了判定逻辑（含"挂载表读不到时只保留 `st_dev`"的非 Linux 分支）。
 - **v1.0 的引导链路已本地验证**（干净目录真实冷启动：GitHub fetch → 校验 → import → S0/S1/S9 → 产物落盘），**未在 Kaggle 上实测**；它要求 GitHub 仓库保持 public（`--embed` 内嵌变体可兜底）。
 
 S3 的设计 rationale 与五个决策点的落点在 [`KAGGLE_S3_DESIGN.md`](./KAGGLE_S3_DESIGN.md)：**已实现。**
@@ -333,7 +336,7 @@ RUN_S4 = False      # 想一路做到 IQ2_XS/IQ4_XS 就改这个（见第六节�
 
 ---
 
-## 六、S4：一键量化（v1.0.0：一个开关 + Run All）
+## 六、S4：一键量化（v1.0.1：一个开关 + Run All + 自动预检）
 
 ### 6.0 唯一操作开关
 
@@ -342,6 +345,8 @@ RUN_S4 = True
 ```
 
 它自动打开 S2 + S3 + S4 + S5，S6–S8 与 SX 全部保持关闭。**不设 `BASE_GGUF`** —— 量化 base 由 S4 自己按优先级取。已有的 `imatrix.gguf` 只要 sha256 与 `IMATRIX_PINNED`（`34062ab6…`）一致，S3 就整段跳过：不重下 8.11 GiB 的 Q8_0、不重算 58 秒的 imatrix。
+
+**先跑预检，再动工（v1.0.1）**：`Run All` 的第一件事是 `S4_PREFLIGHT`，几秒钟、只读，输出一段摘要（working 空闲/峰值、BF16 落点、imatrix 状态、可用暂存盘数量、S3 会不会重下 8.11 GiB）。它只回答两个问题：**BF16 有地方放吗？两个产物在 working 放得下吗？** 任一为否就地 `GuardError`，只给一步要做的，不会先花 28 分钟编译再失败。明细落在 `/kaggle/working/trlab/out/S4_PREFLIGHT.json`。
 
 完整操作只有三步：上传 7.3 KB 的 `trlab_kaggle.ipynb` → 把开关格改成 `RUN_S4 = True`、`Settings → Internet = On` → `Run All`。第二个代码格会自己从公开仓库取执行包（约 200 KB、1–3 秒，校验 commit 后 import），不需要 Save Version、Add Input 或配任何路径。
 
@@ -354,7 +359,7 @@ BF16 有 15.26 GiB，`/kaggle/working` 只有 20 GB，S2 之后实测只剩 19.0
 | BF16 + IQ2_XS + IQ4_XS | 15.26 + 2.36 + 4.34 = **21.96 GiB** > 19.07 |
 | 连 BF16 + IQ4_XS | 19.60 GiB，仍然超 |
 
-所以第一次跑 `RUN_S4=True` 之前，要用附带的 `trlab_fetch_bf16.ipynb` 把 BF16 变成只读 Input：
+所以**如果预检说「working 之外没有可用暂存盘」**，第一次跑 `RUN_S4=True` 之前要用附带的 `trlab_fetch_bf16.ipynb` 把 BF16 变成只读 Input（预检会直接点名这一步，不用自己判断）：
 
 | # | 点击 | 说明 |
 |---|---|---|
@@ -492,13 +497,16 @@ S3 成功后 Q8_0 会被回收（8.11 GiB），所以 S4 **不再要求**读 ima
 5. **S3 完整通过** —— Q8_0（8,709,919,168 B）下载并校验、校准语料转换、`llama-imatrix` 57.95 s 产出 10,701,952 B / 1008 张量、`-ngl 99` 全上 GPU（显存 14.56 GiB）、Q8_0 回收、provenance 落盘。产物 sha256 `34062ab6…` 已 pin 进 `IMATRIX_PINNED`。
 6. **v0.4 真实运行暴露的两个真 bug 已修** —— `base_origin` 误记 `manual` 导致 Q8_0 未回收（`_s3_base_origin()` 改为看路径与 stamp）；`_base_consistency()` 要求读已回收文件（改为 file / provenance 两级）。
 
-### 已在本地验证的部分（v1.0.0，2026-10-22，非 Kaggle）
+### 已在本地验证的部分（v1.0.1，2026-10-22，非 Kaggle）
 
 1. **真实冷启动**：干净目录执行 notebook 的两个代码格 —— GitHub sparse fetch 钉 commit（约 200 KB、1–3 秒）→ `git rev-parse HEAD` 强校验 → `import trlab` → S0/S1/S9 全部 `status=ok` → `report.md` / `results.json` 落盘，全程约 3 秒。
 2. **取到的包与本地 `trlab/` 逐字节一致**（`diff -r` 无差异）；同一 Session 二次执行命中 stamp 直接复用，不重新 fetch。
 3. **内嵌回退**：把 `SRC_URL` 指向不存在路径 → 三次 fetch 失败 → 自动解压 notebook 内嵌包（sha256 校验通过）→ 同样能 import；把 `_BUNDLE_SHA` 改坏 → fail closed，不解压、不 import。
-4. **108 项 CPU 回归**（不联网、约 40 秒），含 10 项 v1.0 架构回归；其中 3 项 bootstrap 测试用本地 git 仓当"公开仓库"，保持离线。
-5. **修掉的两个 v1.0 真 bug**：内嵌包解压落点少了 `research/kaggle/trlab` 层级（回退路径 import 失败）；`run(**overrides)` 不写 STAGES 导致 S6–S8/SX 在薄 notebook 里无入口。
+4. **118 项 CPU 回归**（不联网、约 31 秒），含 10 项 v1.0 架构回归 + 10 项 v1.0.1 预检回归；其中 3 项 bootstrap 测试用本地 git 仓当"公开仓库"，保持离线。
+5. **预检真跑过**（本机 macOS，`trlab.run(preflight_only=True)`，0.11 s）：working 126.74 GiB 可写；`/tmp` 与 `/var/tmp` 被判「与 working 同一个文件系统」（正确，本机就是同一个卷）；imatrix `missing` 并注明 S3 会重下 8.11 GiB + 重算；BF16 走 `working_download`，峰值账 29.37 GiB 够；`preflight: ok`。
+6. **修掉的两个 v1.0 真 bug**：内嵌包解压落点少了 `research/kaggle/trlab` 层级（回退路径 import 失败）；`run(**overrides)` 不写 STAGES 导致 S6–S8/SX 在薄 notebook 里无入口。
+
+**没验证的（如实标注）**：Kaggle 上 `/kaggle/tmp` 是否存在、是否独立文件系统、空闲多少；预检的判定在真实 Kaggle 上会不会误判；S4 的真实 CPU 量化耗时与成功率。
 
 ---
 

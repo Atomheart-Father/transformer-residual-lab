@@ -176,7 +176,7 @@ imatrix 的 base（Q8_0）按设计会被回收，所以"读原文件逐张量�
 
 ### 8.4 测试
 
-108 项 CPU/mock 回归（44 原有 + 24 v0.4 + 30 v0.5 + 10 v1.0 架构回归）。v0.5 抓到并修掉 1 个真 bug：`stage_s4_quant` 里 `imatrix_base_kind` 变量名笔误 → `NameError`（由 `test_t4_split_base_path` 抓出）。v1.0（执行方式重构）又抓到 2 个：内嵌执行包解压落点缺 `research/kaggle/trlab` 层级；`run(**overrides)` 不写 STAGES 导致 S6–S8/SX 在薄 notebook 里没有入口。
+118 项 CPU/mock 回归（44 原有 + 24 v0.4 + 30 v0.5 + 10 v1.0 架构回归 + 10 v1.0.1 预检回归）。v0.5 抓到并修掉 1 个真 bug：`stage_s4_quant` 里 `imatrix_base_kind` 变量名笔误 → `NameError`（由 `test_t4_split_base_path` 抓出）。v1.0（执行方式重构）又抓到 2 个：内嵌执行包解压落点缺 `research/kaggle/trlab` 层级；`run(**overrides)` 不写 STAGES 导致 S6–S8/SX 在薄 notebook 里没有入口。
 
 v1.0 起测试**直接 import `trlab/` 包**，不再解析 notebook 字符串；notebook 本身由"必须薄"的结构测试看住（≤5 cells、<20 KB、钉的 commit 在仓库历史里）。
 
