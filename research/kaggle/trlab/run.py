@@ -15,17 +15,31 @@ from .report import _s2_report_lines, _s3_report_lines, _s4_report_lines, stage_
 
 import argparse, json, sys
 
+def _apply_overrides(overrides):
+    """把 run(**overrides) 的键分流：**阶段名进 STAGES，其余进 CFG**。
+
+    v1.0 的 notebook 只有 RUN_S2/S3/S4 三个开关格；S6–S8 与 SX 通过
+    `trlab.run(run_s4=True, S6_NLL=True)` 打开（CLI: `--set S6_NLL=true`）。
+    没有这一路，薄 notebook 就等于把后四个阶段锁死了。
+    """
+    for k, v in overrides.items():
+        if k in STAGES:
+            STAGES[k] = bool(v)
+        else:
+            CFG[k] = v
+
+
 def run(run_s2=None, run_s3=None, run_s4=None, **overrides):
     """按开关顺序执行各阶段。
 
     三个开关都 None 时读 CFG 里的值（默认全 False → 只跑 S0/S1/S9，
     不联网、不下载）。overrides 可直接改任意 CFG 键，例如
-    run(run_s4=True, FORCE_RERUN=True)。
+    run(run_s4=True, FORCE_RERUN=True)；阶段名（S6_NLL 等）写 STAGES。
     """
     for _k, _v in (("RUN_S2", run_s2), ("RUN_S3", run_s3), ("RUN_S4", run_s4)):
         if _v is not None:
             CFG[_k] = bool(_v)
-    CFG.update(overrides)
+    _apply_overrides(overrides)
     plan = _apply_run_switches()
     ensure_dirs()
     print_banner()

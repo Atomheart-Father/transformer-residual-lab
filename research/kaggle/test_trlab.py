@@ -3793,6 +3793,24 @@ def test_run_returns_plan_and_stages(ns):
         cfg.update(saved)
 
 
+def test_overrides_route_stages_vs_cfg(ns):
+    """v1.0 notebook 只有三个开关格；S6–S8/SX 靠 run(..., S6_NLL=True) 打开。"""
+    cfg, stages = ns["CFG"], ns["STAGES"]
+    saved = (copy.deepcopy(cfg), copy.deepcopy(stages))
+    try:
+        ns["_apply_overrides"]({"S6_NLL": True, "SX_EXPLORE": False, "NLL_CTX": 512})
+        assert stages["S6_NLL"] is True
+        assert stages["SX_EXPLORE"] is False
+        assert stages["S2_BUILD"] is False
+        assert cfg["NLL_CTX"] == 512
+        assert "S6_NLL" not in cfg and "NLL_CTX" not in stages
+        ns["_apply_overrides"]({"S6_NLL": 0})
+        assert stages["S6_NLL"] is False
+    finally:
+        cfg.clear(); cfg.update(saved[0])
+        stages.clear(); stages.update(saved[1])
+
+
 def test_generated_notebook_is_thin(ns):
     """notebook 必须薄：≤5 cells、<20 KB、含钉死 commit、默认不内嵌执行包。"""
     nb_path = HERE / "trlab_kaggle.ipynb"
@@ -4000,6 +4018,7 @@ TESTS = [
     test_switches_off_change_nothing,
     test_switch_s4_expands_plan,
     test_run_returns_plan_and_stages,
+    test_overrides_route_stages_vs_cfg,
     test_generated_notebook_is_thin,
     test_bootstrap_fetch_verify_reuse,
     test_bootstrap_embedded_fallback,
