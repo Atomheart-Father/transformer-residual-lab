@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""trlab_kaggle.ipynb 的 CPU-only 回归测试。
+"""trlab 包的 CPU-only 回归测试。
 
 用法：
     python3 research/kaggle/test_trlab.py
 
-不下载、不联网、不需要 GPU、不需要 llama.cpp。它做两件事：
-  1. 把 notebook 里所有 code cell 抽出来在临时目录里 exec 一遍（保证不会 import 就炸）；
-  2. 对 v0.1 暴露出的四类缺陷逐条断言（P0-B 算术、P0-C bf16、P1-F 分组、P1-G 未知类型），
-     外加指纹失效与返回码检查。
+不下载、不联网、不需要 GPU、不需要 llama.cpp。它直接 **import trlab 包**
+（不解析 notebook —— notebook 只是薄入口），然后对历史缺陷逐条断言。
 
-所有断言都针对 notebook 里的**真实代码**，不是复制的副本 —— 所以改了 notebook 就跑得出来。
+v1.0 起测试对象是 research/kaggle/trlab/*.py；notebook 只由
+build_notebook.py 生成，本身不含逻辑。
 """
 
 import json
@@ -24,20 +23,80 @@ import traceback
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-NB = HERE / "trlab_kaggle.ipynb"
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+
+
+def _trlab_modules():
+    """包 + 所有子模块，按依赖顺序（config 在前）。"""
+    import pkgutil
+    import importlib
+    import trlab
+    mods = [trlab]
+    for m in pkgutil.iter_modules(trlab.__path__):
+        mods.append(importlib.import_module("trlab." + m.name))
+    order = ["config", "errors", "paths", "gguf", "core", "fetch", "imatrix",
+             "deps", "stages_env", "stages_build", "stages_imatrix",
+             "stages_quant", "stages_eval", "report", "run"]
+    def key(m):
+        n = m.__name__.split(".")[-1]
+        return order.index(n) if n in order else 99
+    return sorted(mods, key=key)
+
+
+class NS:
+    """跨模块命名空间门面。
+
+    `ns["CFG"]` 返回包内任意模块持有的那个对象（同一个 dict，原地修改全局可见）；
+    `ns["X"] = v` 写在**所有**持有 X 的模块上 —— 这样测试替换一个函数后，
+    包内任何模块的调用都能看到，等价于旧版"改 exec 命名空间"。
+    """
+
+    def __init__(self, mods):
+        self._mods = mods
+
+    def _find(self, name):
+        for m in self._mods:
+            if hasattr(m, name):
+                return m
+        return None
+
+    def __getitem__(self, name):
+        m = self._find(name)
+        if m is None:
+            raise KeyError(name)
+        return getattr(m, name)
+
+    def __setitem__(self, name, value):
+        hits = [m for m in self._mods if hasattr(m, name)]
+        if not hits:
+            hits = [self._mods[0]]      # 兜底挂到 trlab 包自己身上
+        for m in hits:
+            setattr(m, name, value)
+
+    def __contains__(self, name):
+        return self._find(name) is not None
+
+    def get(self, name, default=None):
+        m = self._find(name)
+        return getattr(m, name) if m is not None else default
 
 
 def load_namespace():
-    """在临时工作目录里执行全部 code cell，返回命名空间。"""
+    """在临时工作目录里 import trlab，返回跨模块命名空间。
+
+    显式调 ensure_dirs()：v1.0 起 import 包不再有副作用（旧 notebook 是在
+    cell 里 mkdir 的），测试要自己把 working 目录树建起来。
+    """
     tmp = Path(tempfile.mkdtemp(prefix="trlab_test_"))
     os.chdir(tmp)
-    nb = json.loads(NB.read_text(encoding="utf-8"))
-    ns = {"__name__": "__trlab_test__"}
-    for i, c in enumerate(nb["cells"]):
-        if c["cell_type"] != "code":
-            continue
-        src = "".join(c["source"])
-        exec(compile(src, f"<cell {i}>", "exec"), ns)
+    ns = NS(_trlab_modules())
+    ns["ensure_dirs"]()
+    # 默认开关下 notebook 只会执行这三个阶段；补跑，让 STATE 与旧版一致
+    for _name, _fn in (("S0_ENV", ns["stage_s0_env"]),
+                       ("S1_SMOKE", ns["stage_s1_smoke"]),
+                       ("S9_REPORT", ns["stage_s9_report"])):
+        ns["run_stage"](_name, _fn)
     return ns
 
 
@@ -1163,9 +1222,9 @@ def test_s2_default_off_no_network(ns):
     Kaggle 上"Run All"不应该因为导入 notebook 就悄悄下载。想下载必须显式把
     开关改成 True —— 这一点由 _apply_run_switches 的早退保证。
     """
-    assert ns["RUN_S2"] is False, "默认值必须是 False"
-    assert ns["RUN_S3"] is False, "默认值必须是 False"
-    assert ns["RUN_S4"] is False, "默认值必须是 False（不许默认下 15 GiB BF16）"
+    assert ns["CFG"]["RUN_S2"] is False, "默认值必须是 False"
+    assert ns["CFG"]["RUN_S3"] is False, "默认值必须是 False"
+    assert ns["CFG"]["RUN_S4"] is False, "默认值必须是 False（不许默认下 15 GiB BF16）"
     before_stages = dict(ns["STAGES"])
     before_cfg = {k: ns["CFG"][k] for k in ("S2_AUTO_FETCH_SOURCE", "LLAMA_COMMIT",
                                            "CUDA_ARCH", "BUILD_JOBS", "BUILD_CUDA",
@@ -1206,9 +1265,9 @@ def test_s2_run_switch_only_turns_on_s2(ns):
     snap_s = dict(STAGES)
     snap_c = {k: CFG[k] for k in ("S2_AUTO_FETCH_SOURCE", "LLAMA_COMMIT",
                                   "CUDA_ARCH", "BUILD_JOBS", "BUILD_CUDA")}
-    orig = ns["RUN_S2"]
+    orig = ns["CFG"]["RUN_S2"]
     try:
-        ns["RUN_S2"] = True
+        ns["CFG"]["RUN_S2"] = True
         out = ns["_apply_run_switches"]()
         assert out["run_s2"] is True
         assert STAGES["S2_BUILD"] is True
@@ -1223,7 +1282,7 @@ def test_s2_run_switch_only_turns_on_s2(ns):
         assert out["commit"] == ns["S2_PINNED"]["commit"]
         assert out["stages"] == [k for k, v in STAGES.items() if v]
     finally:
-        ns["RUN_S2"] = orig
+        ns["CFG"]["RUN_S2"] = orig
         ns["_apply_run_switches"]()
         STAGES.clear(); STAGES.update(snap_s)
         CFG.update(snap_c)
@@ -1676,9 +1735,9 @@ def test_s3_run_switch_scope(ns):
     """RUN_S3=True 只开 S2+S3；S4–S8 必须全部保持 False。"""
     STAGES, CFG = ns["STAGES"], ns["CFG"]
     snap_s, snap_c = dict(STAGES), dict(CFG)
-    orig = ns["RUN_S3"]
+    orig = ns["CFG"]["RUN_S3"]
     try:
-        ns["RUN_S3"] = True
+        ns["CFG"]["RUN_S3"] = True
         out = ns["_apply_run_switches"]()
         assert out["run_s3"] is True
         assert STAGES["S2_BUILD"] is True, "RUN_S3 必须隐含打开 S2（imatrix 要二进制）"
@@ -1693,7 +1752,7 @@ def test_s3_run_switch_scope(ns):
         assert CFG["BASE_GGUF"] == "", "RUN_S3 不许设 BASE_GGUF（S4 是关闭的）"
         assert out["imatrix_base"] == ns["S3_PINNED"]["filename"]
     finally:
-        ns["RUN_S3"] = orig
+        ns["CFG"]["RUN_S3"] = orig
         ns["_apply_run_switches"]()
         STAGES.clear(); STAGES.update(snap_s)
         CFG.clear(); CFG.update(snap_c)
@@ -2573,9 +2632,9 @@ def test_s4_run_switch_scope(ns):
     """RUN_S4=True 只开 S2/S3/S4/S5；S6-S8 与 SX 必须全部保持 False。"""
     STAGES, CFG = ns["STAGES"], ns["CFG"]
     snap_s, snap_c = dict(STAGES), dict(CFG)
-    orig = ns["RUN_S4"]
+    orig = ns["CFG"]["RUN_S4"]
     try:
-        ns["RUN_S4"] = True
+        ns["CFG"]["RUN_S4"] = True
         out = ns["_apply_run_switches"]()
         assert out["run_s4"] is True
         assert STAGES["S2_BUILD"] is True, "RUN_S4 必须隐含打开 S2（量化要二进制）"
@@ -2594,7 +2653,7 @@ def test_s4_run_switch_scope(ns):
         assert out["quant_base"] == ns["S4_PINNED"]["filename"]
         assert out["formats"] == ns["FORMATS"] == ["IQ2_XS", "IQ4_XS"]
     finally:
-        ns["RUN_S4"] = orig
+        ns["CFG"]["RUN_S4"] = orig
         ns["_apply_run_switches"]()
         STAGES.clear(); STAGES.update(snap_s)
         CFG.clear(); CFG.update(snap_c)
@@ -3692,18 +3751,16 @@ TESTS = [
 
 
 def main():
-    if not NB.exists():
-        print(f"找不到 {NB}")
-        return 2
-    print(f"notebook: {NB.name}  ({NB.stat().st_size} B)\n")
+    print(f"包目录: {HERE / 'trlab'}  "
+          f"({sum(f.stat().st_size for f in (HERE / 'trlab').glob('*.py'))} B)\n")
 
     try:
         ns = load_namespace()
     except Exception:
-        print("!! notebook 的 code cell 无法全部执行：")
+        print("!! trlab 包无法 import：")
         traceback.print_exc()
         return 1
-    print(f"code cells 执行完毕，notebook v{ns['NOTEBOOK_VERSION']}\n")
+    print(f"import 完毕，trlab v{ns['NOTEBOOK_VERSION']}\n")
 
     failed = []
     for t in TESTS:
