@@ -9,9 +9,9 @@ from .core import STATE, ensure_dirs, log, run_stage
 from .stages_env import stage_s0_env, stage_s1_smoke
 from .stages_build import stage_s2_build
 from .stages_imatrix import stage_s3_imatrix
-from .stages_quant import stage_s4_quant, stage_s5_bytes
+from .stages_quant import stage_s4_quant, stage_s5_bytes, stage_s4_preflight
 from .stages_eval import stage_s6_nll, stage_s7_quality, stage_s8_bf16_anchor, stage_sx_explore
-from .report import _s2_report_lines, _s3_report_lines, _s4_report_lines, stage_s9_report
+from .report import _s2_report_lines, _s3_report_lines, _s4_report_lines, _s4_preflight_lines, stage_s9_report
 
 import argparse, json, sys
 
@@ -29,21 +29,54 @@ def _apply_overrides(overrides):
             CFG[k] = v
 
 
-def run(run_s2=None, run_s3=None, run_s4=None, **overrides):
+def run(run_s2=None, run_s3=None, run_s4=None, preflight_only=False, **overrides):
     """按开关顺序执行各阶段。
 
     三个开关都 None 时读 CFG 里的值（默认全 False → 只跑 S0/S1/S9，
     不联网、不下载）。overrides 可直接改任意 CFG 键，例如
     run(run_s4=True, FORCE_RERUN=True)；阶段名（S6_NLL 等）写 STAGES。
+
+    preflight_only=True：只跑 S4_PREFLIGHT（几秒的只读磁盘/暂存盘/imatrix
+    核查），不编译、不下载。RUN_S4=True 的正常一键运行会**自动**先跑它，
+    不过就地在下载前停下。
     """
     for _k, _v in (("RUN_S2", run_s2), ("RUN_S3", run_s3), ("RUN_S4", run_s4)):
         if _v is not None:
             CFG[_k] = bool(_v)
     _apply_overrides(overrides)
+    if preflight_only:
+        # 只留预检：其余阶段全关，三个开关也归位（_apply_run_switches 就不再改任何字段）
+        for _k in STAGES:
+            STAGES[_k] = False
+        STAGES["S4_PREFLIGHT"] = True
+        CFG["RUN_S2"] = CFG["RUN_S3"] = CFG["RUN_S4"] = False
     plan = _apply_run_switches()
     ensure_dirs()
     print_banner()
     log(f"trlab v{NOTEBOOK_VERSION}  plan={plan}")
+
+    # ---- S4 预检：任何编译/下载之前。不过就地停（fail-closed）----
+    if STAGES.get("S4_PREFLIGHT"):
+        pf = run_stage("S4_PREFLIGHT", stage_s4_preflight)
+        pf_status = (STATE.get("S4_PREFLIGHT") or {}).get("status")
+        if pf_status != "ok":
+            print("-" * 78)
+            print("S4 预检未通过 —— 在 28 分钟编译、8 GiB / 15 GiB 下载开始之前就停下了。")
+            print("上面 [S4_PREFLIGHT] FAIL 那行给出了唯一需要做的一步；细节在：")
+            print(f"  {OUT / 'S4_PREFLIGHT.json'}")
+            print("做好那一步再重跑即可，已下过的东西都有断点/指纹保护。")
+            print("-" * 78)
+            return {"plan": plan, "preflight": "failed",
+                    "stages": {k: (STATE.get(k) or {}).get("status") for k in STAGES}}
+        print("-" * 78)
+        print("S4 预检摘要")
+        for _line in _s4_preflight_lines(pf or {}):
+            print(_line)
+        print("-" * 78)
+        if preflight_only:
+            return {"plan": plan, "preflight": "ok",
+                    "result": pf,
+                    "stages": {k: (STATE.get(k) or {}).get("status") for k in STAGES}}
 
     s0 = run_stage("S0_ENV", stage_s0_env)
 
@@ -144,6 +177,8 @@ def main(argv=None):
     ap.add_argument("--run-s2", action="store_true", help="编译 llama.cpp（S2）")
     ap.add_argument("--run-s3", action="store_true", help="S2+S3：生成 imatrix")
     ap.add_argument("--run-s4", action="store_true", help="S2+S3+S4+S5：量化 IQ2_XS/IQ4_XS")
+    ap.add_argument("--preflight-only", action="store_true",
+                    help="只跑 S4_PREFLIGHT：几秒内核查磁盘/暂存盘/imatrix，不编译不下载")
     ap.add_argument("--force-rerun", action="store_true", help="忽略断点强制重跑")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=JSON",
                     help="覆盖任意 CFG 键，例如 --set IMATRIX_CTX=256")
@@ -157,7 +192,7 @@ def main(argv=None):
         except Exception:
             over[k] = v
     run(run_s2=args.run_s2 or None, run_s3=args.run_s3 or None,
-        run_s4=args.run_s4 or None, **over)
+        run_s4=args.run_s4 or None, preflight_only=args.preflight_only, **over)
     print_artifacts()
     return 0
 

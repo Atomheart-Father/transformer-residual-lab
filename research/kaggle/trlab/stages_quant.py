@@ -1,14 +1,14 @@
 """S4：量化（BF16 → IQ2_XS / IQ4_XS）+ S5：真实字节统计。"""
 
-from .config import BUILD, CFG, FORMATS, IMATRIX_PINNED, LOGS, MDLS, MODEL_DL, NOTEBOOK_VERSION, S4_PINNED, WORK
-from .errors import CommandFailed, GuardError, UnknownGGMLType
+from .config import BUILD, CFG, FORMATS, IMATRIX_PINNED, LOGS, MDLS, MODEL_DL, NOTEBOOK_VERSION, S3_PINNED, S4_PINNED, WORK
+from .errors import BudgetExceeded, CommandFailed, GuardError, UnknownGGMLType
 from .paths import _git_commit, _llama_src_path, _model_path, _q8_stamp_path, _s3_base_path, llama_bin
 from .gguf import _ggml_type_id, ggml_type_info, gguf_scan
 from .core import QUANTIZED_KINDS, _get, _path_fp, _read_json, _retire_product, atomic_replace, check_deadline, log, run_cmd, write_json
 from .fetch import _disk_precheck, _fetch_pinned_blob, partial_path, sha256_of
 from .imatrix import _imatrix_base, _imatrix_base_consistency, _imatrix_base_kind, _imatrix_provenance_records, _scan_input_gguf, _verify_imatrix, resolve_imatrix
 
-import hashlib, json, os, shutil
+import hashlib, json, os, shutil, time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -308,6 +308,319 @@ def _ram_precheck(base_bytes, tag):
 
 
 
+# ---------------------------------------------------------------- S4 预检（v1.0.1）
+
+def _mount_info(path, mounts_path="/proc/mounts"):
+    """从挂载表找 path 的归属挂载点（Kaggle/Linux 有；本地 macOS 没有 → None）。
+
+    为什么不能只信 st_dev：st_dev 不同是"另一个文件系统"的**必要线索**，
+    不是充分证明 —— 只读挂载、tmpfs（吃 RAM）、配额都要另看。这里补上
+    设备名 / fstype / 挂载选项三项，让"工作区外存得下"有据可查。
+    `mounts_path` 可注入，方便离线测试。
+    """
+    p = Path(path)
+    try:
+        p = p.resolve()
+    except OSError:
+        pass
+    best = None
+    try:
+        with open(mounts_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return None
+    for ln in lines:
+        parts = ln.split()
+        if len(parts) < 4:
+            continue
+        dev, mp, fstype, opts = parts[0], parts[1], parts[2], parts[3]
+        mp_path = Path(mp.replace("\\040", " "))
+        try:
+            under = (p == mp_path) or (mp_path in p.parents)
+        except OSError:
+            continue
+        if under and (best is None or len(mp) > len(best["mount"])):
+            best = {"device": dev, "mount": mp, "fstype": fstype,
+                    "opts": [o for o in opts.split(",") if o]}
+    return best
+
+
+
+def _write_probe(d):
+    """1 字节写入探针：建得起来、写得进去、删得掉，立刻删。
+
+    `os.access(W_OK)` 会说谎（只读挂载、SELinux、quota 满都可能过不了真写），
+    所以用真写。只写 1 字节，不留痕迹。
+    """
+    try:
+        probe = Path(d) / ".trlab_write_probe"
+        probe.write_bytes(b"x")
+        probe.unlink()
+        return True, None
+    except OSError as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+
+def _preflight_scratch_candidates():
+    """预检要看的暂存盘候选。单独一个函数是为了测试能注入假候选。"""
+    cands, seen = [], set()
+    for c in (Path("/kaggle/tmp"), Path("/tmp"), Path("/var/tmp")):
+        if str(c) not in seen:
+            seen.add(str(c)); cands.append(c)
+    try:   # 挂载表里 /kaggle 下（除 working）的其它挂载点也补进来
+        with open("/proc/mounts", "r", encoding="utf-8", errors="replace") as f:
+            for ln in f:
+                parts = ln.split()
+                if len(parts) < 3:
+                    continue
+                mp = Path(parts[1].replace("\\040", " "))
+                if str(mp).startswith("/kaggle") and str(mp) != str(WORK) \
+                        and str(mp) not in seen:
+                    seen.add(str(mp)); cands.append(mp)
+    except OSError:
+        pass
+    return cands
+
+
+
+def _preflight_scratch_evidence(need_bytes):
+    """枚举 working 之外的暂存盘候选，逐个记录"能不能用"的证据。
+
+    判据与 `_scratch_dirs()`（下载时真用的那个函数）保持一致：
+    存在 / st_dev 与 WORK 不同 / 可写 / 空闲 ≥ need + 余量。
+    另外多做两件 `_scratch_dirs` 不做的事：1 字节写入探针（比 os.access 诚实）、
+    读挂载表补设备名/fstype（tmpfs 直接排除 —— 那是 RAM，15 GiB 放进去必爆）。
+    """
+    out = []
+    try:
+        wdev = os.stat(WORK).st_dev
+    except OSError:
+        wdev = None
+    wmount = _mount_info(WORK)
+    margin = float(CFG.get("S4_RAM_MARGIN_GB", 4.0))
+
+    for c in _preflight_scratch_candidates():
+        rec = {"path": str(c)}
+        try:
+            if not c.is_dir():
+                rec.update(exists=False, usable=False, why="不存在")
+                out.append(rec); continue
+            st = os.stat(c)
+        except OSError as e:
+            rec.update(exists=False, usable=False, why=f"stat 失败: {e}")
+            out.append(rec); continue
+        rec["exists"] = True
+        rec["st_dev"] = st.st_dev
+        rec["work_st_dev"] = wdev
+        mi = _mount_info(c)
+        rec["mount"] = mi
+        if wmount is None:
+            rec["mount_note"] = "挂载表不可读（非 Linux？）——st_dev 判定仍有效，fstype/配额未核"
+        if wdev is not None and st.st_dev == wdev:
+            rec.update(usable=False, same_device=True,
+                       why="与 working 同一个文件系统（st_dev 相同），不提供额外空间")
+            out.append(rec); continue
+        rec["same_device"] = False
+        if mi and mi.get("fstype") in ("tmpfs", "ramfs", "devtmpfs"):
+            rec.update(usable=False,
+                       why=f"{mi.get('fstype')} 是内存盘，15 GiB 放进去会挤占 RAM")
+            out.append(rec); continue
+        if mi and wmount and mi.get("device") == wmount.get("device"):
+            rec.update(usable=False,
+                       why=f"挂载表显示与 working 同一设备 {mi.get('device')}")
+            out.append(rec); continue
+        ok_w, why_w = _write_probe(c)
+        rec["writable"] = ok_w
+        if not ok_w:
+            rec.update(usable=False, why=f"写不进去: {why_w}")
+            out.append(rec); continue
+        try:
+            du = shutil.disk_usage(c)
+        except OSError as e:
+            rec.update(usable=False, why=f"读不到容量: {e}")
+            out.append(rec); continue
+        rec["free_gb"] = round(du.free / 2**30, 2)
+        rec["total_gb"] = round(du.total / 2**30, 2)
+        rec["need_gb"] = round((need_bytes + margin * 2**30) / 2**30, 2)
+        if du.free < need_bytes + margin * 2**30:
+            rec.update(usable=False,
+                       why=f"空闲 {rec['free_gb']} GiB < 需要 {rec['need_gb']} GiB")
+            out.append(rec); continue
+        rec["usable"] = True
+        out.append(rec)
+    return out
+
+
+
+def _s4_preflight_imatrix_state():
+    """imatrix 现在能不能直接用；不能的话 S3 会重下 8.11 GiB + 重算。"""
+    imat = resolve_imatrix()
+    if imat is None:
+        return {"state": "missing", "path": None, "trust": None,
+                "note": "working 里没有 imatrix —— S3 会照常运行："
+                        "下 8.11 GiB Q8_0 + 校准语料，重算后校验（约 10 分钟，估算）"}
+    v = _verify_imatrix(imat)
+    trust = v.get("trust")
+    if v.get("ok") and trust in ("pinned_verified", "provenance_verified") \
+            and CFG.get("S3_SKIP_IF_IMATRIX_OK"):
+        return {"state": "reusable", "path": str(imat), "trust": trust,
+                "sha256": v.get("sha256"), "bytes": v.get("bytes"),
+                "note": "sha256 与 pin/provenance 对得上 —— S3 整段跳过，"
+                        "不重下 8.11 GiB、不重算"}
+    if v.get("ok"):
+        return {"state": "unverified", "path": str(imat), "trust": trust,
+                "sha256": v.get("sha256"),
+                "note": "有文件但对不上任何已知记录 —— S3 会重算（或显式放行，"
+                        "见 S4 的 IMATRIX_ALLOW_UNPINNED）"}
+    return {"state": "unusable", "path": str(imat), "trust": trust,
+            "why": v.get("why"),
+            "note": "文件在但读不通/不可信 —— S3 会重算"}
+
+
+
+def stage_s4_preflight(deadline):
+    """S4 前的只读预检（v1.0.1）。在任何编译/下载/量化**之前**跑，几秒钟。
+
+    要证明两件事，缺一件就 fail-closed，并且只给一个最简下一步：
+      1. BF16（15.26 GiB）在工作区外存得下，或者已经挂在 /kaggle/input 里；
+      2. 两个产物（≈6.7 GiB）在 /kaggle/working 存得下。
+    同时如实记录：working/暂存盘的挂载标识、容量、写权限、imatrix 能否复用
+    （不能复用就注明 S3 会重下 8.11 GiB + 重算）。
+
+    这一层存在的理由：不要等 28 分钟编译 + 8 GiB 下载跑完，才在下载 BF16 时
+    发现 21.96 GiB 放不进 19.07 GiB。
+    """
+    pin = S4_PINNED
+    out_bytes = _s4_output_bytes()
+    out_gb = out_bytes / 2**30
+    bf16_gb = pin["bytes"] / 2**30
+    reserve_gb = float(CFG["MIN_FREE_DISK_GB"])
+    build_gb = float(CFG.get("S2_BUILD_DIR_EST_GB", 3.0))
+
+    # ---- working 本身 ----
+    ok_w, why_w = _write_probe(WORK)
+    wdu = shutil.disk_usage(WORK)
+    work = {"path": str(WORK), "writable": ok_w,
+            "free_gb": round(wdu.free / 2**30, 2),
+            "total_gb": round(wdu.total / 2**30, 2),
+            "mount": _mount_info(WORK)}
+    if not ok_w:
+        raise GuardError(f"working 写不进去（{why_w}）—— 什么都跑不了。")
+    log(f"working：空闲 {work['free_gb']} GiB / 共 {work['total_gb']} GiB，可写")
+
+    # ---- 暂存盘（工作区外）----
+    scratch = _preflight_scratch_evidence(pin["bytes"])
+    usable_scratch = [s for s in scratch if s.get("usable")]
+    for s in scratch:
+        if s.get("usable"):
+            log(f"暂存盘 {s['path']}：可用（空闲 {s['free_gb']} GiB，"
+                f"另一个文件系统 st_dev={s['st_dev']}，可写）")
+        elif s.get("exists"):
+            log(f"暂存盘 {s['path']}：不可用 —— {s.get('why')}")
+
+    # ---- imatrix ----
+    imat = _s4_preflight_imatrix_state()
+    s3_will_run = imat["state"] != "reusable"
+    log(f"imatrix：{imat['state']} —— {imat['note']}")
+
+    # ---- BF16 从哪来 ----
+    bf16 = {"bytes": pin["bytes"], "gb": round(bf16_gb, 2),
+            "sha256_checked": False, "path": None, "source": None}
+    manual = CFG.get("BASE_GGUF")
+    if manual:
+        p = Path(manual)
+        if not p.exists():
+            raise GuardError(f"CFG['BASE_GGUF'] 指向的路径不存在: {p}")
+        bf16.update(source="manual", path=str(p),
+                    note=f"手动指定；{p.stat().st_size / 2**30:.2f} GiB")
+        if p.stat().st_size != pin["bytes"]:
+            log(f"!! 手动 base 字节数与 S4_PINNED 不符"
+                f"（{p.stat().st_size} vs {pin['bytes']}）—— S4 会按文件实际内容判类型")
+    else:
+        hit = None
+        for c in _scan_input_gguf(max_hits=32, time_budget_sec=20.0):
+            try:
+                if c.stat().st_size == pin["bytes"]:
+                    hit = c
+                    break
+            except OSError:
+                continue
+        if hit is not None:
+            bf16.update(source="attached_input", path=str(hit),
+                        note="已在 /kaggle/input（只读）；字节数与 pin 一致，"
+                             "sha256 由 S4 核对")
+        elif usable_scratch:
+            s = usable_scratch[0]
+            bf16.update(source="scratch_download", path=str(Path(s["path"]) / pin["filename"]),
+                        note=f"下到工作区外暂存盘 {s['path']}（空闲 {s['free_gb']} GiB）；"
+                             "代价：不跨 Session，下次要重下")
+        else:
+            need_all = pin["bytes"] + out_bytes + reserve_gb * 2**30
+            if wdu.free >= need_all:
+                bf16.update(source="working_download",
+                            path=str(MODEL_DL / pin["filename"]),
+                            note="working 装得下 BF16 + 两个产物")
+            else:
+                bf16.update(source=None,
+                            note=f"既不在 /kaggle/input，也没有可用的工作区外暂存盘，"
+                                 f"working 也装不下（空闲 {work['free_gb']} GiB < "
+                                 f"BF16 {bf16_gb:.2f} + 产物 {out_gb:.2f} + 保底 "
+                                 f"{reserve_gb:.0f} GiB）")
+    log(f"BF16 来源：{bf16['source'] or '无'} —— {bf16.get('note', '')}")
+
+    # ---- working 峰值的磁盘账 ----
+    # S2 的 build 目录一直在（S3/S4 还要用）；Q8_0 与产物不同时存在
+    # （imatrix 到手后 Q8_0 即回收），所以峰值取二者较大值。
+    q8_gb = 0.0 if not s3_will_run else (S3_PINNED["bytes"] / 2**30)
+    peak_gb = build_gb + max(q8_gb, out_gb) + reserve_gb
+    if bf16["source"] == "working_download":
+        peak_gb += bf16_gb
+    fits_work = wdu.free / 2**30 >= peak_gb
+    outputs_fit = wdu.free / 2**30 >= build_gb + out_gb + reserve_gb
+    log(f"working 峰值账：build≈{build_gb:.1f} + max(Q8_0 {q8_gb:.2f}, "
+        f"产物 {out_gb:.2f}) + 保底 {reserve_gb:.0f}"
+        + (f" + BF16 {bf16_gb:.2f}" if bf16["source"] == "working_download" else "")
+        + f" = {peak_gb:.2f} GiB vs 空闲 {work['free_gb']} GiB → "
+        + ("够" if fits_work else "不够"))
+
+    # ---- RAM ----
+    ram = _ram_precheck(pin["bytes"], "S4 预检")
+
+    # ---- 判定 ----
+    if bf16["source"] is None:
+        raise GuardError(
+            f"S4 预检不过：BF16（{bf16_gb:.2f} GiB）没有可用的落点。\n"
+            f"  · /kaggle/input 里没找到字节数为 {pin['bytes']} 的 .gguf；\n"
+            f"  · working 之外没有「另一个文件系统且空闲 ≥ {bf16_gb:.1f} GiB」的暂存盘；\n"
+            f"  · working 自己也装不下（空闲 {work['free_gb']} GiB）。\n"
+            f"  → 唯一的最简下一步：{_s4_helper_notebook_hint()}")
+    if not fits_work:
+        raise GuardError(
+            f"S4 预检不过：BF16 有地方放（{bf16['source']}），但 working 的峰值账不够。\n"
+            f"  空闲 {work['free_gb']} GiB < 峰值 {peak_gb:.2f} GiB"
+            f"（build≈{build_gb:.1f} + max(Q8_0 {q8_gb:.2f}, 产物 {out_gb:.2f}）"
+            f" + 保底 {reserve_gb:.0f}）。\n"
+            f"  → 唯一的最简下一步：清掉 working 里的旧产物"
+            f"（{MDLS} 下的 .stale-* / 上一轮 GGUF）后重跑；"
+            f"确知自己在做什么，再考虑调小 CFG['MIN_FREE_DISK_GB']。")
+
+    return {"ok": True,
+            "work": work,
+            "scratch": scratch,
+            "bf16": bf16,
+            "outputs": {"bytes": out_bytes, "gb": round(out_gb, 2),
+                        "fits_in_work": outputs_fit},
+            "work_peak_gb": round(peak_gb, 2),
+            "work_free_gb": work["free_gb"],
+            "imatrix": imat,
+            "ram": ram,
+            "s3_will_run": s3_will_run,
+            "pinned": {"repo": pin["repo"], "revision": pin["revision"],
+                       "filename": pin["filename"], "sha256": pin["sha256"]}}
+
+
+
 def stage_s4_quant(deadline):
     """S4：从**原始 F16/BF16** 量化出 IQ2_XS 与 IQ4_XS，共用同一份 imatrix。
 
@@ -411,9 +724,16 @@ def stage_s4_quant(deadline):
     params = {"imatrix_ctx": CFG["IMATRIX_CTX"], "imatrix_chunks": CFG["IMATRIX_CHUNKS"],
               "imatrix_sha256": im_sha}
 
+    # v1.0.1：单格式预算帽。总预算从 1800 s 提到 5400 s（30 分钟连做两次 8B
+    # CPU 量化，误杀风险太高），再给单个格式加帽，避免第一个吃光第二个的时间。
+    # **保护上限，不是耗时承诺** —— 真实耗时未实测。
+    per_fmt = float(CFG.get("S4_PER_FORMAT_BUDGET_SEC", 3600))
+    total_budget = float(CFG["STAGE_BUDGET_SEC"].get("S4_QUANT", 5400))
+
     out = {}
     for fmt in FORMATS:
         check_deadline(deadline, f"S4_QUANT {fmt}")
+        fmt_deadline = min(deadline, time.time() + per_fmt)
         dst = _model_path(fmt)
         prov_path = _provenance_path(dst)
         fp = _quant_fp(base_fp, im_sha, llm_commit, fmt, plan, params)
@@ -441,7 +761,18 @@ def stage_s4_quant(deadline):
 
             cmd = _quant_cmd(qbin, imat, base, part, fmt, threads, plan)
             try:
-                run_cmd(cmd, LOGS / f"s4_quant_{fmt}.log", deadline)
+                run_cmd(cmd, LOGS / f"s4_quant_{fmt}.log", fmt_deadline)
+            except BudgetExceeded as e:
+                done = [f for f in FORMATS
+                        if _model_path(f).exists() and _model_path(f).stat().st_size > 0]
+                raise BudgetExceeded(
+                    f"{fmt} 量化超出单格式预算 {per_fmt:.0f} s"
+                    f"（阶段总预算 {total_budget:.0f} s）。\n"
+                    f"  日志保留在 {LOGS / f's4_quant_{fmt}.log'}，可从尾部看进度。\n"
+                    f"  已完成的格式：{done or '无'} —— 重跑会按 provenance 指纹自动复用，不会重量。\n"
+                    f"  这是保护上限，不是耗时承诺：真实 CPU 量化耗时未实测。要放宽就调 "
+                    f"CFG['S4_PER_FORMAT_BUDGET_SEC'] 或 STAGE_BUDGET_SEC['S4_QUANT']。"
+                ) from e
             except CommandFailed as e:
                 hint = ""
                 low = (e.tail or "").lower()

@@ -37,4 +37,9 @@ STAGE_DEPS = {
                        [lambda: need("BASE_GGUF")]),
     "S9_REPORT":      ([], []),
     "SX_EXPLORE":     (["EXPLORE_GGUF"], [lambda: need("EXPLORE_GGUF")]),
+    # 预检本身在 ALWAYS_RERUN 里（磁盘状态每次都重查），这里的指纹只作记录。
+    "S4_PREFLIGHT":   (["BASE_GGUF", "S4_AUTO_FETCH_BASE", "S4_RECLAIM_Q8_CACHE",
+                        "S3_SKIP_IF_IMATRIX_OK", "IMATRIX_GGUF", "MIN_FREE_DISK_GB",
+                        "S4_RAM_MARGIN_GB", "S2_BUILD_DIR_EST_GB"],
+                       [lambda: need("BASE_GGUF"), resolve_imatrix]),
 }

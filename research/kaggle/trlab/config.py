@@ -6,7 +6,7 @@
 
 from pathlib import Path
 
-NOTEBOOK_VERSION = "1.0.0"
+NOTEBOOK_VERSION = "1.0.1"
 
 
 
@@ -109,6 +109,7 @@ CALIB_PINNED = {
 STAGES = {
     "S0_ENV":         True,    # 环境 / GPU / 磁盘检查（秒级）
     "S1_SMOKE":       True,    # 短时 smoke：合成 GGUF 往返 + 显存/磁盘微基准
+    "S4_PREFLIGHT":   False,   # S4 前的只读预检（RUN_S4 自动开；下载/编译前 fail-closed）
     "S2_BUILD":       False,   # 由 RUN_S2 / RUN_S3 控制；手改这里也行，但开关更省事
     "S3_IMATRIX":     False,   # 生成 imatrix.gguf（RUN_S3=True 时连 S2 一起自动开）
     "S4_QUANT":       False,   # 产出 IQ2_XS / IQ4_XS（共用同一份 imatrix）
@@ -123,19 +124,25 @@ STAGES = {
 
 
 # 这些阶段即使 status=="ok" 也重跑
-ALWAYS_RERUN = {"S9_REPORT"}
+# S4_PREFLIGHT 必须在册：磁盘/暂存盘/imatrix 的状态每次运行都可能变
+# （换 Session、清过 working、挂了新 Input），缓存一次 "ok" 会变成假阴性。
+ALWAYS_RERUN = {"S9_REPORT", "S4_PREFLIGHT"}
 
 
 
 # 前置阶段失败就不再启动（v0.4 / D-6）：S2 编译挂了，S3 不该再报一句
 # "找不到 llama-imatrix"，而是直接说"因为 S2 失败了所以没跑"。
 # 注意：只在前置**真的失败**（status=="error"）时拦；前置根本没开不拦。
+# v1.0.1：S4_PREFLIGHT 是 S2–S5 的共同前置 —— 预检不过就不该花 28 分钟编译、
+# 8 GiB 下载，最后才在下载 BF16 时发现磁盘不够。
 STAGE_REQUIRES_OK = {
-    "S3_IMATRIX": ["S2_BUILD"],
-    "S4_QUANT":   ["S2_BUILD", "S3_IMATRIX"],
+    "S2_BUILD":     ["S4_PREFLIGHT"],
+    "S3_IMATRIX":   ["S2_BUILD", "S4_PREFLIGHT"],
+    "S4_QUANT":     ["S2_BUILD", "S3_IMATRIX", "S4_PREFLIGHT"],
     "S5_BYTES":   ["S4_QUANT"],
     "S6_NLL":     ["S2_BUILD"],
     "S7_QUALITY": ["S2_BUILD"],
+    "S5_BYTES":   ["S4_QUANT", "S4_PREFLIGHT"],
 }
 
 
@@ -215,6 +222,16 @@ CFG = {
     # 量化期间的 RAM 余量建议值（GiB）。llama-quantize 是 CPU 路径 + mmap，
     # 但 --max-buffer-size 默认 8192 MiB，RAM 不够会 exit 137。
     "S4_RAM_MARGIN_GB": 4.0,
+    # 每个格式的量化时间上限（秒）。v1.0.1：S4_QUANT 总预算从 1800 s 提到
+    # 5400 s（原来 30 分钟要连做两次 8B CPU 量化，误杀风险实在太高），
+    # 再给单个格式加一道帽，避免第一个把第二个的时间吃光。
+    # **这是保护上限，不是耗时承诺** —— 真实耗时未实测，超了会留日志并
+    # 在重跑时按 provenance 复用已完成的格式。
+    "S4_PER_FORMAT_BUDGET_SEC": 3600,
+    # S4_PREFLIGHT 磁盘账里 S2 build 目录的**估算**占用（GiB）。
+    # 真实大小未观测（llama.cpp + CUDA，4 个二进制），只用于预检算术，
+    # 刻意估高不估低；S0_ENV 会给实测值。
+    "S2_BUILD_DIR_EST_GB": 3.0,
 
     # ---------- 预算（硬上限，超了主动抛异常而不是被 OOM kill） ----------
     "MAX_WALL_SEC":      8 * 3600,
@@ -222,7 +239,8 @@ CFG = {
     "MIN_FREE_DISK_GB":  3.0,
     "STAGE_BUDGET_SEC": {
         "S0_ENV": 120, "S1_SMOKE": 240, "S2_BUILD": 2400,
-        "S3_IMATRIX": 3600, "S4_QUANT": 1800, "S5_BYTES": 300,
+        "S4_PREFLIGHT": 120,
+        "S3_IMATRIX": 3600, "S4_QUANT": 5400, "S5_BYTES": 300,
         "S6_NLL": 5400, "S7_QUALITY": 1800, "S8_BF16_ANCHOR": 3600,
         "S9_REPORT": 120, "SX_EXPLORE": 1800,
     },
@@ -296,6 +314,9 @@ def _apply_run_switches():
         _s4_common()
         STAGES["S4_QUANT"] = True
         STAGES["S5_BYTES"] = True
+        # v1.0.1：先跑只读预检再动工。预检不过，后面 28 分钟编译 + 8 GiB
+        # 下载 + 15 GiB BF16 都省了 —— 磁盘不够要在最开始就说。
+        STAGES["S4_PREFLIGHT"] = True
         # 量化 base = 同仓库同 revision 的原始 BF16。ALLOW_REQUANTIZE 保持 False：
         # 本路线禁止从 Q8_0 二次量化（上游自己就警告质量会严重下降）。
         CFG["BASE_KIND"] = S4_PINNED["kind"]

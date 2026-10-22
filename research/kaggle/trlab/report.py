@@ -134,6 +134,31 @@ def _s4_report_lines(r):
 
 
 
+def _s4_preflight_lines(r):
+    """S4 预检摘要（run() 里打印，S9 第 4.5 节复用）。"""
+    L = []
+    b = r.get("bf16") or {}
+    L.append("### S4 预检（编译/下载前的磁盘与暂存盘核查）\n")
+    L.append(f"- working：空闲 {r.get('work_free_gb')} GiB"
+             f"（峰值需要 {r.get('work_peak_gb')} GiB）")
+    L.append(f"- BF16 落点：**{b.get('source') or '无'}**"
+             + (f" → `{b.get('path')}`" if b.get("path") else "")
+             + (f"（{b['note']}）" if b.get("note") else ""))
+    im = r.get("imatrix") or {}
+    L.append(f"- imatrix：{im.get('state')} —— {im.get('note', '')}")
+    sc = [s for s in (r.get("scratch") or []) if s.get("usable")]
+    if sc:
+        L.append(f"- 工作区外暂存盘：{len(sc)} 个可用"
+                 f"（{', '.join(s['path'] + ' ' + str(s.get('free_gb')) + ' GiB' for s in sc)}）")
+    else:
+        L.append("- 工作区外暂存盘：无（本机/macOS 上这是正常结果）")
+    if r.get("s3_will_run"):
+        L.append("- 预计额外耗时：S3 要下 8.11 GiB Q8_0 + 重算 imatrix（约 10 分钟，**估算**）")
+    L.append("")
+    return L
+
+
+
 def stage_s9_report(deadline):
     assert THIRD_PARTY_IN_COMPARISON is False, "第三方量化禁止进入公平比较表"
 

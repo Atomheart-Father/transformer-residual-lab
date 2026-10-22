@@ -152,6 +152,11 @@ MD_TITLE = """# transformer-residual-lab · Kaggle 低位宽量化验证台（v{
 三个都 `False` 时只跑 S0/S1/S9（环境检查 + 冒烟 + 报告），**不联网、不下载任何东西**。
 打开任一开关前请确认右侧 `Settings → Internet = On`。
 
+`RUN_S4 = True` 会在**任何编译、任何下载之前**先跑一次几秒的 `S4_PREFLIGHT`：
+只读核查 working / 工作区外暂存盘的挂载、容量、写权限，以及 BF16 有没有落点、
+imatrix 能不能复用。不通过就**就地停下**并只给一步要做的 —— 不会先花 28 分钟编译、
+再下 8 GiB / 15 GiB 之后才发现磁盘不够。
+
 **代码不在这份 notebook 里。** 第二个代码格会从公开仓库按**钉死的 commit**
 sparse fetch `research/kaggle/trlab/`（约 200 KB，1–3 秒），校验 `git rev-parse HEAD`
 与钉的值一致后才 import。源码在
@@ -169,6 +174,14 @@ MD_RUN = """## 执行
 
 这一格负责：取执行包 → 校验 → `trlab.run(...)`。失败会停在这一格并说清原因，
 不会带着残缺状态往下跑。
+
+只想做那个几秒的磁盘检查、不编译不下载：把最后一行改成
+`trlab.run(preflight_only=True)`。`RUN_S4 = True` 的 `Run All` 已经**自动**先跑它，
+不用自己先单独点一轮。
+
+预检不通过时这一格会直接停下，并只给一步要做的（例如先做 `trlab_fetch_bf16.ipynb`
+把 BF16 变成只读 Input，或清掉 working 里的旧产物）；明细落在
+`/kaggle/working/trlab/out/S4_PREFLIGHT.json`。
 
 S6–S8 与 SX 默认关闭。要跑就把最后一行改成
 `trlab.run(run_s4=True, S6_NLL=True)` —— 阶段名直接当关键字参数传。"""

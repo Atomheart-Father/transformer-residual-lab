@@ -2559,6 +2559,8 @@ class _FakeUsage:
     def __init__(self, free, total=None):
         self.free = free
         self.total = total if total is not None else free * 2
+        # disk_gb() 会读 used（core.py:85），缺了它 run_stage→guard 直接 AttributeError
+        self.used = self.total - self.free
 
 
 class _FakeShutil:
@@ -3762,7 +3764,7 @@ def test_switch_s4_expands_plan(ns):
         plan = ns["_apply_run_switches"]()
         assert plan["run_s2"] and plan["run_s3"] and plan["run_s4"], plan
         on = set(plan["stages"])
-        for need in ("S2_BUILD", "S3_IMATRIX", "S4_QUANT", "S5_BYTES"):
+        for need in ("S2_BUILD", "S3_IMATRIX", "S4_QUANT", "S5_BYTES", "S4_PREFLIGHT"):
             assert need in on, f"{need} 没开：{sorted(on)}"
         for off in ("S6_NLL", "S7_QUALITY", "S8_BF16_ANCHOR", "SX_EXPLORE"):
             assert off not in on, f"{off} 不该开：{sorted(on)}"
@@ -3911,6 +3913,271 @@ def test_bootstrap_embedded_sha_guard(ns):
                     / "__init__.py").exists()
 
 
+# ---------------------------------------------------------------- v1.0.1 S4 预检
+
+class _PathShutil:
+    """按路径给不同空闲容量的假 shutil（预检测 working 与暂存盘两条账）。"""
+
+    def __init__(self, mapping, default):
+        self._m = {str(k): v for k, v in mapping.items()}
+        self._d = default
+
+    def disk_usage(self, p):
+        return _FakeUsage(self._m.get(str(p), self._d))
+
+    def which(self, name):
+        return None
+
+
+def _pf_env(ns, *, work_free_gb=200.0, scratch=(), input_hits=(), imat=None, devs=None):
+    """预检测试的公共打桩：容量 / 暂存盘候选 / Input 扫描 / imatrix / st_dev。"""
+    patch = _Patch(ns)
+    GiB = 2 ** 30
+    patch("shutil", _FakeShutil(free=int(work_free_gb * GiB)))
+    patch("_preflight_scratch_candidates", lambda: list(scratch))
+    patch("_scan_input_gguf", lambda **k: list(input_hits))
+    patch("resolve_imatrix", lambda: imat)
+    if devs:
+        import os as _os
+        patch("os", _FakeOS(_os, devs))
+    return patch
+
+
+def test_mount_info_parser(ns):
+    """/proc/mounts 解析：最长前缀匹配 + fstype/device；读不到返回 None。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_mnt_"))
+    try:
+        mf = tmp / "mounts"
+        mf.write_text(
+            "overlay / overlay rw,relatime 0 0\n"
+            "/dev/nvme0n1p1 /kaggle/working ext4 rw,relatime 0 0\n"
+            "/dev/nvme1n1 /kaggle/tmp xfs rw,noatime,quota 0 0\n", encoding="utf-8")
+        mi = ns["_mount_info"](Path("/kaggle/tmp/x"), mounts_path=str(mf))
+        assert mi and mi["fstype"] == "xfs" and mi["device"] == "/dev/nvme1n1", mi
+        assert "quota" in mi["opts"], mi
+        mi2 = ns["_mount_info"](Path("/kaggle/working/trlab"), mounts_path=str(mf))
+        assert mi2["mount"] == "/kaggle/working", mi2
+        mi3 = ns["_mount_info"](Path("/usr/local/bin"), mounts_path=str(mf))
+        assert mi3["mount"] == "/", mi3
+        assert ns["_mount_info"](Path("/x"), mounts_path=str(tmp / "nope")) is None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_write_probe_readonly(ns):
+    """写入探针必须真写：只读目录直接判否（os.access 会说谎，这个不会）。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_wp_"))
+    ro = tmp / "ro"
+    ro.mkdir()
+    try:
+        ok, why = ns["_write_probe"](ro)
+        assert ok is True, why
+        os.chmod(ro, 0o555)
+        ok2, why2 = ns["_write_probe"](ro)
+        assert ok2 is False and why2, "只读目录竟然写成功了"
+    finally:
+        os.chmod(ro, 0o755)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s4_preflight_scratch_ok(ns):
+    """暂存盘是另一个文件系统且够大 → BF16 下到那里，预检通过。"""
+    import os as _os
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_pf_ok_"))
+    scratch = tmp / "kaggle-tmp"
+    scratch.mkdir()
+    wdev = _os.stat(ns["WORK"]).st_dev
+    patch = _pf_env(ns, work_free_gb=200.0, scratch=[scratch],
+                    devs={str(scratch): wdev + 7})
+    try:
+        r = ns["stage_s4_preflight"](time.time() + 60)
+        assert r["ok"] is True, r
+        assert r["bf16"]["source"] == "scratch_download", r["bf16"]
+        assert r["scratch"][0]["usable"] is True, r["scratch"]
+        assert r["s3_will_run"] is True, r["imatrix"]     # imatrix 缺失 → S3 会重算
+        assert "8.11" in r["imatrix"]["note"], r["imatrix"]
+        assert r["work_peak_gb"] > 0 and r["work_free_gb"] == 200.0
+    finally:
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s4_preflight_input_bf16(ns):
+    """/kaggle/input 已有字节数吻合的 BF16 → 一个暂存盘都不需要。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_pf_in_"))
+    ind = tmp / "qwen3"
+    ind.mkdir(parents=True)
+    bf = ind / "Qwen3-8B-BF16.gguf"
+    bf.write_bytes(b"")
+    os.truncate(str(bf), ns["S4_PINNED"]["bytes"])   # 稀疏文件：不真占 15 GiB
+    patch = _pf_env(ns, work_free_gb=200.0, scratch=[], input_hits=[bf])
+    try:
+        r = ns["stage_s4_preflight"](time.time() + 60)
+        assert r["bf16"]["source"] == "attached_input", r["bf16"]
+        assert r["ok"] is True, r
+        assert r["bf16"]["sha256_checked"] is False, "预检不算 sha256（S4 才核）"
+        assert "S4 核对" in r["bf16"]["note"], r["bf16"]
+    finally:
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s4_preflight_fail_closed_no_place(ns):
+    """没有 Input、没有暂存盘、working 只有 19.07 GiB → 下载前 fail-closed。"""
+    patch = _pf_env(ns, work_free_gb=19.07, scratch=[], input_hits=[])
+    patch("_fetch_pinned_blob", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("预检失败时不该下载任何东西")))
+    try:
+        ns["stage_s4_preflight"](time.time() + 60)
+        raise AssertionError("应当 fail-closed")
+    except ns["GuardError"] as e:
+        msg = str(e)
+        assert "没有可用的落点" in msg, msg
+        assert "trlab_fetch_bf16.ipynb" in msg, "必须给唯一的最简下一步"
+        assert msg.count("唯一的最简下一步") == 1, msg
+    finally:
+        patch.undo()
+
+
+def test_s4_preflight_working_peak_too_small(ns):
+    """BF16 有 Input，但 working 放不下 build+产物 → 提示清 working，而不是去搞 Input。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_pf_pk_"))
+    bf = tmp / "Qwen3-8B-BF16.gguf"
+    bf.write_bytes(b"")
+    os.truncate(str(bf), ns["S4_PINNED"]["bytes"])
+    patch = _pf_env(ns, work_free_gb=6.0, scratch=[], input_hits=[bf])
+    try:
+        ns["stage_s4_preflight"](time.time() + 60)
+        raise AssertionError("应当 fail-closed")
+    except ns["GuardError"] as e:
+        msg = str(e)
+        assert "峰值账不够" in msg, msg
+        assert "清掉 working" in msg, msg
+        assert "trlab_fetch_bf16" not in msg, "这不是 Input 的问题，别把用户带错方向"
+    finally:
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s4_preflight_scratch_rejections(ns):
+    """同设备 / tmpfs / 只读 / 容量不足 / 同设备名 —— 五种候选各有具体理由。"""
+    import os as _os
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_pf_rej_"))
+    same, ro, tiny, ram, mnt = (tmp / n for n in ("same", "ro", "tiny", "ram", "mnt"))
+    for d in (same, ro, tiny, ram, mnt):
+        d.mkdir()
+    wdev = _os.stat(ns["WORK"]).st_dev
+    GiB = 2 ** 30
+    patch = _Patch(ns)
+    patch("_preflight_scratch_candidates", lambda: [same, ro, tiny, ram, mnt])
+    patch("os", _FakeOS(_os, {str(same): wdev, str(ro): wdev + 1,
+                              str(tiny): wdev + 2, str(ram): wdev + 3,
+                              str(mnt): wdev + 4}))
+    patch("shutil", _PathShutil({tiny: 1 * GiB}, 200 * GiB))
+    mounts = {
+        str(ns["WORK"]): {"device": "/dev/w", "mount": str(ns["WORK"]),
+                          "fstype": "ext4", "opts": []},
+        str(ram): {"device": "/dev/ram0", "mount": str(ram),
+                   "fstype": "tmpfs", "opts": []},
+        str(mnt): {"device": "/dev/w", "mount": str(mnt),
+                   "fstype": "ext4", "opts": []},
+    }
+    patch("_mount_info", lambda p, mounts_path="/proc/mounts": mounts.get(str(Path(p))))
+    os.chmod(ro, 0o555)
+    try:
+        ev = ns["_preflight_scratch_evidence"](ns["S4_PINNED"]["bytes"])
+        by = {e["path"]: e for e in ev}
+        assert by[str(same)]["usable"] is False and "同一个文件系统" in by[str(same)]["why"]
+        assert by[str(ro)]["usable"] is False and "写不进去" in by[str(ro)]["why"]
+        assert by[str(tiny)]["usable"] is False and "空闲" in by[str(tiny)]["why"]
+        assert by[str(ram)]["usable"] is False and "内存盘" in by[str(ram)]["why"]
+        assert by[str(mnt)]["usable"] is False and "同一设备" in by[str(mnt)]["why"]
+    finally:
+        os.chmod(ro, 0o755)
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s4_preflight_config_and_budget(ns):
+    """预检必须每次重跑；S4 预算从 1800 s 提到 5400 s 并加单格式帽。"""
+    assert "S4_PREFLIGHT" in ns["ALWAYS_RERUN"], "磁盘状态每次都会变，不能缓存 ok"
+    b = ns["CFG"]["STAGE_BUDGET_SEC"]
+    assert b["S4_QUANT"] >= 5400, f"S4 总预算还是 {b['S4_QUANT']} s，误杀风险没解决"
+    assert b["S4_PREFLIGHT"] <= 180, b["S4_PREFLIGHT"]
+    assert ns["CFG"]["S4_PER_FORMAT_BUDGET_SEC"] >= 1800
+    g = ns["STAGE_REQUIRES_OK"]
+    assert g["S2_BUILD"] == ["S4_PREFLIGHT"], g["S2_BUILD"]
+    assert "S4_PREFLIGHT" in g["S3_IMATRIX"] and "S4_PREFLIGHT" in g["S4_QUANT"]
+    assert "S4_PREFLIGHT" in g["S5_BYTES"]
+
+
+def test_preflight_only_runs_only_preflight(ns):
+    """preflight_only=True：只跑 S4_PREFLIGHT，S0/S1/S9 都不跑。"""
+    cfg, stages, STATE = ns["CFG"], ns["STAGES"], ns["STATE"]
+    saved = (copy.deepcopy(cfg), copy.deepcopy(stages), dict(STATE))
+    patch = _pf_env(ns, work_free_gb=19.07, scratch=[], input_hits=[])
+    try:
+        # STATE 是所有测试共享的全局量，前面几项已经把 S0_ENV 跑成 ok 了；
+        # 不先清空，"S0 没跑"这件事根本断言不出来。
+        STATE.clear()
+        out = ns["run"](preflight_only=True)
+        assert out["preflight"] == "failed", out
+        assert out["stages"]["S4_PREFLIGHT"] == "error"
+        for k in ("S0_ENV", "S1_SMOKE", "S2_BUILD", "S3_IMATRIX",
+                  "S4_QUANT", "S5_BYTES", "S9_REPORT"):
+            assert out["stages"][k] is None, (k, out["stages"][k])
+        assert stages["S4_PREFLIGHT"] is True and stages["S9_REPORT"] is False
+    finally:
+        patch.undo()
+        cfg.clear(); cfg.update(saved[0])
+        stages.clear(); stages.update(saved[1])
+        STATE.clear(); STATE.update(saved[2])
+
+
+def test_s4_quant_budget_is_protective(ns):
+    """单格式预算被杀时：日志路径 / 已完成格式 / 重跑复用 / "保护上限" 都要说清。"""
+    CFG = ns["CFG"]
+    work = Path(ns["WORK"])
+    snap = {k: CFG[k] for k in ("BASE_GGUF", "BASE_KIND", "IMATRIX_GGUF", "IMATRIX_BASE",
+                                "IMATRIX_BASE_KIND", "ALLOW_REQUANTIZE",
+                                "IMATRIX_ALLOW_UNPINNED", "S4_PER_FORMAT_BUDGET_SEC")}
+    patch = _Patch(ns)
+    base = work / "s4_budget_base.gguf"
+    ns["gguf_write_synth"](base, [("blk.0.attn_q.weight", (256, 256), 8)])
+    imat = work / "s4_budget_im.gguf"
+    ns["gguf_write_synth"](imat, [("blk.0.attn_q.weight", (256, 256), 0)])
+    CFG.update(BASE_GGUF=str(base), BASE_KIND="bf16", IMATRIX_GGUF=str(imat),
+               IMATRIX_BASE="", IMATRIX_BASE_KIND="", ALLOW_REQUANTIZE=False,
+               IMATRIX_ALLOW_UNPINNED=True, S4_PER_FORMAT_BUDGET_SEC=1)
+    patch("_reclaim_stale_q8_cache", lambda deadline: None)
+    patch("_resolve_s4_base",
+          lambda deadline: (base, "manual", {"bytes": base.stat().st_size}))
+    patch("_imatrix_base_consistency", lambda *a, **k: {
+        "ok": True, "level": "provenance", "n_tensors": 1,
+        "architecture": "qwen3", "verified_by": "test"})
+    patch("llama_bin", lambda name: "/bin/true")
+    patch("_s4_output_bytes", lambda: 0)
+    patch("_ram_precheck", lambda *a, **k: None)
+
+    def fake_run_cmd(cmd, log_path, deadline, cwd=None, env=None):
+        raise ns["BudgetExceeded"]("命令超预算被杀")
+
+    patch("run_cmd", fake_run_cmd)
+    try:
+        ns["stage_s4_quant"](time.time() + 600)
+        raise AssertionError("应当抛 BudgetExceeded")
+    except ns["BudgetExceeded"] as e:
+        msg = str(e)
+        for must in ("超出单格式预算", "日志保留在", "已完成的格式",
+                     "不会重量", "保护上限"):
+            assert must in msg, (must, msg)
+    finally:
+        patch.undo(); CFG.update(snap)
+        for p in (base, imat):
+            if p.exists():
+                p.unlink()
+
+
 # ---------------------------------------------------------------- runner
 
 TESTS = [
@@ -4023,6 +4290,17 @@ TESTS = [
     test_bootstrap_fetch_verify_reuse,
     test_bootstrap_embedded_fallback,
     test_bootstrap_embedded_sha_guard,
+    # v1.0.1 S4 预检
+    test_mount_info_parser,
+    test_write_probe_readonly,
+    test_s4_preflight_scratch_ok,
+    test_s4_preflight_input_bf16,
+    test_s4_preflight_fail_closed_no_place,
+    test_s4_preflight_working_peak_too_small,
+    test_s4_preflight_scratch_rejections,
+    test_s4_preflight_config_and_budget,
+    test_preflight_only_runs_only_preflight,
+    test_s4_quant_budget_is_protective,
 ]
 
 
