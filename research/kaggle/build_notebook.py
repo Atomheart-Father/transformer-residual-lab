@@ -177,6 +177,15 @@ Kaggle 上要在 `Add-ons → Secrets` 新建 `HF_TOKEN` 并**勾选 attach 到�
 `llama-perplexity` / `llama-cli`，缺了就**自己只编 S2**（pinned 源码 36.6 MiB，
 不下载 Q8_0/BF16、不做 S3/S4、不重量化）；都在就直接进评测。
 
+**v1.2.0：S6 不再"见 1 行文本重叠就整轮归零"**。校准集（wikitext **train** 全文）
+与评测集（**test**）里出现相同句子，不等于 imatrix 实际看过评测数据 ——
+imatrix 只消费 `32×512 ≈ 16.4k` token。现在 S6 会：给每条交集做取证
+（完整哈希 / 段索引 / 是否只是前 200 字符相同）→ 剔除共享前缀的评测段，
+生成确定性的 `eval_holdout.txt`（两个量化共用同一份，规则与剔除清单写在
+`out/isolation/isolation.json`）→ 在结论里如实标注
+`actual_imatrix_calib_overlap`（证明不了就写 `unknown`，不假称无污染）。
+**你不需要改任何配置**；只有当剔除比例 >10%（像把 train 当成了 eval）时它才会停下。
+
 **Kaggle 是可丢弃的算力机**：跑失败就直接关掉 Session，修代码 → commit → 新 Session
 重跑，输入不用重下。失败现场写在 `out/FAILURE.json`（最早根因不会被后面的失败覆盖），
 不需要 Save Version 或抢救工作区。**S6/S7 没出数据时报告顶部会写"本次运行失败"**，
