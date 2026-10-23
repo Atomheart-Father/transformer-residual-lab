@@ -284,6 +284,140 @@ def _autobuild_binaries(plan):
     return plan
 
 
+# ---------------------------------------------------------------- 编译前的轻量预检门
+
+def _eval_preflight_gate(plan=None):
+    """v1.2.1：`RUN_EVAL=True` 在**自动 S2 编译之前**自动跑轻量预检。
+
+    存在理由（用户 2026-10-23 的收尾建议）：`lightweight_eval_preflight()`
+    早就写好了 —— Range 0-0 探两个 GGUF、真下 2 KB sidecar、真跑语料清理与
+    clean holdout，1 分钟级、不编译、不下 7 GiB、不需要 GPU。但它一直只挂在
+    CLI `--preflight-eval` 上，主路径 S0/S1 → 授权门 → 自动 S2 之后才在
+    **下载/评测时**才暴露 resolve 路径、sidecar、holdout 类错误 —— 用户已经
+    为这类错误白等过 28 分钟编译。这里把它接进主路径：只有 `ok=True` 才允许
+    进入 S2；缺二进制只 warn（S2 会自动补编，这正是预检的设计语义）。
+
+    语料只有几 MB 且有 stamp 缓存：预检下过之后 S6 直接复用，不会重下。
+    """
+    from .artifacts import lightweight_eval_preflight
+    log("评测链路轻量预检（编译前；不编译、不下 7 GiB、不需要 GPU）："
+        "GGUF Range 0-0 探测 + sidecar 实下 + 语料 clean holdout")
+    return lightweight_eval_preflight(time.time() + 300)
+
+
+def _preflight_cause(rep):
+    """预检失败 → (cause 代码, 一条下一步)。按**哪个检查项**失败分。
+
+    复用 `_CAUSE_BY_AUTH` / `_classify()` 的既有词表（400 不许再怪用户
+    Secrets），只补预检特有的几类：远端总长与 tree 不符、etag 与 oid 不符、
+    sidecar 不在 tree 里、语料重叠超上限/剩余太少/取不到。
+    """
+    checks = rep.get("checks") or {}
+    acc = checks.get("hf_access") or {}
+    if not acc.get("ok"):
+        status = str(acc.get("status") or "error")
+        return _CAUSE_BY_AUTH.get(status, "hf_other"), _next_step_for_auth(status)
+    for _f, p in sorted((checks.get("gguf_probe") or {}).items()):
+        if isinstance(p, dict) and p.get("ok"):
+            continue
+        why = str(p.get("why") or "") if isinstance(p, dict) else str(p)
+        if "x-linked-etag" in why or ("etag" in why and "oid" in why):
+            return ("hash_mismatch",
+                    "远端 etag 与 tree 的 lfs.oid 不一致：上游在两次请求之间"
+                    "换过文件。等一两分钟重跑；仍不符就把 PREFLIGHT_EVAL.json 贴到 Issue #5。")
+        if "远端总长" in why:
+            return ("hf_size_mismatch",
+                    "远端总长与 tree 的 size 不符：上游换过文件或 tree 过期。"
+                    "重跑一次（预检只要 1 分钟）；仍不符贴 PREFLIGHT_EVAL.json 到 Issue #5。")
+        if "找不到" in why:
+            return ("hf_not_found",
+                    f"tree 里找不到 {_f} 的 .gguf：核对 HF_MODEL_REPO / "
+                    "HF_MODEL_REVISION，以及上一轮 S4 的上传是否真的成功。")
+        return _classify("PREFLIGHT_EVAL", why)
+    for _f, s in sorted((checks.get("sidecar_download") or {}).items()):
+        if isinstance(s, dict) and s.get("ok"):
+            continue
+        why = str(s.get("why") or "") if isinstance(s, dict) else str(s)
+        if "tree 里没有" in why:
+            return ("sidecar_missing",
+                    "provenance sidecar 不在 HF tree 里：fairness 会退到 "
+                    "hf_sidecar_declared 都算不上。补跑上传（S4 产物 + sidecar）后再评测。")
+        return _classify("PREFLIGHT_EVAL", why)
+    corpus = checks.get("corpus") or {}
+    if not corpus.get("ok"):
+        why = str(corpus.get("why") or "")
+        if "共享前 200 字符" in why or "超过上限" in why:
+            return ("corpus_overlap",
+                    "校准集与评测集重叠超过 ISOLATION_MAX_DROP_FRAC：这不像维基百科的"
+                    "重复句式，更像把 train 当成了 eval。先核对 EVAL_TXT 是不是真的 "
+                    "test split；**不要**调大上限绕过（那会把评测集清空）。")
+        if "clean holdout 只剩" in why:
+            return ("corpus_too_small",
+                    "clean holdout 剩余段落低于 ISOLATION_MIN_PARAS：样本太小，NLL 没有"
+                    "意义。换更大的 eval split，或先与维护者确认再调小下限。")
+        if "取不到校准语料" in why:
+            return ("corpus_unavailable",
+                    "取不到校准语料（公开 dataset repo，不需要 token）：确认 "
+                    "Settings → Internet = On 后重跑；预检只要 1 分钟，不编译。")
+        return _classify("PREFLIGHT_EVAL", why)
+    return "other", "看 PREFLIGHT_EVAL.json 里第一个 ok=False 的检查项与它的 why。"
+
+
+def _preflight_fail_lines(rep):
+    """预检报告 → 人类可读的失败清单（每个检查项一行，截断）。"""
+    checks = rep.get("checks") or {}
+    lines = []
+    for name in ("hf_access", "gguf_probe", "sidecar_download", "corpus"):
+        v = checks.get(name)
+        if not isinstance(v, dict):
+            continue
+        if name in ("gguf_probe", "sidecar_download"):
+            for f, p in sorted(v.items()):
+                if isinstance(p, dict) and p.get("ok") is False:
+                    lines.append(f"{name}/{f}: {str(p.get('why'))[:220]}")
+        elif v.get("ok") is False:
+            lines.append(f"{name}: {str(v.get('why'))[:220]}")
+    return lines
+
+
+def _abort_eval_preflight(plan, rep, upload_state=None):
+    """预检门不通就地停：FAILURE.json + PREFLIGHT_EVAL.json + 一份"失败"报告。
+
+    **不伪装成实验完成**：S6/S7 一个字节的数据都不会有，报告顶部写"本次运行
+    失败"。缺二进制只是 warning（S2 会自动补编），不是停下来的理由。
+    """
+    cause, step = _preflight_cause(rep)
+    checks = rep.get("checks") or {}
+    extra = []
+    if (checks.get("binaries") or {}).get("missing"):
+        extra.append("binaries_missing")
+    doc = _record_failure(
+        "PREFLIGHT_EVAL",
+        error=("评测链路轻量预检失败（" + cause + "）："
+               + ("; ".join(_preflight_fail_lines(rep)) or "有检查项未通过")),
+        plan=plan, upload_state=upload_state,
+        cause=cause, next_step=step, extra_causes=extra)
+    print("-" * 78)
+    print("评测链路预检**未通过** —— 在 28 分钟编译、7 GiB 下载开始之前就停下了。")
+    for _line in _preflight_fail_lines(rep):
+        print(f"  · {_line}")
+    for _w in rep.get("warnings") or []:
+        print(f"  · 提示：{_w}")
+    print(f"  下一步（只做这一件）：{step}")
+    print(f"  明细：{OUT / 'PREFLIGHT_EVAL.json'}"
+          "（Range 探测 / sidecar / holdout 的原始记录）")
+    print("修好后重跑即可：语料与 sidecar 都有 stamp 缓存，不会重下。")
+    print("-" * 78)
+    # 仍然出一份报告（秒级），但报告顶部会写明"本次运行失败"
+    try:
+        run_stage("S9_REPORT", stage_s9_report)
+    except Exception as e:
+        log(f"!! 失败后生成报告也失败了：{e}")
+    return {"ok": False, "failed": ["PREFLIGHT_EVAL"], "causes": doc.get("causes"),
+            "plan": plan,
+            "stages": {k: (STATE.get(k) or {}).get("status") for k in STAGES}}
+
+
 def _abort_eval(plan, auth, upload_state=None):
     """凭据门不通就地停：写 FAILURE.json（含"缺二进制"这条并存的根因）+ 出报告。
 
@@ -482,6 +616,9 @@ def preflight_eval(deadline=None):
 
     覆盖的都是"只有真下载才会暴露"的集成断裂：resolve URL 路径、tree 的
     size/oid、私仓小文件的 Bearer、sidecar 能否取到、语料与 clean holdout。
+
+    v1.2.1：`RUN_EVAL=True` 的主路径在 S2 编译**之前自动**跑同一体检
+    （`_eval_preflight_gate`），这个 CLI 入口保留给"只想单独体检"的场景。
     """
     from .artifacts import lightweight_eval_preflight
     ensure_dirs()
@@ -519,6 +656,13 @@ def run(run_s2=None, run_s3=None, run_s4=None, run_eval=None,
          （pinned 源码 36.6 MiB，不下载模型、不做 S3/S4）；
       2. 编译之前先做一次 **HF 授权检查**（1 次只读请求；没 token 连请求都不发），
          不通就地停并写 `FAILURE.json` —— 不让用户等 28 分钟才看到 401。
+
+    v1.2.1 起，授权门之后、S2 编译之前再自动跑一次 **轻量预检**
+    （`lightweight_eval_preflight`：Range 0-0 探两个 GGUF、真下 2 KB sidecar、
+    真跑语料清理与 clean holdout；不编译、不下 7 GiB、不需要 GPU，约 1 分钟）。
+    只有它 `ok=True` 才进入 S2；不过就地停：`PREFLIGHT_EVAL.json` + `FAILURE.json`
+    + 一份顶部写"本次运行失败"的报告，**不伪装成实验完成**。缺二进制只 warn
+    （自动补编会处理）；语料几 MB 有 stamp 缓存，S6 直接复用不重下。
 
     upload=True：显式 opt-in，把本轮小结果（JSON/report）传到 HF。默认不传。
     """
@@ -582,6 +726,16 @@ def run(run_s2=None, run_s3=None, run_s4=None, run_eval=None,
         auth = _auth_gate(plan)
         if not auth.get("ok"):
             return _abort_eval(plan, auth)
+        # v1.2.1：编译前自动轻量预检（原来只有 CLI --preflight-eval 能跑）。
+        # resolve 路径 / sidecar / holdout 类错误必须**在 28 分钟编译之前**暴露；
+        # 只有 ok=True 才进 S2。缺二进制只 warning，由下面的自动补编处理。
+        _pf = _eval_preflight_gate(plan)
+        if not _pf.get("ok"):
+            return _abort_eval_preflight(plan, _pf)
+        for _w in _pf.get("warnings") or []:
+            log(f"预检提示：{_w}")
+        log("评测链路预检通过：GGUF Range 探测、sidecar 实下、语料与 holdout 都 ok"
+            "（只证明下载与语料，不代表 S6/S7 已经跑过）")
         plan = _autobuild_binaries(plan)
 
     s2 = run_stage("S2_BUILD", stage_s2_build)

@@ -584,6 +584,11 @@ def lightweight_eval_preflight(deadline, formats=None):
       · 校准/评测集 1 行重叠 → 整轮 S6 归零
     这四件事**都不需要**下载模型或编译就能发现。所以这里把它们做成 1 分钟级
     的体检：Range 0-0 探大文件、真下 2 KB 小文件、真跑 holdout 构建。
+
+    v1.2.1：`RUN_EVAL=True` 的主路径在 S2 编译**之前自动**调用本函数
+    （`run._eval_preflight_gate`），只有返回 `ok=True` 才进入 S2；缺二进制
+    只进 `warnings`（自动补编会处理），不是失败原因。语料几 MB 有 stamp
+    缓存，预检下过之后 S6 的 `_ensure_eval_txt()` 直接复用，不会重下。
     """
     formats = tuple(formats or FORMATS)
     repo = CFG["HF_MODEL_REPO"]

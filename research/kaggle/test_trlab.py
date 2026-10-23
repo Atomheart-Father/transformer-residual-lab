@@ -5091,6 +5091,8 @@ def test_eval_token_present_no_binaries_autobuilds_s2(ns):
     patch("hf_token", lambda *a, **k: {"token": "hf_fake", "source": "env:HF_TOKEN"})
     patch("repo_files", lambda *a, **k: [{"path": "a.gguf", "size": 1, "sha256": None}])
     patch("clear_access_cache", lambda: None)
+    # v1.2.1：主路径在 S2 编译前自动跑轻量预检（真 HTTP）；这里桩掉，只保留门的存在
+    patch("lightweight_eval_preflight", _ok_preflight_stub(tmp))
 
     def no_bin(name):
         raise ns["GuardError"](f"找不到 {name}")
@@ -5124,6 +5126,7 @@ def test_eval_s2_failure_skips_s6_s7(ns):
     patch("hf_token", lambda *a, **k: {"token": "hf_fake", "source": "env:HF_TOKEN"})
     patch("repo_files", lambda *a, **k: [])
     patch("clear_access_cache", lambda: None)
+    patch("lightweight_eval_preflight", _ok_preflight_stub(tmp))
 
     def no_bin(name):
         raise ns["GuardError"](f"找不到 {name}")
@@ -5331,6 +5334,187 @@ def test_s0_warning_not_misleading_under_run_eval(ns):
             assert "手动挂载" in ws2 or "没有找到 .gguf" not in ws2, ws2
     finally:
         ns["CFG"]["RUN_EVAL"] = old
+
+
+# ---------------------------------------------------------------- v1.2.1：编译前自动预检门
+# RUN_EVAL 主路径在 S2 编译**之前**自动调用 lightweight_eval_preflight
+# （原来只有 CLI --preflight-eval 能跑）：只有 ok=True 才进 S2；不过就地停，
+# 不编译、不评测、不伪装成功；缺二进制只 warning（自动补编处理）。
+
+
+def _preflight_stub(tmp, ok=True, checks=None, warnings=None):
+    """桩掉真 HTTP 预检：照真实实现的副作用写一份 PREFLIGHT_EVAL.json。"""
+    def stub(deadline, formats=None):
+        rep = {"stage": "PREFLIGHT_EVAL", "ok": ok,
+               "checks": checks if checks is not None else {
+                   "hf_access": {"ok": True, "status": "ok"},
+                   "gguf_probe": {"IQ2_XS": {"ok": True}, "IQ4_XS": {"ok": True}},
+                   "sidecar_download": {"IQ2_XS": {"ok": True}, "IQ4_XS": {"ok": True}},
+                   "corpus": {"ok": True},
+                   "binaries": {"ok": True, "missing": []}},
+               "warnings": warnings or []}
+        try:
+            Path(tmp).joinpath("PREFLIGHT_EVAL.json").write_text(
+                json.dumps(rep, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+        return rep
+    return stub
+
+
+def _ok_preflight_stub(tmp):
+    """默认通过、只 warn 缺二进制的桩（与真实实现的 warnings 语义一致）。"""
+    return _preflight_stub(
+        tmp, ok=True,
+        warnings=["缺 ['llama-perplexity', 'llama-cli']："
+                  "正常 run_eval 会自动只编 S2（约 28 分钟）"])
+
+
+def test_run_eval_auto_preflight_blocks_s2_compile(ns):
+    """v1.2.1 主路径回归：预检不过（GGUF 探测 404）→ 编译前停，不评测不伪装。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_pfgate_"))
+    _real_clear = ns["clear_access_cache"]
+    _real_clear()        # 上一条测试（400）在 access cache 里留了坏味道，先清掉
+    stages_snap = dict(ns["STAGES"])
+    state_snap = dict(ns["STATE"])
+    patch = _Patch(ns)
+    patch("OUT", tmp)
+    patch("hf_token", lambda *a, **k: {"token": "hf_fake", "source": "env:HF_TOKEN"})
+    patch("repo_files", lambda *a, **k: [{"path": "a.gguf", "size": 1, "sha256": None}])
+    seen = []
+    _inner = _preflight_stub(
+        tmp, ok=False,
+        checks={"hf_access": {"ok": True, "status": "ok"},
+                "gguf_probe": {"IQ2_XS": {"ok": False, "stage": "resolve",
+                                          "http_status": 404,
+                                          "why": "resolve 失败 HTTP 404：Not Found"}},
+                "sidecar_download": {},
+                "corpus": {"ok": True},
+                "binaries": {"ok": False,
+                             "missing": ["llama-perplexity", "llama-cli"]}},
+        warnings=["缺 ['llama-perplexity', 'llama-cli']：会自动只编 S2"])
+
+    def failing_pf(deadline, formats=None):
+        seen.append(deadline)
+        return _inner(deadline, formats)
+    patch("lightweight_eval_preflight", failing_pf)
+
+    def no_bin(name):
+        raise ns["GuardError"](f"找不到 {name}")
+    patch("llama_bin", no_bin)
+    fake, calls = _fake_runner(ns)
+    patch("run_stage", fake)
+    old = {k: ns["CFG"][k] for k in ("RUN_S2", "RUN_S3", "RUN_S4", "RUN_EVAL")}
+    try:
+        out = ns["run"](run_eval=True)
+        assert out["ok"] is False, out
+        assert out["failed"] == ["PREFLIGHT_EVAL"], out
+        assert out["plan"].get("autobuild") is None, out["plan"]
+        assert seen, "主路径必须真的调用轻量预检（不能只挂在 CLI 上）"
+        assert "S2_BUILD" not in calls, f"预检不过不许开始编译：{calls}"
+        assert "S6_NLL" not in calls and "S7_QUALITY" not in calls, calls
+        assert "S9_REPORT" in calls, "失败也要出一份报告（顶部写失败）"
+        doc = json.loads((tmp / "FAILURE.json").read_text(encoding="utf-8"))
+        assert doc["stage"] == "PREFLIGHT_EVAL", doc
+        assert doc["cause"] == "hf_not_found", doc
+        assert "binaries_missing" in doc["causes"], doc["causes"]
+        assert ("REPO" in doc["next_step"] or "REVISION" in doc["next_step"]), doc
+        pf = json.loads((tmp / "PREFLIGHT_EVAL.json").read_text(encoding="utf-8"))
+        assert pf["ok"] is False and pf["checks"]["gguf_probe"]["IQ2_XS"]["ok"] is False
+    finally:
+        _real_clear()    # 别把本次的 ok 缓存留给后面的测试
+        ns["CFG"].update(old)
+        ns["STAGES"].clear(); ns["STAGES"].update(stages_snap)
+        ns["STATE"].clear(); ns["STATE"].update(state_snap)
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_run_eval_auto_preflight_ok_skips_compile_when_binaries_present(ns):
+    """预检 ok 且二进制都在 → 一次编译都不发生，直接 S6/S7（门不添乱）。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_pfok_"))
+    _real_clear = ns["clear_access_cache"]
+    _real_clear()
+    stages_snap = dict(ns["STAGES"])
+    ns["STAGES"]["S2_BUILD"] = False   # 上一条测试的 _s2_only() 会留下 True
+    state_snap = dict(ns["STATE"])
+    ns["STATE"].pop("S2_BUILD", None)   # 上一条测试留了 error，run() 收尾会读它
+    patch = _Patch(ns)
+    patch("OUT", tmp)
+    patch("hf_token", lambda *a, **k: {"token": "hf_fake", "source": "env:HF_TOKEN"})
+    patch("repo_files", lambda *a, **k: [{"path": "a.gguf", "size": 1, "sha256": None}])
+    seen = []
+
+    def ok_pf(deadline, formats=None):
+        seen.append(deadline)
+        return _preflight_stub(tmp, ok=True)(deadline)
+    patch("lightweight_eval_preflight", ok_pf)
+    patch("llama_bin", lambda name: Path("/bin/echo"))
+    patch("upload_after_run", lambda *a, **k: {"skipped": True})
+    fake, calls = _fake_runner(ns)
+    patch("run_stage", fake)
+    old = {k: ns["CFG"][k] for k in ("RUN_S2", "RUN_S3", "RUN_S4", "RUN_EVAL",
+                                     "HF_UPLOAD_AFTER_RUN")}
+    try:
+        out = ns["run"](run_eval=True)
+        assert out["ok"] is True, out
+        assert seen, "预检必须在主路径里真的跑"
+        assert out["plan"].get("autobuild") is None, out["plan"]
+        assert "S2_BUILD" not in calls, f"二进制都在时不编译：{calls}"
+        assert calls == ["S0_ENV", "S1_SMOKE", "S6_NLL", "S7_QUALITY", "S9_REPORT"], calls
+        assert not (tmp / "FAILURE.json").exists()
+    finally:
+        _real_clear()
+        ns["CFG"].update(old)
+        ns["STAGES"].clear(); ns["STAGES"].update(stages_snap)
+        ns["STATE"].clear(); ns["STATE"].update(state_snap)
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_run_eval_preflight_corpus_overlap_aborts_before_compile(ns):
+    """预检在 clean holdout 上不过（像把 train 当 eval）→ 编译前停，cause=corpus_overlap，
+    且 next_step 必须说"核对 split"、不许教人调大上限绕过。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_pfcorp_"))
+    _real_clear = ns["clear_access_cache"]
+    _real_clear()
+    stages_snap = dict(ns["STAGES"])
+    state_snap = dict(ns["STATE"])
+    patch = _Patch(ns)
+    patch("OUT", tmp)
+    patch("hf_token", lambda *a, **k: {"token": "hf_fake", "source": "env:HF_TOKEN"})
+    patch("repo_files", lambda *a, **k: [{"path": "a.gguf", "size": 1, "sha256": None}])
+    patch("lightweight_eval_preflight", _preflight_stub(
+        tmp, ok=False,
+        checks={"hf_access": {"ok": True, "status": "ok"},
+                "gguf_probe": {"IQ2_XS": {"ok": True}, "IQ4_XS": {"ok": True}},
+                "sidecar_download": {"IQ2_XS": {"ok": True}, "IQ4_XS": {"ok": True}},
+                "corpus": {"ok": False,
+                           "why": ("GuardError: 评测集里有 60/80 段（75.0%）与校准集"
+                                   "共享前 200 字符，超过上限 10%。")},
+                "binaries": {"ok": True, "missing": []}}))
+    patch("llama_bin", lambda name: Path("/bin/echo"))
+    fake, calls = _fake_runner(ns)
+    patch("run_stage", fake)
+    old = {k: ns["CFG"][k] for k in ("RUN_S2", "RUN_S3", "RUN_S4", "RUN_EVAL")}
+    try:
+        out = ns["run"](run_eval=True)
+        assert out["ok"] is False, out
+        assert out["failed"] == ["PREFLIGHT_EVAL"], out
+        assert "S2_BUILD" not in calls, f"语料超限不许编译：{calls}"
+        assert "S6_NLL" not in calls, calls
+        doc = json.loads((tmp / "FAILURE.json").read_text(encoding="utf-8"))
+        assert doc["stage"] == "PREFLIGHT_EVAL", doc
+        assert doc["cause"] == "corpus_overlap", doc
+        assert "split" in doc["next_step"], doc["next_step"]
+        assert "不要" in doc["next_step"] and "上限" in doc["next_step"], doc["next_step"]
+    finally:
+        _real_clear()
+        ns["CFG"].update(old)
+        ns["STAGES"].clear(); ns["STAGES"].update(stages_snap)
+        ns["STATE"].clear(); ns["STATE"].update(state_snap)
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ---------------------------------------------------------------- v1.2.0 系统性审计
@@ -6344,6 +6528,9 @@ TESTS = [
     test_auth_status_maps_to_distinct_causes,
     test_eval_http_400_not_blamed_on_user_secrets,
     test_s0_warning_not_misleading_under_run_eval,
+    test_run_eval_auto_preflight_blocks_s2_compile,
+    test_run_eval_auto_preflight_ok_skips_compile_when_binaries_present,
+    test_run_eval_preflight_corpus_overlap_aborts_before_compile,
     # v1.2.0 系统性审计：隔离/holdout、HF 下载链路、来源归属、解析与证据等级
     test_resolve_url_model_repo_has_no_models_prefix,
     test_normalize_expect_schema_is_fail_closed,

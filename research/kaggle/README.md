@@ -2,9 +2,9 @@
 
 `trlab_kaggle.ipynb` —— 一个**可直接上传到 Kaggle** 的独立 Notebook，用来在同一份 `Qwen/Qwen3-8B` 上产出 `IQ2_XS` 与 `IQ4_XS`，并比较**真实文件字节**、**配对 NLL**、**有限配对质量**。
 
-当前版本 **v1.1.1**（可丢弃 GPU worker 策略）。**v1.1.1 的一句话**：模型与 provenance 已在 HF 持久保存，所以 **Kaggle 只是一台免费、可随时关机的算力机器** —— 首跑失败就直接关掉 Session，本地修代码 → commit → 新 Session 重跑，输入不用重下。据此改了三处行为：**① 评测默认用 GPU**（Kaggle 上开的就是 GPU Session，不该让 8B 在 4 核 CPU 上磨）；**② 一次只装一个模型**，跑完释放再装下一个；**③ 每个阶段跑完就把小结果出站到 HF 并远端复核**（白名单 5 个文件，不传模型/日志/secrets），失败则写 `FAILURE.json` 并明确列出"哪些结果尚未持久化"。
+当前版本 **v1.2.1**（可丢弃 GPU worker 策略 + 编译前自动轻量预检门）。**v1.2.1 的一句话**：`RUN_EVAL=True` 在 S0/S1 之后、28 分钟 S2 编译**之前**，会自动跑一次 1 分钟级轻量预检（Range 0-0 探两个 GGUF、真下 2 KB sidecar、真跑语料 clean holdout；不编译、不下 7 GiB、不需要 GPU），只有 `ok=True` 才进 S2，不过就地停并写 `PREFLIGHT_EVAL.json` + `FAILURE.json`，不伪装成实验完成（见第九之十四）。**v1.1.1 的一句话**：模型与 provenance 已在 HF 持久保存，所以 **Kaggle 只是一台免费、可随时关机的算力机器** —— 首跑失败就直接关掉 Session，本地修代码 → commit → 新 Session 重跑，输入不用重下。据此改了三处行为：**① 评测默认用 GPU**（Kaggle 上开的就是 GPU Session，不该让 8B 在 4 核 CPU 上磨）；**② 一次只装一个模型**，跑完释放再装下一个；**③ 每个阶段跑完就把小结果出站到 HF 并远端复核**（白名单 5 个文件，不传模型/日志/secrets），失败则写 `FAILURE.json` 并明确列出"哪些结果尚未持久化"。
 
-**v1.1.0 的一句话**：S4/S5 的真实量化产物已经备份在 Hugging Face 私有仓库 `Atomheart-Father/trlab-qwen3-8b-quant-pilot`（commit `097e692`），所以 S6/S7 **不再需要重新下载 15 GiB BF16、不再需要重做 S3、不再需要重新量化**——它们直接从 HF 上那三个 GGUF 取输入。分支原则：**模型与 sidecar 存 HF，代码与小型 JSON/report 存 GitHub，云算力只是可替换的执行端**。同时修掉一个 P0 回归（S3 的 `_write_stamp() got multiple values for keyword argument 'bytes'`，见第九之九）。**S6/S7 尚未在真实 Kaggle 上跑过**，本文件所有评测相关段落都按"未运行"表述。
+**v1.1.0 的一句话**：S4/S5 的真实量化产物已经备份在 Hugging Face 私有仓库 `Atomheart-Father/trlab-qwen3-8b-quant-pilot`（commit `097e692`），所以 S6/S7 **不再需要重新下载 15 GiB BF16、不再需要重做 S3、不再需要重新量化**——它们直接从 HF 上那三个 GGUF 取输入。分支原则：**模型与 sidecar 存 HF，代码与小型 JSON/report 存 GitHub，云算力只是可替换的执行端**。同时修掉一个 P0 回归（S3 的 `_write_stamp() got multiple values for keyword argument 'bytes'`，见第九之九）。（该版本发布时 S6/S7 尚未在真实 Kaggle 上跑过；**此后 S7_QUALITY 已真实跑通过一次**，S6_NLL 仍零真实数据 —— 以第九之十四第 4 节的时点表述为准。）
 
 v1.0 是一次**执行方式重构**（Issue #5）：notebook 本体从 253 KB / 28 cells 的巨物缩成 **7.3 KB / 5 cells** 的薄入口，全部逻辑搬进 `trlab/` 包的 16 个 `.py` 模块；执行包不再靠人工搬运，而是 notebook 的引导格按**钉死的 commit** 从公开仓库 sparse fetch `research/kaggle/trlab/`（约 200 KB、1–3 秒，`git rev-parse HEAD` 强校验）后再 import。用户操作收敛为**一个开关 + Run All**，取代原来的六步人工流程（取 BF16 notebook → Run All → Save Version → Add Input → 配路径 → 主 notebook）。v1.0.1 只加一个**运行前预检** `S4_PREFLIGHT`：`RUN_S4=True` 会在任何编译、任何下载之前用几秒钟核查 working 与工作区外暂存盘的挂载/容量/写权限、BF16 有没有落点、imatrix 能不能复用，不过就地 fail-closed 并只给一步要做的；同时把 `S4_QUANT` 的墙钟预算从 1800 s 提到 5400 s 并加单格式帽，降低 CPU 量化被误杀的风险。版本史：v0.1 只做环境检查与 smoke；v0.2–v0.2.2 修掉三轮逐 cell 审查的问题（S4 二次量化门槛、`--allow-requantize` 参数位置、S2 工具链预检）；v0.3.x 把 S2 收敛成开关 `RUN_S2` 并记录真实 Kaggle T4 通过；v0.4.0 把 S3 收敛成开关 `RUN_S3`；v0.5.0 把 S4 收敛成开关 `RUN_S4`（从原始 BF16 量化 IQ2_XS/IQ4_XS，禁止 Q8_0 二次量化，imatrix 命中即整段跳过 S3，量化 base 四级自取）。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
 
@@ -946,7 +946,7 @@ CPU 不可行时 fail closed、预检在缺二进制时说唯一一步、
 `RUN_EVAL` 开关作用域、`run_ppl` 默认 `-ngl 0`、S6 从 HF 端到端、
 评测语料是 test split（不是 train）、`_ensure_eval_txt` 全流程。
 
-当前结果：**171/171 通过，约 60 秒**（v1.1.3 是 155 项、v1.1.2 是 149 项、v1.1.1 是 144 项、v1.0.1 是 118 项；见第九之十～第九之十三）。
+当前结果：**174/174 通过，约 60 秒**（v1.2.0 是 171 项、v1.1.3 是 155 项、v1.1.2 是 149 项、v1.1.1 是 144 项、v1.0.1 是 118 项；见第九之十～第九之十四）。
 
 
 ---
@@ -1309,9 +1309,67 @@ CDN，私仓的"同源 200 + Bearer"只走了本地模拟。这一点在报告�
 
 ### 6. 仍未验证
 
-- **S6/S7 依然没在真实 Kaggle 跑通过** → 能力结论**仍然零数据**。
+- **S6_NLL 依然没在真实 Kaggle 跑出过结果** → NLL 配对差**仍然零数据**。
+  （**S7_QUALITY 在真实 Kaggle 上已跑通过一次**：两个 GGUF 完整哈希校验通过、
+  两模型各 8 次 T4 `llama-cli -ngl 99` rc=0、S7 结果已远端上传 —— 但那是
+  v1.2.0 改写 S7 日志提取**之前**的代码，新解析尚待真实验收。）
 - 自动只编 S2 的真 CUDA 编译、带真 token 的 7.3 GB 下载与上传，仍未发生。
 - `derived_prefix_window` 只是 4 chars/token 的近似，仓库里没有分词器。
+
+---
+
+## 九之十四、v1.2.1：编译前自动轻量预检门（2026-10-23）
+
+用户核对 main 后的唯一收尾建议：**不要大改，把 `lightweight_eval_preflight`
+真正接进主路径**。轻量预检（Range 0-0 探 GGUF、真下 2 KB sidecar、真跑 clean
+holdout，1 分钟级、不编译、不下 7 GiB、不需要 GPU）在 v1.2.0 就写好了，但只挂
+在 CLI `--preflight-eval` 上 —— 于是 resolve 路径、sidecar、holdout 类错误仍然
+只有等 28 分钟编译完才暴露。v1.2.1 只做"连接 + 失败分类 + 回归测试"：
+
+### 1. 主路径接线（`run.py`）
+
+`RUN_EVAL=True` 的执行顺序变为：
+
+```
+S0/S1 → 二进制探活（缺了只记日志）→ HF 授权门（1 次只读请求）
+      → **轻量预检门（v1.2.1 新增，约 1 分钟）** → 自动只编 S2 → S6/S7/S9
+```
+
+- 预检 `ok=True` 才进入 S2；`ok=False` 就地停：写 `PREFLIGHT_EVAL.json`、
+  写 `FAILURE.json`（`stage=PREFLIGHT_EVAL`）、出一份顶部标"本次运行失败"的
+  报告，`run()` 返回 `ok=False` —— **不伪装成实验完成**，S6/S7 零字节数据。
+- 缺二进制只进 `warnings`（"正常 run_eval 会自动只编 S2"），不是停下来的理由。
+- 语料几 MB 有 stamp 缓存：预检下过之后 S6 的 `_ensure_eval_txt()` 直接复用，
+  不重复下载；原有的唯一开关、模型/二进制缓存、结果回传逻辑一律不变。
+
+### 2. 失败分类按检查项分（`_preflight_cause`）
+
+| 失败检查项 | cause | 下一步要点 |
+|---|---|---|
+| `hf_access` | 复用 `_CAUSE_BY_AUTH`（`hf_no_token`/`hf_bad_request`/…） | 400 仍明确"不是你的 Secrets" |
+| `gguf_probe`（etag≠oid / 总长≠size / tree 找不到 / HTTP） | `hash_mismatch` / `hf_size_mismatch` / `hf_not_found` / 复用 `_classify` | 上游换文件→重跑；缺文件→核对 repo 与上一轮 S4 上传 |
+| `sidecar_download` | `sidecar_missing` / 复用 `_classify` | 补跑上传；401 仍走 Secrets 指引 |
+| `corpus`（重叠超限 / 剩余太少 / 取不到） | `corpus_overlap` / `corpus_too_small` / `corpus_unavailable` | 核对 split；**不许**调大 `ISOLATION_MAX_DROP_FRAC` 绕过 |
+
+缺二进制作为并存根因进 `causes`（`binaries_missing`），一屏看全。
+
+### 3. 测试：171 → **174 项**（CPU、不联网、约 60 秒）
+
+| 测试 | 钉住什么 |
+|---|---|
+| `test_run_eval_auto_preflight_blocks_s2_compile` | 预检不过（GGUF 探测 404）→ `S2_BUILD` 不在 calls、S6/S7 不启动、`FAILURE.json` 的 stage/cause 正确、`PREFLIGHT_EVAL.json` 落盘 |
+| `test_run_eval_auto_preflight_ok_skips_compile_when_binaries_present` | 预检 ok 且二进制都在 → 一次编译都不发生，直接 S6/S7（门不添乱） |
+| `test_run_eval_preflight_corpus_overlap_aborts_before_compile` | holdout 重叠超限 → 编译前停，`cause=corpus_overlap`，next_step 说"核对 split"且不许调上限 |
+
+三条都走真 `run()` 主路径（桩掉 HTTP 预检与 `run_stage`），另给两条既有主路径
+测试（autobuild / S2 失败跳过 S6S7）补上预检桩，保持 174 全绿。
+
+### 4. 仍未验证
+
+- **S6_NLL 仍零真实数据**；v1.2.0 改写的 S7 日志提取尚待真实验收（上一次真实
+  S7_QUALITY=ok 是改写前的代码）。
+- 自动 S2 的真 CUDA 编译、带真 token 的 7.3 GB 下载/上传、私仓同源 200 + Bearer，
+  仍未在真机发生。
 
 ---
 
@@ -1321,7 +1379,7 @@ CDN，私仓的"同源 200 + Bearer"只走了本地模拟。这一点在报告�
 python3 research/kaggle/test_trlab.py
 ```
 
-不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。v1.0 起它**直接 import `trlab/` 包**（不再解析 notebook 字符串），在临时工作目录里补齐默认三阶段，然后跑 171 项断言。当前结果：**171/171 通过，约 60 秒**（v1.0.1 是 118 项 / 约 31 秒；多出来的时间主要是新增项里那几条要在干净子进程里单独 import 模块、以及 bootstrap 用本地 git 仓真跑 fetch）。
+不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。v1.0 起它**直接 import `trlab/` 包**（不再解析 notebook 字符串），在临时工作目录里补齐默认三阶段，然后跑 174 项断言。当前结果：**174/174 通过，约 60 秒**（v1.0.1 是 118 项 / 约 31 秒；多出来的时间主要是新增项里那几条要在干净子进程里单独 import 模块、以及 bootstrap 用本地 git 仓真跑 fetch）。
 
 v1.0 新增的 10 项架构回归（对应 Issue #5 的验收清单）：
 
@@ -1480,7 +1538,7 @@ v1.0 新增的 10 项架构回归（对应 Issue #5 的验收清单）：
 31. **S4 的 CPU 耗时与峰值 RAM 未实测**。`llama-quantize` 是 CPU 路径（15.26 GiB 走内存不走显存），输入 mmap 但 `--max-buffer-size` 默认 8192 MiB 是实打实要占的。`_ram_precheck()` 只警告不拦；真的 exit 137 时按提示调小 `S4_RAM_MARGIN_GB` 或加 `--max-buffer-size`。
 32. **暂存盘路线不跨 Session**。下到暂存盘的 BF16 会话结束就没了，下次要重下；只读 Input 路线才是一次操作永久复用。这是两条路线的本质差别，报告里会记 `quant_base_origin`。
 33. **provenance 级核验弱于文件级**。三项证据（sha256 / 来源 repo+revision / 张量结构）互相独立，且"同仓库同 revision ⇒ 同一次转换"比"形状一致"强，但它仍然不是逐张量比形状。S9 报告会显式声明这一条的效力范围（`imatrix_base_consistency_level`）。
-34. **S6/S7 尚未在真实 Kaggle 上跑通**（v1.1.3）。155 项测试全是 CPU/mock；`test_s6_end_to_end_from_hf` 用的是假 HF 服务器桩。真实首跑（v1.1.1）在评测前就因"缺二进制 + 私仓无 token"停住，只留下 11 秒的失败现场。**任何"NLL 差值 / 质量差异"目前都不存在**，报告里那两节会写 "S6/S7 not yet evaluated" 或直接标"失败"。
+34. **S6_NLL 尚未在真实 Kaggle 上跑出结果**（v1.2.1 时点）。测试全是 CPU/mock；`test_s6_end_to_end_from_hf` 用的是假 HF 服务器桩。**S7_QUALITY 曾在真实 Kaggle 跑通过一次**（两个 GGUF 完整哈希校验通过、两模型各 8 次 T4 `llama-cli -ngl 99` rc=0、结果已远端上传），但那是 v1.2.0 改写 S7 日志提取**之前**的代码，新解析尚待真实验收。**任何"NLL 差值 / 质量差异"目前都不存在**，报告里 S6 一节会写 "S6 not yet evaluated" 或直接标"失败"。
    - 附带：**自动只编 S2 与凭据门只在 mock + 本机 macOS 上走过**。真实 Kaggle 的 CUDA 编译（`CUDA_ARCH=75`、`BUILD_JOBS=4`）与"带 token 的 2.7 / 4.56 GiB 下载"都还没发生，所以 `binaries_missing → 自动 S2 → S6` 这条链在真机上属于**未验证路径**。
 35. **HF 的真实下载只验到 401 路径**。`python -m trlab --check-hf` 在无 token 时正确报 `token_present: false` + 401 并给三条取 token 的路；带 token 下载 2.7 / 4.56 GiB 的过程**未实测**（断点续传逻辑与 S3 的 Q8_0 下载共用同一份 `_fetch_pinned_blob`，那份是真机跑过的）。
 36. **评测成本是假设速率，不是实测吞吐**。`eval_cost_estimate()` 用 CPU 2.5 tok/s / GPU 30 tok/s 的**假设值**（`assumed_rate_note` 里写明），0.94 h / GPU 路径的小时数都不能当承诺。真实吞吐要在第一次跑完后看 `measured_throughput` 才有。

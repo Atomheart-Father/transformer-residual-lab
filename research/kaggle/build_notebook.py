@@ -21,6 +21,10 @@
   `size`↔`bytes` schema 统一 / 同源 200 带 Bearer 而 CDN 302 绝不透传 /
   来源按 `.hf.json` stamp 判定）；S6 读日志自报 token 数，S7 重写日志提取；
   `EVAL_SUMMARY` 区分部分成功，空 NLL 记 null 不当零差。
+* v1.2.1：`RUN_EVAL` 主路径在 S2 编译**之前**自动跑轻量预检（Range 0-0 探
+  GGUF + 真下 2 KB sidecar + 真跑 clean holdout，约 1 分钟，不编译、不下
+  7 GiB）：只有 `ok=True` 才进 S2；不过就地停，写 `PREFLIGHT_EVAL.json` 与
+  `FAILURE.json` 并出失败报告，**不伪装成实验完成**；缺二进制只 warn。
 
 用法：
     python3 build_notebook.py                 # 钉当前 HEAD（要求工作区干净）
@@ -177,6 +181,14 @@ Kaggle 上要在 `Add-ons → Secrets` 新建 `HF_TOKEN` 并**勾选 attach 到�
 `llama-perplexity` / `llama-cli`，缺了就**自己只编 S2**（pinned 源码 36.6 MiB，
 不下载 Q8_0/BF16、不做 S3/S4、不重量化）；都在就直接进评测。
 
+**v1.2.1：28 分钟编译之前，先做 1 分钟级链路预检**。`RUN_EVAL = True` 在
+S0/S1 之后、自动编译 S2 之前，会自动探两个 GGUF（`Range: bytes=0-0`，只取
+第 1 个字节）、真下 2 KB 的 provenance sidecar、真跑一次语料清理与 clean
+holdout。任何一步不过就**就地停下**（不编译、不下载 7 GiB）：原始明细在
+`out/PREFLIGHT_EVAL.json`，`out/FAILURE.json` 只给一条下一步，报告顶部写
+"本次运行失败" —— 不会用一份看起来正常的报告掩盖过去。缺二进制只是提示
+（随后自动只编 S2），不是停下来的理由。
+
 **v1.2.0：S6 不再"见 1 行文本重叠就整轮归零"**。校准集（wikitext **train** 全文）
 与评测集（**test**）里出现相同句子，不等于 imatrix 实际看过评测数据 ——
 imatrix 只消费 `32×512 ≈ 16.4k` token。现在 S6 会：给每条交集做取证
@@ -231,6 +243,10 @@ MD_RUN = """## 执行
 加 `HF_TOKEN` 并 attach，再 `Run all` —— **不要把 token 写进 notebook**。
 如果看到的是 **HTTP 400**，那是本工具请求参数的问题（tree API），
 **不是你的 token**，换最新 notebook 重跑即可，不要重建 token。
+**编译之前还会自动做一次 1 分钟级轻量预检**（不编译、不下 7 GiB）：两个 GGUF 的
+`Range: bytes=0-0` 探测、2 KB sidecar 实下、语料 clean holdout。不过就停在这一步，
+`out/PREFLIGHT_EVAL.json` 是原始记录，`out/FAILURE.json` 只给一条下一步 ——
+resolve 路径 / sidecar / holdout 类错误不再要等 28 分钟编译完才暴露。
 **有 GPU 就用 GPU**（`-ngl 99`，装不下才退 CPU 并把原因写进 `device_by_fmt`）；
 一次只装一个模型，跑完释放再装下一个。
 每个阶段的小结果会自动出站到 HF（5 个 JSON/MD）并做远端复核；失败时这一格

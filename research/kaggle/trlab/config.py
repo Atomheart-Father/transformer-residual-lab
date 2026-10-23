@@ -6,7 +6,7 @@
 
 from pathlib import Path
 
-NOTEBOOK_VERSION = "1.2.0"
+NOTEBOOK_VERSION = "1.2.1"
 
 
 
