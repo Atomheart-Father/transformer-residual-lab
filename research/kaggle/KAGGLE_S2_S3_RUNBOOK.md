@@ -611,7 +611,7 @@ S3 成功后 Q8_0 会被回收（8.11 GiB），所以 S4 **不再要求**读 ima
    改成显式 dict 合并 + 重名 `GuardError`（不再 `**` 摊字典）。
    回归是**跨函数全流程**的（假 pyarrow → 真转换 → 写 stamp → cache hit），
    另加一条 AST 静态不变量禁止"同一调用里既有 `bytes=` 又有 `**`"。
-2. **139 项 CPU 回归全绿**（不联网、约 12 秒）：118 项旧 + 2 项 S3 回归 + 19 项 v1.1
+2. **139 项 CPU 回归全绿**（不联网、约 45 秒）：118 项旧 + 2 项 S3 回归 + 19 项 v1.1
    （token 链 / 绝不打印 token / tree 分页 / 错误码可操作性 / 复用与 etag 双源守卫 /
    `verify_remote` 只声明真核过的 / 上传门槛与 opt-in / 缺 `huggingface_hub` 时拒绝
    `pip install -U` / 本地优先 / `probe_only` 绝不下载 / sidecar fairness 只能到

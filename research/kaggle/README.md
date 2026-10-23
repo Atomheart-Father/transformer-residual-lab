@@ -939,7 +939,7 @@ CPU 不可行时 fail closed、预检在缺二进制时说唯一一步、
 `RUN_EVAL` 开关作用域、`run_ppl` 默认 `-ngl 0`、S6 从 HF 端到端、
 评测语料是 test split（不是 train）、`_ensure_eval_txt` 全流程。
 
-当前结果：**139/139 通过，约 12 秒**。
+当前结果：**139/139 通过，约 45 秒**。
 
 
 ---
@@ -950,7 +950,7 @@ CPU 不可行时 fail closed、预检在缺二进制时说唯一一步、
 python3 research/kaggle/test_trlab.py
 ```
 
-不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。v1.0 起它**直接 import `trlab/` 包**（不再解析 notebook 字符串），在临时工作目录里补齐默认三阶段，然后跑 139 项断言。当前结果：**139/139 通过，约 12 秒**（v1.0.1 时是 118 项 / 约 31 秒；v1.1 之后沙箱的 `tempfile` 探测不稳，测试文件顶部把临时根钉在本目录的 `.trlab_tmp/`，所以更快）。
+不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。v1.0 起它**直接 import `trlab/` 包**（不再解析 notebook 字符串），在临时工作目录里补齐默认三阶段，然后跑 139 项断言。当前结果：**139/139 通过，约 45 秒**（v1.0.1 是 118 项 / 约 31 秒；多出来的时间主要是新增的 19 项里那几条要在干净子进程里单独 import 模块、以及 bootstrap 用本地 git 仓真跑 fetch）。
 
 v1.0 新增的 10 项架构回归（对应 Issue #5 的验收清单）：
 
