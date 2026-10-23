@@ -1,7 +1,8 @@
 """S9 汇总报告与产物清单。报告数字只能来自 results.json。"""
 
 from .config import CFG, FORMATS, LOGS, MDLS, NOTEBOOK_VERSION, OUT, S4_PINNED, STAGES, THIRD_PARTY_IN_COMPARISON
-from .core import STATE, STATE_PATH, _bench_summary, _fingerprint, _get, _rho_from_nll, write_json
+from .core import (STATE, STATE_PATH, _bench_summary, _fingerprint, _get,
+                   _read_json, _rho_from_nll, write_json)
 
 import json
 from datetime import datetime, timezone
@@ -205,11 +206,51 @@ def stage_s9_report(deadline):
             L.append(f"- 明细：`{_fp}`（含每条失败与 traceback 尾）")
         for _k, _v in _failed:
             L.append(f"- `{_k}` = error：{str(_v.get('error'))[:200]}")
+        # v1.2.0：S6 失败 / S7 成功是**部分成功**，不能因为"有失败"就把 S7 的
+        # 真实产出一起抹掉，也不能因为"有成功"就把 S6 的空 NLL 当 0 差。
+        _ok_eval = [k for k in ("S6_NLL", "S7_QUALITY")
+                    if (STATE.get(k) or {}).get("status") == "ok"]
+        _bad_eval = [k for k in ("S6_NLL", "S7_QUALITY")
+                     if (STATE.get(k) or {}).get("status") == "error"]
+        if _ok_eval and _bad_eval:
+            L.append("")
+            L.append(f"### 部分成功：{_ok_eval} 成功，{_bad_eval} 失败\n")
+            L.append("> 成功的阶段**结果有效**（数字来自它自己的 JSON，不是推断）；"
+                     "失败阶段没有数据。**不要**用失败阶段的空值去解释成功阶段。")
+            if "S7_QUALITY" in _ok_eval:
+                L.append("- S7 的 smoke 结果见第 7 节：它只能说明\"模型能续写、没有空输出/乱码\"，"
+                         "**不能**说明 IQ2 与 IQ4 的质量高低。")
+            if "S6_NLL" in _bad_eval:
+                L.append("- S6 没有 NLL：**不存在**\"配对差 = 0\"这种结论，"
+                         "任何能力比较都还没有数据。")
         L.append("")
+
     elif _get("S6_NLL") is None and _get("S7_QUALITY") is None and CFG.get("RUN_EVAL"):
         L.append("## ⚠ 本次运行没有产出评测数据\n")
         L.append("> `RUN_EVAL=True` 但 S6/S7 都没有结果。先看 "
                  f"`{OUT / 'FAILURE.json'}`。\n")
+
+    # ---- 0.1 出站历史（哪些结果真的到了 HF）----
+    _upl = _read_json(OUT / "UPLOADS.json") or {}
+    if _upl.get("uploads"):
+        L.append("## 0.1 结果出站（UPLOADS.json）\n")
+        L.append("| 阶段 | 文件 | 状态 | 说明 |")
+        L.append("|---|---|---|---|")
+        for u in _upl["uploads"]:
+            if u.get("skipped"):
+                st_txt = "**未上传**"
+                note = str(u.get("why") or "")[:120]
+            elif u.get("remote_verified"):
+                st_txt = "远端复核 ok"
+                note = f"commit `{u.get('commit')}`"
+            else:
+                st_txt = "**未确认**"
+                note = f"未持久化：{u.get('not_persisted')}；{str(u.get('why') or '')[:80]}"
+            L.append(f"| `{u.get('stage')}` | {', '.join(u.get('files') or []) or '—'} | "
+                     f"{st_txt} | {note} |")
+        L.append("")
+        L.append(f"- run_id：`{_upl.get('run_id')}`（同一 Session 多次运行按 run_id 分开存）")
+        L.append("")
 
     # ---- 1 环境 ----
     L.append("## 1. 环境\n")
@@ -356,9 +397,39 @@ def stage_s9_report(deadline):
         iso = s6r.get("isolation", {})
         prov = s6r.get("provenance") or {}
         L.append(f"- 评测语料来源：{s6r.get('eval_source') or '未声明'}")
-        L.append(f"- 校准/评测隔离：{iso.get('ok')}（重叠 {iso.get('overlap_lines')} 行）")
+        L.append(f"- 校准/评测隔离（clean holdout）：`{iso.get('rule') or 'n/a'}`")
+        if iso.get("ok") is not None:
+            _cl = iso.get("cleaning") or {}
+            _ho = iso.get("holdout") or {}
+            L.append(f"  - 原始交集：**{iso.get('overlap_lines')}** 段与校准集共享前 200 字符"
+                     f"（其中整段完全相同 "
+                     f"{sum(1 for d in (iso.get('overlap_raw') or {}).get('details') or [] if d.get('full_equal'))} 段）")
+            L.append(f"  - 剔除：**{_cl.get('removed_paras')}** 段 → 保留 "
+                     f"{_cl.get('kept_paras')} 段 / {_cl.get('kept_chars')} 字符"
+                     f"（≈{_cl.get('kept_tokens_est')} token，{_cl.get('token_est_method')}）")
+            L.append(f"  - holdout 文件：`{_ho.get('path')}`，sha256 "
+                     f"`{str(_ho.get('sha256'))[:16]}…`（两个量化**同一份**）")
+            _ai = iso.get("actual_imatrix_calib_overlap") or {}
+            L.append(f"  - `actual_imatrix_calib_overlap` = **{_ai.get('value')}**"
+                     f"（level `{_ai.get('level')}`）")
+            L.append(f"    - {_ai.get('why')}")
+            _pw = (_ai.get("prefix_window_check") or {})
+            if _pw:
+                _w = _pw.get("window") or {}
+                L.append(f"    - 近似窗口检查（`{_w.get('level')}`）：窗口前 "
+                         f"{_w.get('end_char')} 字符，落在窗口内的交集段 "
+                         f"**{_pw.get('overlap_paras_inside_window')}** 条。"
+                         f"{_pw.get('meaning')}")
+            for _d in ((iso.get("overlap_raw") or {}).get("details") or [])[:5]:
+                L.append(f"    - eval#{_d.get('eval_index')} "
+                         f"{'整段相同' if _d.get('full_equal') else '仅前200字符相同'} "
+                         f"← calib{_d.get('calib_indices')} "
+                         f"「{str(_d.get('eval_preview'))[:60]}」")
+        else:
+            L.append(f"  - **未做隔离断言**：{iso.get('note')}")
         L.append(f"- **公平性已核验**：{s6r.get('fairness_verified')}"
                  f"（级别 `{s6r.get('fairness_level') or '未声明'}`）")
+
         if s6r.get("fairness_level") == "hf_sidecar_declared":
             L.append("  - 这是**声明级**：数字来自 HF 上的 provenance sidecar，"
                      "本次没有重算核验。可核的只有 sidecar 之间的一致性与 GGUF 对 lfs.oid。")
@@ -419,14 +490,28 @@ def stage_s9_report(deadline):
     L.append("## 7. 有限配对质量检查\n")
     if s7r:
         L.append(f"- 贪心续写完全一致：{s7r['identical_outputs']}/{s7r['n_prompts']}"
-                 f"（{s7r['identical_rate']}）")
+                 f"（{s7r['identical_rate']}）—— **smoke 信号，不是质量结论**")
+        L.append(f"- 空输出：{s7r.get('empty_outputs')}"
+                 "（空输出说明这一题没有有效生成，不能算『答对了但没差异』）")
+        if s7r.get("smoke_match"):
+            L.append(f"- 期望片段命中（子串匹配，非 benchmark）：{s7r['smoke_match']}")
         L.append(f"- 平均 repeat4（越低越好）：{s7r['degenerate']}")
+        ev = s7r.get("evidence") or {}
+        if ev:
+            L.append(f"- 证据等级：identical=`{ev.get('identical_outputs')}`、"
+                     f"repeat4=`{ev.get('repeat4')}`、"
+                     f"smoke_match=`{ev.get('smoke_match')}`；"
+                     f"**可排序质量 = {ev.get('can_rank_quality')}**")
+            L.append(f"  - {ev.get('why')}")
         setts = s7r.get("settings") or {}
         if setts:
             L.append(f"- 设置：temp={setts.get('temperature')} seed={setts.get('seed')} "
                      f"n_predict={setts.get('n_predict')} -ngl={setts.get('ngl')}")
+            L.append(f"- 日志解析器：`{setts.get('parser')}`"
+                     "（只取生成正文，剥掉 banner / 计时 / prompt 回显 / ANSI）")
         for lim in s7r["limits"]:
             L.append(f"- 限制：{lim}")
+
     else:
         _s7rec = STATE.get("S7_QUALITY") or {}
         if _s7rec.get("status") == "error":

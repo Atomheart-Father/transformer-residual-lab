@@ -406,16 +406,23 @@ def atomic_replace(src, dst):
 
 
 def paired_bootstrap(diffs, n=None, seed=None):
-    """配对差值的 bootstrap 均值 CI。n<2 时不给 CI，而不是崩。"""
+    """配对差值的 bootstrap 均值 CI。n<2 时不给 CI，而不是崩。
+
+    v1.2.0：把**适用边界**写进返回值，而不是只给一个漂亮的区间。
+    bootstrap 重采样的是"组"，不是 token；组数 < 5 时 CI 只是形式上的，
+    不能当显著性检验用（报告里必须照抄 `note`）。
+    """
     import random
     n = n or CFG["BOOTSTRAP_N"]
     seed = CFG["SEED"] if seed is None else seed
     m = len(diffs)
     if m == 0:
-        return {"n": 0, "mean": None, "ci95": None}
+        return {"n": 0, "mean": None, "ci95": None,
+                "note": "没有配对，无法给 CI", "usable_as_test": False}
     mean = sum(diffs) / m
     if m < 2:
-        return {"n": m, "mean": mean, "ci95": None, "note": "只有 1 对，无法给 CI"}
+        return {"n": m, "mean": mean, "ci95": None,
+                "note": "只有 1 对，无法给 CI", "usable_as_test": False}
     rng = random.Random(seed)
     means = []
     for _ in range(n):
@@ -424,13 +431,70 @@ def paired_bootstrap(diffs, n=None, seed=None):
             s += diffs[rng.randrange(m)]
         means.append(s / m)
     means.sort()
-    return {"n": m, "mean": mean,
-            "ci95": [means[int(0.025 * n)], means[int(0.975 * n)]],
-            "boot": n}
+    out = {"n": m, "mean": mean,
+           "ci95": [means[int(0.025 * n)], means[int(0.975 * n)]],
+           "boot": n,
+           "usable_as_test": m >= 5,
+           "note": ("bootstrap 的 n 是**组数**不是 token 数；组间 token 数不严格相等。"
+                    if m >= 5 else
+                    f"只有 {m} 组：CI 只是形式上的，**不能**当显著性检验用。")}
+    if max(diffs) == min(diffs):
+        out["degenerate"] = True
+        out["note"] += " 所有配对差完全相同，CI 宽度为 0 不代表确定性。"
+    return out
+
 
 
 
 PPL_RE = re.compile(r"final estimate:\s*PPL\s*=\s*([0-9.]+)\s*\+/-\s*([0-9.]+)", re.I)
+# llama-perplexity 的其余自述：用来核对"到底算了多少 token"，而不是拿
+# chunks × ctx 当既成事实（v1.2.0）。
+_PPL_TOKENIZED_RE = re.compile(r"tokenized\s+(\d+)\s+tokens", re.I)
+_PPL_OVER_RE = re.compile(r"perplexity over\s+(\d+)\s+chunks", re.I)
+_PPL_PER_CHUNK_RE = re.compile(r"(\d+)\s+tokens per chunk", re.I)
+_PPL_NCTX_RE = re.compile(r"n_ctx\s*=\s*(\d+)", re.I)
+_CHUNK_IDX_RE = re.compile(r"\[(\d+)\]")
+
+
+def parse_ppl_log(text):
+    """llama-perplexity 日志 → 结构化结果（纯函数，可离线测）。
+
+    v1.2.0 的动机：旧版只正则抓 `final estimate`，然后拿
+    `chunks × ctx` 当 token 数写进吞吐。两者都不是观测值：
+      · 语料不够长时 llama.cpp 会少算 chunk（`tokenized N tokens` 会变小）；
+      · `-c 512` 是**上限**，最后一个 chunk 可能更短。
+    所以这里把日志自己说的数字读出来，并显式区分 `nominal` 与 `observed`。
+    """
+    text = text or ""
+    out = {"ok": False, "ppl": None, "ppl_err": None, "nll": None,
+           "tokens_observed": None, "chunks_observed": None,
+           "tokens_per_chunk": None, "n_ctx_observed": None,
+           "chunk_marks": 0, "error": None}
+    m = PPL_RE.search(text)
+    if not m:
+        tail = text[-800:]
+        out["error"] = ("日志里没有 `final estimate: PPL = ...` —— 进程可能中途退出、"
+                        "或者这个 llama.cpp 版本改了输出格式。")
+        out["tail"] = tail
+        return out
+    out["ppl"] = float(m.group(1))
+    out["ppl_err"] = float(m.group(2))
+    out["nll"] = math.log(out["ppl"])
+    t = _PPL_TOKENIZED_RE.search(text)
+    if t:
+        out["tokens_observed"] = int(t.group(1))
+    o = _PPL_OVER_RE.search(text)
+    if o:
+        out["chunks_observed"] = int(o.group(1))
+    pc = _PPL_PER_CHUNK_RE.search(text)
+    if pc:
+        out["tokens_per_chunk"] = int(pc.group(1))
+    nc = _PPL_NCTX_RE.search(text)
+    if nc:
+        out["n_ctx_observed"] = int(nc.group(1))
+    out["chunk_marks"] = len(set(_CHUNK_IDX_RE.findall(text)))
+    out["ok"] = True
+    return out
 
 
 
@@ -453,11 +517,17 @@ def split_eval(path, n_groups, out_dir):
 
     P1-F：旧版用 ceil(len/n)，41 段 8 组时只会得到 7 组。
     现在整除 + 余数分配，组数严格等于 min(n_groups, 段数)，且总段数不变。
+
+    v1.2.0：`path` 也可以直接传段落列表（clean holdout 在内存里已经切好时）。
+    每组额外记 `sha256` 与 `tokens_est` —— 报告里要能证明"两个模型读的是同一批字"。
     """
-    txt = Path(path).read_text(errors="replace")
-    paras = [p.strip() for p in re.split(r"\n\s*\n", txt) if p.strip()]
-    if len(paras) < n_groups:
-        paras = [p for p in txt.split("\n") if p.strip()]
+    if isinstance(path, (list, tuple)):
+        paras = [str(p).strip() for p in path if str(p).strip()]
+    else:
+        txt = Path(path).read_text(errors="replace")
+        paras = [p.strip() for p in re.split(r"\n\s*\n", txt) if p.strip()]
+        if len(paras) < n_groups:
+            paras = [p for p in txt.split("\n") if p.strip()]
     if not paras:
         raise ValueError(f"评测语料为空: {path}")
 
@@ -479,7 +549,9 @@ def split_eval(path, n_groups, out_dir):
         body = "\n\n".join(g)
         fp.write_text(body, encoding="utf-8")
         paths.append(fp)
-        meta.append({"group": gi, "paras": len(g), "chars": len(body)})
+        meta.append({"group": gi, "paras": len(g), "chars": len(body),
+                     "sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+                     "tokens_est": int(len(body) / 4)})
     return paths, meta
 
 
@@ -494,6 +566,12 @@ def run_ppl(model_path, text_path, deadline, tag):
     装不下才退 0；`EVAL_ALLOW_GPU=False` 时强制纯 CPU。
     这条不能靠"显存够就偷偷用"来猜，也不能靠"显存不够就偷偷退 CPU"来糊过去 ——
     阶段会把自己的判定写进结果（`device_by_fmt`）。
+
+    v1.2.0：token 数分三档写进结果，不再拿 `chunks × ctx` 冒充观测值：
+      · `tokens_nominal`  = 我们请求的 chunks × ctx（上界）；
+      · `tokens_observed` = 日志里 `tokenized N tokens` 自报的（缺省 None）；
+      · `tokens_per_chunk_observed` = 日志里 `N tokens per chunk`。
+    语料太短、或 `-c` 被 llama.cpp 调整时，这三个数会不一致 —— 那正是要记录的。
     """
     v = vram_gb()
     usable = (v["total"] - 1.0) if (v and CFG.get("EVAL_ALLOW_GPU")) else 0.0
@@ -509,9 +587,17 @@ def run_ppl(model_path, text_path, deadline, tag):
     run_cmd(cmd, logf, deadline)
 
     full = logf.read_text(errors="replace")
-    m = PPL_RE.search(full)
-    if not m:
-        raise RuntimeError(f"{tag}: rc=0 但解析不到 PPL。日志尾部:\n{full[-1200:]}")
-    ppl = float(m.group(1))
-    return {"ppl": ppl, "ppl_err": float(m.group(2)), "nll": math.log(ppl),
-            "ngl": ngl, "chunks": CFG["NLL_CHUNKS_PER_GROUP"], "ctx": CFG["NLL_CTX"]}
+    parsed = parse_ppl_log(full)
+    if not parsed.get("ok"):
+        raise RuntimeError(f"{tag}: rc=0 但解析不到 PPL。{parsed.get('error')}\n"
+                           f"日志尾部:\n{full[-1200:]}")
+    nominal = int(CFG["NLL_CHUNKS_PER_GROUP"]) * int(CFG["NLL_CTX"])
+    return {"ppl": parsed["ppl"], "ppl_err": parsed["ppl_err"], "nll": parsed["nll"],
+            "ngl": ngl, "chunks": CFG["NLL_CHUNKS_PER_GROUP"], "ctx": CFG["NLL_CTX"],
+            "tokens_nominal": nominal,
+            "tokens_observed": parsed.get("tokens_observed"),
+            "chunks_observed": parsed.get("chunks_observed"),
+            "tokens_per_chunk_observed": parsed.get("tokens_per_chunk"),
+            "chunk_marks": parsed.get("chunk_marks"),
+            "log": str(logf)}
+

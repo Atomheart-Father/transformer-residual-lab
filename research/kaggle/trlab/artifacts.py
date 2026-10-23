@@ -14,9 +14,9 @@
 **不重量化、不下载 BF16、不重做 S3。**
 """
 
-from .config import CFG, EVAL_PINNED, FORMATS, MDLS
+from .config import CFG, EVAL_PINNED, FORMATS, MDLS, WORK
 from .errors import GuardError
-from .core import _read_json, log, vram_gb
+from .core import _read_json, log, vram_gb, write_json
 from .fetch import _disk_precheck, _fetch_pinned_blob, _read_stamp, _write_stamp
 from .paths import (_eval_parquet_path, _eval_stamp_path, _eval_txt_path,
                     _model_path, llama_bin)
@@ -107,15 +107,45 @@ def _sidecar_path(gguf):
     return gguf.with_name(gguf.name + ".provenance.json")
 
 
+def _hf_stamp(gguf):
+    """HF 下载器落在产物旁边的 `.hf.json`（有就说明**这个文件是从 HF 下的**）。"""
+    gguf = Path(gguf)
+    return _read_json(gguf.with_name(gguf.name + ".hf.json"))
+
+
 def _local_models(formats):
+    """本地 `models/` 里的 GGUF。**来源按 stamp 判定，不按"文件在这儿"猜。**
+
+    v1.1.3 的真实 bug：两个 GGUF 明明是 HF 下载的，`source` 却被一律写成
+    `local_s4` —— 于是报告里"本次自己量化"的错觉，而且**完全不读**
+    `.hf.json` 里的 size/sha256，也不补 sidecar。
+    """
     out = {}
     for f in formats:
         p = _model_path(f)
-        if p.exists():
-            out[f] = {"path": str(p), "bytes": p.stat().st_size,
-                      "source": "local_s4",
-                      "sidecar_path": str(_sidecar_path(p))
-                      if _sidecar_path(p).exists() else None}
+        if not p.exists():
+            continue
+        size = p.stat().st_size
+        rec = {"path": str(p), "bytes": size, "source": "local_s4",
+               "sha256": None, "sha256_verified": False,
+               "origin_detail": "local_no_hf_stamp", "hf_stamp": None,
+               "sidecar_path": str(_sidecar_path(p))
+               if _sidecar_path(p).exists() else None}
+        st = _hf_stamp(p)
+        if isinstance(st, dict) and st.get("repo") == CFG["HF_MODEL_REPO"]:
+            if int(st.get("bytes") or -1) != size:
+                raise GuardError(
+                    f"{p.name}: 本地大小 {size} B 与下载 stamp 记录的 "
+                    f"{st.get('bytes')} B 不符。\n"
+                    f"  → 文件被改过或没下完；删掉 {p}（和它的 .hf.json）让 S6 重新下载。")
+            rec.update(
+                source="hf_cache", sha256=st.get("sha256"),
+                sha256_verified=bool(st.get("sha256_verified")),
+                origin_detail="hf_download_stamp",
+                hf_stamp={k: st.get(k) for k in
+                          ("repo", "revision", "bytes", "sha256",
+                           "sha256_verified", "fetched_utc", "fetch_auth")})
+        out[f] = rec
     return out
 
 
@@ -153,7 +183,17 @@ def _remote_models(formats, token):
 def resolve_eval_models(deadline, formats=None, fetch=None, probe_only=False):
     """返回 {fmt: {path, bytes, sha256, source, sidecar_path, sidecar}}。
 
-    本地优先（S4 刚跑完的产物），其次 HF。
+    本地优先（S4 刚跑完的产物，或上一轮 HF 下载后留下的文件），其次 HF。
+
+    v1.2.0 修了三个"本地就有文件"时才会发作的问题：
+      1. 以前两个模型都在本地就**直接 early return**，不读 `.hf.json`、
+         不补 sidecar、不核远端 oid —— 于是 `source` 被写成 `local_s4`，
+         fairness 悄悄降级成"没有 sidecar"。现在：stamp 一定读，sidecar
+         一定尝试补齐（本地优先，其次 HF），`EVAL_VERIFY_HASH` 时一定核内容。
+      2. `source` 只有三种：`local_s4`（无 HF stamp）/ `hf_cache`（有 stamp，
+         大小已核）/ `hf`（本次下载）。"从 HF 下的" 不再冒充"本次量化"。
+      3. `sha256_verified` 只代表**内容 sha256 与远端 oid 比对过**，
+         不是"文件存在"。
 
     `probe_only=True` 时**只探测不下载**：本地没有的格式从 tree 拿到 size/oid，
     `source="hf_pending"`、`downloaded=False`。预检用它 —— "先算清楚要下多少、
@@ -163,9 +203,17 @@ def resolve_eval_models(deadline, formats=None, fetch=None, probe_only=False):
     fetch = CFG["HF_FETCH_ARTIFACTS"] if fetch is None else fetch
     out = _local_models(formats)
     missing = [f for f in formats if f not in out]
-    if not missing:
+    repo, rev = CFG["HF_MODEL_REPO"], CFG["HF_MODEL_REVISION"]
+    token = hf.hf_token()["token"] if fetch else None
+
+    if not missing and not fetch:
+        # 纯本地模式：不发任何网络请求，sidecar 缺就明说缺
         for f, rec in out.items():
             rec["sidecar"] = _read_json(rec["sidecar_path"]) if rec["sidecar_path"] else None
+            if rec["sidecar"] is None:
+                rec["sidecar_missing"] = True
+                log(f"!! {f}: 本地没有 provenance sidecar —— "
+                    "fairness 只能记『无法判断』，不能当已核验")
         return out
 
     if not fetch:
@@ -175,18 +223,41 @@ def resolve_eval_models(deadline, formats=None, fetch=None, probe_only=False):
             "  → 或者把 CFG['HF_FETCH_ARTIFACTS'] 设 True；\n"
             "  → 或者把两个 .gguf 手动放到上面那个目录（本地文件优先）。")
 
-    token = hf.hf_token()["token"]
-    repo, rev, entries, picked = _remote_models(missing, token)
-    lack = [f for f in missing if f not in picked]
-    if lack:
-        raise GuardError(
-            f"{repo}@{rev} 里找不到 {lack} 的 .gguf。\n"
-            f"  现有文件：{[e['path'] for e in entries][:20]}\n"
-            f"  → 用 `python -m trlab --check-hf` 看清单。")
+    entries = hf.repo_files(repo, rev, token)
+    remote_by_name = {Path(e["path"]).name: e for e in entries}
+
+    # ---- 本地文件也要和 tree 交叉核对（大小必核；内容按开关）----
+    for f, rec in out.items():
+        e = remote_by_name.get(Path(rec["path"]).name)
+        if not e:
+            rec["tree_match"] = False
+            log(f"!! {f}: 本地文件 {Path(rec['path']).name} 不在 "
+                f"{repo}@{rev} 的 tree 里 —— 来源无法交叉核对")
+            continue
+        rec["tree_match"] = True
+        rec["remote_path"] = e["path"]
+        if int(e["size"]) != int(rec["bytes"]):
+            raise GuardError(
+                f"{f}: 本地 {rec['bytes']} B ≠ HF tree 的 {e['size']} B。\n"
+                f"  → 文件被改过或没下完。删掉 {rec['path']} 让 S6 重新下载。")
+        if e.get("sha256") and CFG.get("EVAL_VERIFY_HASH"):
+            from .fetch import sha256_of
+            got = sha256_of(rec["path"])
+            if got != e["sha256"]:
+                raise GuardError(
+                    f"{f}: 本地 sha256 与 HF tree 的 lfs.oid 不一致。\n"
+                    f"  tree {e['sha256']}\n  本地 {got}\n"
+                    "  → 文件被改过或没下完。删掉它让 S6 重新下载。")
+            rec["sha256"] = got
+            rec["sha256_verified"] = True
 
     if probe_only:
         for f in missing:
-            e = picked[f]
+            e = _pick_remote(entries, f)
+            if e is None:
+                raise GuardError(
+                    f"{repo}@{rev} 里找不到 {f} 的 .gguf。\n"
+                    f"  现有文件：{[x['path'] for x in entries][:20]}")
             out[f] = {"path": str(_model_path(f)), "bytes": e["size"],
                       "sha256": e.get("sha256"), "source": "hf_pending",
                       "downloaded": False, "sha256_verified": False,
@@ -195,7 +266,12 @@ def resolve_eval_models(deadline, formats=None, fetch=None, probe_only=False):
         return out
 
     for f in missing:
-        e = picked[f]
+        e = _pick_remote(entries, f)
+        if e is None:
+            raise GuardError(
+                f"{repo}@{rev} 里找不到 {f} 的 .gguf。\n"
+                f"  现有文件：{[x['path'] for x in entries][:20]}\n"
+                f"  → 用 `python -m trlab --check-hf` 看清单。")
         dst = _model_path(f)
         log(f"HF 输入：{e['path']}（{e['size'] / 2**30:.2f} GiB，"
             f"lfs.oid {str(e.get('sha256'))[:16]}…）→ {dst}")
@@ -204,29 +280,34 @@ def resolve_eval_models(deadline, formats=None, fetch=None, probe_only=False):
         out[f] = {"path": str(dst), "bytes": meta["bytes"],
                   "sha256": meta["sha256"], "source": "hf",
                   "sha256_verified": meta.get("sha256_verified"),
+                  "fetch_auth": meta.get("fetch_auth"),
+                  "origin_detail": "downloaded_this_run",
                   "sidecar_path": None}
 
-    # sidecar：优先本地（可能是 S4 刚写的），否则从 HF 取同名文件
-    remote_by_name = {e["path"]: e for e in entries}
+    # ---- sidecar：本地优先（可能是 S4 刚写的），否则从 HF 取同名小文件 ----
+    # 这一步**不能**因为"两个模型都在本地"就跳过（v1.1.3 的 bug）。
     for f in formats:
         rec = out[f]
         sc_local = _sidecar_path(rec["path"])
-        if sc_local.exists():
+        if sc_local.exists() and sc_local.stat().st_size > 0:
             rec["sidecar_path"] = str(sc_local)
+            rec["sidecar_source"] = "local"
         else:
-            rel = str(Path(rec["path"]).name) + ".provenance.json"
+            rel = Path(rec["path"]).name + ".provenance.json"
             cand = [p for p in remote_by_name if Path(p).name == rel]
-            if cand:
+            if not cand:
+                rec["sidecar_missing"] = True
+                log(f"!! {f}: HF 上没有 {rel} —— fairness 只能是『无法判断』")
+            else:
+                e = remote_by_name[cand[0]]
+                log(f"HF sidecar：{cand[0]}（{e['size']} B，非 LFS 也走同源 Bearer）")
                 meta = hf.fetch_file(repo, cand[0], sc_local, deadline,
-                                     revision=rev, token=token,
-                                     expect=remote_by_name[cand[0]],
+                                     revision=rev, token=token, expect=e,
                                      tag=f"HF/{f}.provenance")
                 rec["sidecar_path"] = str(sc_local)
                 rec["sidecar_source"] = "hf"
+                rec["sidecar_fetch_auth"] = meta.get("fetch_auth")
         rec["sidecar"] = _read_json(rec["sidecar_path"]) if rec["sidecar_path"] else None
-
-    if CFG.get("EVAL_VERIFY_HASH"):
-        _verify_local_hashes(out, entries)
     return out
 
 
@@ -412,8 +493,8 @@ def eval_preflight(deadline, formats=None, do_download=False):
     if missing:
         raise GuardError(
             f"找不到 {missing} —— 评测要跑 llama.cpp 的二进制。\n"
-            "  → 唯一的最简下一步：把 RUN_S2 也设成 True 一起跑"
-            "（只编译，**不下载模型、不重量化**，约 28 分钟）；\n"
+            "  → v1.1.2 起 `RUN_EVAL=True` 会**自动只编 S2**（pinned 源码 36.6 MiB，"
+            "不下载模型、不重量化，约 28 分钟），**不需要**你再开第二个开关；\n"
             "  → 或者设 CFG['LLAMA_BIN'] 指到已编译的 bin 目录；\n"
             "  → 本地开发机：`python -m trlab --preflight-only` 只能做静态检查，"
             "真评测需要可执行的 llama-perplexity。")
@@ -489,3 +570,122 @@ def eval_preflight(deadline, formats=None, do_download=False):
         f"{cost['wall_est_hours']} h（设备 {cost['device']}，"
         f"假设 {cost['assumed_tok_per_sec']} tok/s，不是实测）")
     return report
+
+
+# ---------------------------------------------------------------- 轻量预检
+
+def lightweight_eval_preflight(deadline, formats=None):
+    """`--preflight-eval`：**不编译、不下 7 GiB、不需要 GPU** 的评测链路体检。
+
+    真实 Kaggle 上连续三次失败都不是"模型/GPU"的问题，而是下载链路与语料口径：
+      · resolve URL 多了 `/models/` → 404
+      · `expect` 字段名 `size`/`bytes` 不一致 → KeyError
+      · 私仓 2 KB 的 provenance.json 没带 Bearer → 401
+      · 校准/评测集 1 行重叠 → 整轮 S6 归零
+    这四件事**都不需要**下载模型或编译就能发现。所以这里把它们做成 1 分钟级
+    的体检：Range 0-0 探大文件、真下 2 KB 小文件、真跑 holdout 构建。
+    """
+    formats = tuple(formats or FORMATS)
+    repo = CFG["HF_MODEL_REPO"]
+    rev = CFG["HF_MODEL_REVISION"]
+    rep = {"stage": "PREFLIGHT_EVAL", "repo": repo, "revision": rev,
+           "checks": {}, "ok": False, "warnings": []}
+
+    # ---- 1. 凭据 / 仓库 ----
+    auth = hf.check_access(repo, rev, use_cache=False)
+    rep["checks"]["hf_access"] = {k: auth.get(k) for k in
+                                  ("ok", "status", "http_status", "n_files",
+                                   "token_source", "error")}
+    if not auth.get("ok"):
+        rep["why"] = f"HF 授权检查失败（{auth.get('status')}）"
+        _write_preflight(rep)
+        return rep
+
+    # ---- 2. tree + 大文件 Range 探测 ----
+    token = hf.hf_token()["token"]
+    entries = hf.repo_files(repo, rev, token)
+    by_name = {Path(e["path"]).name: e for e in entries}
+    probes = {}
+    for f in formats:
+        e = _pick_remote(entries, f)
+        if e is None:
+            probes[f] = {"ok": False, "why": f"tree 里找不到 {f} 的 .gguf"}
+            continue
+        probes[f] = hf.probe_remote_file(repo, e["path"], deadline,
+                                        revision=rev, token=token, expect=e)
+    rep["checks"]["gguf_probe"] = probes
+
+    # ---- 3. sidecar：真下 2 KB 小文件（这才是 401 的现场）----
+    side_dir = WORK / "preflight" / "sidecars"
+    side = {}
+    for f in formats:
+        rec = probes.get(f) or {}
+        rel = Path(rec.get("path") or f"qwen3-8b-{f}.gguf").name + ".provenance.json"
+        e = by_name.get(rel)
+        if not e:
+            side[f] = {"ok": False, "why": f"tree 里没有 {rel}"}
+            continue
+        try:
+            meta = hf.fetch_file(repo, e["path"], side_dir / rel, deadline,
+                                 revision=rev, token=token, expect=e,
+                                 tag=f"preflight/{rel}", force=True)
+            side[f] = {"ok": True, "bytes": meta["bytes"],
+                       "fetch_auth": meta.get("fetch_auth"),
+                       "sha256_verified": meta.get("sha256_verified"),
+                       "path": meta["path"]}
+        except Exception as e2:          # noqa: BLE001 - 预检要把原因原样带回
+            side[f] = {"ok": False, "why": f"{type(e2).__name__}: {str(e2)[:300]}"}
+    rep["checks"]["sidecar_download"] = side
+
+    # ---- 4. 语料 + clean holdout（7 MB，真实）----
+    try:
+        eval_txt, emeta = _ensure_eval_txt(deadline)
+        calib = ensure_calib_for_isolation(deadline)
+        if calib is None:
+            rep["checks"]["corpus"] = {"ok": False, "why": "取不到校准语料"}
+        else:
+            from . import isolation
+            iso = isolation.build_holdout(calib, eval_txt,
+                                         WORK / "preflight" / "isolation",
+                                         cfg=CFG,
+                                         eval_label=CFG.get("EVAL_SOURCE"))
+            rep["checks"]["corpus"] = {
+                "ok": True,
+                "eval": iso["eval_raw"],
+                "calib": iso["calib"],
+                "overlap_raw_paras": iso["overlap_raw"]["paras"],
+                "overlap_details": iso["overlap_raw"]["details"][:5],
+                "holdout": iso["holdout"],
+                "actual_imatrix_calib_overlap":
+                    iso["actual_imatrix_calib_overlap"]["value"],
+            }
+    except Exception as e:              # noqa: BLE001
+        rep["checks"]["corpus"] = {"ok": False,
+                                   "why": f"{type(e).__name__}: {str(e)[:400]}"}
+
+    # ---- 5. 二进制（缺了会由 run() 自动只编 S2，这里只提示）----
+    miss = []
+    for name in ("llama-perplexity", "llama-cli"):
+        try:
+            llama_bin(name)
+        except GuardError:
+            miss.append(name)
+    rep["checks"]["binaries"] = {"ok": not miss, "missing": miss}
+    if miss:
+        rep["warnings"].append(f"缺 {miss}：正常 run_eval 会自动只编 S2（约 28 分钟）")
+
+    rep["ok"] = (auth.get("ok")
+                 and all(v.get("ok") for v in probes.values())
+                 and all(v.get("ok") for v in side.values())
+                 and (rep["checks"].get("corpus") or {}).get("ok"))
+    _write_preflight(rep)
+    return rep
+
+
+def _write_preflight(rep):
+    try:
+        write_json(OUT / "PREFLIGHT_EVAL.json", rep)
+    except Exception:
+        pass
+    print(json.dumps(rep, indent=1, ensure_ascii=False, default=str)[:4000])
+

@@ -177,6 +177,30 @@ def _ensure_calib_txt(deadline):
 
 
 
+def _calib_manifest(calib, need_tokens):
+    """记录"这次 imatrix 大概消费了校准语料的哪一段"（v1.2.0）。
+
+    没有观测值这件事必须写清楚：`llama-imatrix` 顺序读文件、按 `-c` 切块，
+    但**不写** manifest、也不支持断点，所以只能给近似窗口。
+    """
+    from .isolation import prefix_window, sha256_text
+    text = Path(calib).read_text(errors="replace")
+    win = prefix_window(text, need_tokens)
+    return {
+        "calib_path": str(calib),
+        "calib_sha256": sha256_text(text),
+        "calib_bytes": len(text.encode("utf-8")),
+        "chunks": CFG["IMATRIX_CHUNKS"],
+        "ctx": CFG["IMATRIX_CTX"],
+        "need_tokens": need_tokens,
+        "prefix_window": win,
+        "level": "derived_prefix_window",
+        "caveat": ("llama-imatrix 不写 manifest：这里是**近似**窗口"
+                   "（文件前缀 × need_tokens × 4 chars/token），"
+                   "不是观测到的 token 序列。不能据此声称『imatrix 只看过这一段』。"),
+    }
+
+
 def _is_oom_tail(tail):
     """判断 llama-imatrix 的失败是不是显存不够（同行/邻近匹配，不全文猜）。
 
@@ -427,6 +451,17 @@ def stage_s3_imatrix(deadline):
         log(f"!! 校准语料只有 {calib.stat().st_size / 1024:.0f} KB，"
             f"可能凑不满 {need_tokens} token")
 
+    # ---- 2.5 校准 manifest（v1.2.0）----
+    # llama-imatrix 不写 manifest，也不支持断点，所以"它到底看过哪些字"没有
+    # 观测值。能做的是把**近似窗口**（文件前缀 × need_tokens × 4 chars/token）
+    # 钉在产物旁边：以后 S6 判 `actual_imatrix_calib_overlap` 时至少有个可核的
+    # 依据，而不是只能写 unknown。等级永远是 derived_prefix_window，不是 observed。
+    calib_manifest = _calib_manifest(calib, need_tokens)
+    log(f"校准 manifest：calib sha256 {calib_manifest['calib_sha256'][:16]}…，"
+        f"近似窗口前 {calib_manifest['prefix_window']['chars']} 字符"
+        f"（{need_tokens} token × {calib_manifest['prefix_window']['chars_per_token']}）")
+
+
     # ---- 3. -ngl 拟合（余量默认 2 GiB，v0.4 / D-7）----
     v = vram_gb()
     usable = (v["total"] - CFG["NGL_MARGIN_GB"]) if v else 0.0
@@ -492,6 +527,7 @@ def stage_s3_imatrix(deadline):
         "calib_source": CFG["CALIB_SOURCE"],
         "calib_origin": calib_origin,
         "calib_download": calib_meta,
+        "calib_manifest": calib_manifest,
         "ctx": CFG["IMATRIX_CTX"],
         "chunks": CFG["IMATRIX_CHUNKS"],
         "need_tokens": need_tokens,

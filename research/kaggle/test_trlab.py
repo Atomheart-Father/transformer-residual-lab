@@ -4454,7 +4454,11 @@ def test_hf_fetch_file_reuse_and_etag_guard(ns):
 
     patch = _hf_env(ns)
     patch("_fetch_pinned_blob", fake_fetch)
-    patch("resolve_signed", lambda url, token=None: ("https://cdn/x", state["etag"]))
+    # v1.2.0 起 resolve_signed 返回 dict（url/etag/kind/same_origin）：
+    # 下载器要按 kind 决定"带不带 Bearer"，二元组不够用。
+    patch("resolve_signed", lambda url, token=None: {
+        "url": "https://cdn.example/x", "etag": state["etag"],
+        "kind": "signed_cdn", "status": 302, "same_origin": False})
     expect = {"bytes": 16, "sha256": "a" * 64}
     try:
         r1 = ns["fetch_file"]("r/x", "models/qwen3-8b-IQ2_XS.gguf", dst,
@@ -4677,7 +4681,7 @@ def test_eval_device_never_silently_degrades(ns):
 
 
 def test_eval_preflight_fails_closed_without_binaries(ns):
-    """没有 llama-perplexity 就停，并只给一步（把 RUN_S2 一起打开）。"""
+    """没有 llama-perplexity 就停，并说清"RUN_EVAL 会自动只编 S2，不用开第二个开关"。"""
     patch = _Patch(ns)
 
     def no_bin(name):
@@ -4689,8 +4693,9 @@ def test_eval_preflight_fails_closed_without_binaries(ns):
             raise AssertionError("必须 fail-closed")
         except ns["GuardError"] as e:
             msg = str(e)
-            assert "RUN_S2" in msg and "不下载模型" in msg, msg
-            assert msg.count("唯一的最简下一步") == 1, msg
+            assert "RUN_EVAL" in msg and "自动只编 S2" in msg, msg
+            assert "不下载模型" in msg and "不重量化" in msg, msg
+            assert "不需要" in msg, "必须明说不需要用户再开第二个开关"
     finally:
         patch.undo()
 
@@ -5328,6 +5333,852 @@ def test_s0_warning_not_misleading_under_run_eval(ns):
         ns["CFG"]["RUN_EVAL"] = old
 
 
+# ---------------------------------------------------------------- v1.2.0 系统性审计
+# S6/S7 稳定化：隔离取证与 clean holdout、HF 下载链路、来源归属、
+# 解析与证据等级、run_id/FAILURE 隔离、mini end-to-end。
+
+
+def test_resolve_url_model_repo_has_no_models_prefix(ns):
+    """req1：模型仓库的 resolve URL 不带 /models/（dataset 保留 datasets/）；
+    API tree 用 /api/models/。三者混用正是 v1.1.x 那类"看着对其实错"的 bug。"""
+    ru = ns["resolve_url"]
+    u = ru("Atomheart-Father/trlab-qwen3-8b-quant-pilot", "main",
+           "qwen3-8b-IQ2_XS.gguf")
+    assert u == ("https://huggingface.co/Atomheart-Father/"
+                 "trlab-qwen3-8b-quant-pilot/resolve/main/qwen3-8b-IQ2_XS.gguf"), u
+    assert "/models/" not in u, u
+    d = ru("org/ds", "main", "a.txt", dataset=True)
+    assert d == "https://huggingface.co/datasets/org/ds/resolve/main/a.txt", d
+
+    seen = {}
+
+    def fake_get(url, headers=None, **k):
+        seen["url"] = url
+        return 200, {}, b"[]"
+
+    patch = _Patch(ns)
+    patch("_http_get", fake_get)
+    try:
+        ns["repo_files"]("org/repo", token=None)
+        assert seen["url"].startswith(
+            "https://huggingface.co/api/models/org/repo/tree/main?"), seen["url"]
+        assert "expand" not in seen["url"], seen["url"]
+        assert "recursive=1" in seen["url"] and "limit=1000" in seen["url"]
+        ns["repo_files"]("org/ds", token=None, dataset=True)
+        assert "/api/datasets/org/ds/tree/" in seen["url"], seen["url"]
+    finally:
+        patch.undo()
+
+
+def test_normalize_expect_schema_is_fail_closed(ns):
+    """req2：size/bytes 两种 schema 统一；冲突/缺失/假 sha256 一律拒收，
+    不许静默跳过大小校验（v1.1.3 的隐性 bug 就是 expect.get("bytes") 恒 None）。"""
+    ne = ns["normalize_expect"]
+    ok = ne({"path": "a.gguf", "size": 16, "sha256": "a" * 64})
+    assert ok["bytes"] == 16 and ok["size"] == 16 and ok["is_lfs"] is True
+    assert ne({"path": "a.gguf", "bytes": 16})["bytes"] == 16
+    assert ne({"path": "a.gguf", "size": 16, "sha256": None})["sha256"] is None
+    try:
+        ne({"path": "a.gguf", "size": 16, "bytes": 17})
+        raise AssertionError("size 与 bytes 不一致必须拒收，不能猜哪个对")
+    except ns["GuardError"] as e:
+        assert "不一致" in str(e)
+    for bad in ({"path": "a.gguf"}, {"path": "a.gguf", "size": 0},
+                {"path": "a.gguf", "size": "abc"}, None, "x"):
+        try:
+            ne(bad)
+            raise AssertionError(f"缺少可用大小必须拒收：{bad!r}")
+        except ns["GuardError"]:
+            pass
+    try:
+        ne({"path": "a.gguf", "size": 16, "sha256": "b" * 40})
+        raise AssertionError("git blob sha1（40 字符）不能冒充内容 sha256")
+    except ns["GuardError"] as e:
+        assert "sha256" in str(e)
+
+
+def test_fetch_file_uses_tree_size_and_never_skips_size_check(ns):
+    """req2：expect 来自 tree（size 字段）也要校验；本地文件被改短时
+    不许当复用——v1.1.3 就是因为字段名写错把远端大小校验整个跳过了。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_schema_"))
+    dst = tmp / "models" / "x.gguf"
+    sha = "a" * 64
+    calls = {"n": 0}
+
+    def fake_fetch(pin, dstp, deadline, tag, fetch_url=None, auth_headers=None):
+        calls["n"] += 1
+        assert int(pin["bytes"]) == 16, pin
+        Path(dstp).write_bytes(b"z" * 16)
+        return {"origin": "downloaded", "bytes": 16, "sha256": sha,
+                "path": str(dstp)}
+
+    patch = _Patch(ns)
+    patch("_fetch_pinned_blob", fake_fetch)
+    patch("resolve_signed", lambda url, token=None: {
+        "url": "https://cdn.example/x", "etag": sha, "kind": "signed_cdn",
+        "status": 302, "same_origin": False})
+    try:
+        r = ns["fetch_file"]("r/x", "x.gguf", dst, time.time() + 30,
+                             token="hf_t", expect={"size": 16, "sha256": sha})
+        assert r["bytes"] == 16 and r["sha256_verified"] is True
+        r2 = ns["fetch_file"]("r/x", "x.gguf", dst, time.time() + 30,
+                              token="hf_t", expect={"size": 16, "sha256": sha})
+        assert r2["origin"] == "reused" and calls["n"] == 1, "一致时必须复用"
+        dst.write_bytes(b"z" * 8)                      # 文件被改短
+        r3 = ns["fetch_file"]("r/x", "x.gguf", dst, time.time() + 30,
+                              token="hf_t", expect={"size": 16, "sha256": sha})
+        assert r3["origin"] == "downloaded" and calls["n"] == 2, \
+            "本地大小与 tree 不符时必须重新下载，不许静默当复用"
+    finally:
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_fetch_file_bearer_only_when_same_origin(ns):
+    """req3：200 直连 HF 同源必须带 Bearer（私仓非 LFS 小文件）；
+    302 到签名 CDN、或直连却跳到别的域，都绝不带 token。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_auth_"))
+    sha = "a" * 64
+    seen = {}
+
+    def fake_fetch(pin, dstp, deadline, tag, fetch_url=None, auth_headers=None):
+        seen["auth"] = auth_headers
+        Path(dstp).write_bytes(b"z" * 16)
+        return {"origin": "downloaded", "bytes": 16, "sha256": sha,
+                "path": str(dstp)}
+
+    patch = _Patch(ns)
+    patch("_fetch_pinned_blob", fake_fetch)
+    try:
+        for kind, same, want in (("direct_origin", True, "bearer"),
+                                 ("signed_cdn", False, "none"),
+                                 ("direct_origin", False, "none")):
+            seen.clear()
+            patch("resolve_signed",
+                  lambda url, token=None, k=kind, s=same: {
+                      "url": "https://cdn.example/x", "etag": sha, "kind": k,
+                      "status": 200 if k == "direct_origin" else 302,
+                      "same_origin": s})
+            dst = tmp / f"m_{kind}_{same}.gguf"
+            r = ns["fetch_file"]("r/x", "p.json", dst, time.time() + 30,
+                                 token="hf_secret", expect={"size": 16})
+            got = seen["auth"]
+            if want == "bearer":
+                assert got and got.get("Authorization") == "Bearer hf_secret", got
+                assert r["fetch_auth"] == "bearer_same_origin"
+            else:
+                assert got is None, f"{kind}/{same} 不该带 token：{got}"
+                assert "hf_secret" not in str(got)
+            assert r["fetch_url_kind"] == kind
+    finally:
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _local_http_pair(body, sha):
+    """起两个真 socket 服务器：origin（HF 同源）与 CDN（另一个端口=另一个域）。
+
+    返回 (origin, cdn, log, stop)。log 记录两边各自看到的 Authorization/Range。
+    只用 127.0.0.1，不碰外网。
+    """
+    import http.server
+    import threading
+
+    log = {"origin_auth": "unset", "cdn_auth": "unset", "cdn_range": None}
+
+    class Origin(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            log["origin_auth"] = self.headers.get("Authorization") or "none"
+            if self.path.startswith("/redirect"):
+                self.send_response(302)
+                self.send_header("Location",
+                                 f"http://127.0.0.1:{CDN_PORT}/cdn/file")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    class CDN(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            log["cdn_auth"] = self.headers.get("Authorization") or "none"
+            log["cdn_range"] = self.headers.get("Range")
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    cdn = http.server.HTTPServer(("127.0.0.1", 0), CDN)
+    CDN_PORT = cdn.server_address[1]
+    origin = http.server.HTTPServer(("127.0.0.1", 0), Origin)
+    threading.Thread(target=cdn.serve_forever, daemon=True).start()
+    threading.Thread(target=origin.serve_forever, daemon=True).start()
+
+    def stop():
+        cdn.shutdown()
+        origin.shutdown()
+        cdn.server_close()
+        origin.server_close()
+
+    return origin, cdn, log, stop
+
+
+def test_fetch_file_full_path_local_http_origin_and_cdn(ns):
+    """req3 全路径版（真 socket，不 mock _http_get）：私仓同源 200 要 Bearer；
+    302→CDN 时 token 绝不透传到别的域。GGUF 与 provenance JSON 同一套规则。"""
+    import hashlib
+
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_http_"))
+    body = b"x" * 64
+    sha = hashlib.sha256(body).hexdigest()
+    origin, cdn, log, stop = _local_http_pair(body, sha)
+    op, cp = origin.server_address[1], cdn.server_address[1]
+    prefix = f"http://127.0.0.1:{op}"
+
+    patch = _Patch(ns)
+    patch("_same_origin", lambda url, base=None: url.startswith(prefix + "/"))
+    patch("resolve_url", lambda repo, rev, path, dataset=False:
+          f"{prefix}/models/{repo}/{path}")
+    try:
+        # ---- 情况 A：同源 200 直连（私有仓库的非 LFS 小文件）----
+        dst = tmp / "models" / "qwen3-8b-IQ2_XS.gguf"
+        r = ns["fetch_file"]("org/repo", "qwen3-8b-IQ2_XS.gguf", dst,
+                             time.time() + 60, token="hf_secret",
+                             expect={"size": len(body), "sha256": sha})
+        assert dst.read_bytes() == body
+        assert log["origin_auth"] == "Bearer hf_secret", log
+        assert r["fetch_auth"] == "bearer_same_origin"
+        stamp = json.loads(dst.with_name(dst.name + ".hf.json")
+                           .read_text(encoding="utf-8"))
+        assert stamp["fetch_auth"] == "bearer_same_origin"
+        assert stamp["sha256_verified"] is True
+
+        # ---- 情况 B：302 到签名 CDN（大 LFS 文件）----
+        patch("resolve_url", lambda repo, rev, path, dataset=False:
+              f"{prefix}/redirect/{repo}/{path}")
+        dst2 = tmp / "models" / "qwen3-8b-IQ4_XS.gguf"
+        r2 = ns["fetch_file"]("org/repo", "qwen3-8b-IQ4_XS.gguf", dst2,
+                              time.time() + 60, token="hf_secret",
+                              expect={"size": len(body), "sha256": sha},
+                              force=True)
+        assert dst2.read_bytes() == body
+        assert r2["fetch_auth"] == "none_signed_cdn"
+        assert log["cdn_auth"] == "none", \
+            f"token 绝不透传到 CDN（实际收到 {log['cdn_auth']!r}）"
+        assert log["cdn_range"] is None, "全新下载不该带 Range"
+    finally:
+        patch.undo()
+        stop()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_probe_remote_file_single_byte_range(ns):
+    """轻量探测：只取 1 个字节（Range: bytes=0-0）。不下载 7 GiB 也能
+    验完整下载链路（resolve → 鉴权 → size 核对）。"""
+    import http.server
+    import threading
+
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_probe_"))
+    total = 4096
+    seen = {"auth": "unset", "range": None}
+
+    class S(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            seen["auth"] = self.headers.get("Authorization") or "none"
+            seen["range"] = self.headers.get("Range")
+            if seen["auth"] == "none":
+                self.send_response(401)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes 0-0/{total}")
+            self.send_header("Content-Length", "1")
+            self.end_headers()
+            self.wfile.write(b"x")
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), S)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    prefix = f"http://127.0.0.1:{port}"
+
+    patch = _Patch(ns)
+    patch("_same_origin", lambda url, base=None: url.startswith(prefix + "/"))
+    patch("resolve_url", lambda repo, rev, path, dataset=False:
+          f"{prefix}/models/{repo}/{path}")
+    try:
+        r = ns["probe_remote_file"]("org/repo", "q.gguf", deadline=time.time() + 30,
+                                    token="hf_secret", expect={"size": total})
+        assert r["ok"] is True, r
+        assert r["total_bytes"] == total
+        assert seen["range"] == "bytes=0-0", seen
+        assert r["probe_auth"] == "bearer_same_origin"
+
+        # size 不符 → 明确说"上游换过文件"，不当成功
+        bad = ns["probe_remote_file"]("org/repo", "q.gguf",
+                                      deadline=time.time() + 30,
+                                      token="hf_secret",
+                                      expect={"size": total + 1})
+        assert bad["ok"] is False and "不符" in str(bad["why"]), bad
+
+        # 没 token → 401，why 说清，不装作探测成功
+        no = ns["probe_remote_file"]("org/repo", "q.gguf",
+                                     deadline=time.time() + 30, token=None,
+                                     expect={"size": total})
+        assert no["ok"] is False and "401" in str(no["why"]), no
+        assert no["stage"] == "resolve", no
+    finally:
+        patch.undo()
+        srv.shutdown()
+        srv.server_close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_isolation_forensics_prefix_only_is_not_proof(ns):
+    """科学缺陷：1 行交集 ≠ 污染。取证必须能区分"整段相同"与
+    "只有前 200 字符相同"，并留下完整哈希与段索引。"""
+    shared = ("Wikipedia article lead sentence about the history of the steam "
+              "engine and its impact on industrial society in the nineteenth "
+              "century. ") * 3
+    calib = [shared + "calibration only tail about boiler pressure ratings. " * 6,
+             "A distinct calibration paragraph about ocean current patterns. " * 6]
+    ev = [shared + "evaluation only tail about railway timetables instead. " * 6,
+          "An evaluation paragraph about mountain railways and gradients. " * 6]
+
+    d = ns["find_overlaps"](calib, ev)
+    assert len(d) == 1, d
+    r = d[0]
+    assert r["full_equal"] is False
+    assert r["same_prefix200_only"] is True, "只有前 200 字符相同，不能当污染证据"
+    assert r["eval_index"] == 0 and r["calib_indices"] == [0]
+    assert r["eval_offset"] is None and r["calib_offsets"] == [None], \
+        "普通列表没有字符偏移；带偏移的分段由 build_holdout 走 paragraphs_with_offsets"
+    assert len(r["eval_full_sha256"]) == 64
+    assert r["eval_preview"].lower().startswith("wikipedia article lead")
+
+    # 整段完全相同 → full_equal=True（这类才需要认真对待）
+    d2 = ns["find_overlaps"](calib, [calib[0]])
+    assert d2 and d2[0]["full_equal"] is True
+    # 与 calib 完全无关的段落 → 根本没有交集
+    assert ns["find_overlaps"](calib, ["Unrelated paragraph about deep sea "
+                                       "vents and tube worms. " * 6]) == []
+
+
+def _holdout_fixture(tmp):
+    """24 段互不相同的评测段落 + 1 段与校准集共享前 200 字符；校准集另含
+    1 段无关内容。返回 (calib_path, eval_path)。"""
+    shared = ("Wikipedia article lead sentence about the history of the steam "
+              "engine and its impact on industrial society in the nineteenth "
+              "century. ") * 3
+    calib = tmp / "calib.txt"
+    calib.write_text(
+        shared + "calibration only tail about boiler pressure ratings. " * 6
+        + "\n\n"
+        + "A distinct calibration paragraph about ocean current patterns. " * 6,
+        encoding="utf-8")
+    paras = [shared + "evaluation only tail about railway timetables. " * 6]
+    for i in range(24):
+        paras.append(f"Evaluation paragraph number {i} discusses a distinct "
+                    f"topic in natural history, with enough length to pass "
+                    f"the minimum paragraph size filter. " * 2)
+    ev = tmp / "eval.txt"
+    ev.write_text("\n\n".join(paras) + "\n", encoding="utf-8")
+    return calib, ev
+
+
+def test_clean_holdout_is_deterministic_and_auditable(ns):
+    """clean holdout：确定性（同输入→逐字节相同）、可审计（规则/剔除哈希/
+    保留量都写进 manifest）、两个量化共用同一份（S6 只切一次组）。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_hold_"))
+    shared = ("Wikipedia article lead sentence about the history of the steam "
+              "engine and its impact on industrial society in the nineteenth "
+              "century. ") * 3
+    try:
+        calib, ev = _holdout_fixture(tmp)
+        m1 = ns["build_holdout"](calib, ev, tmp / "h1")
+        m2 = ns["build_holdout"](calib, ev, tmp / "h2")
+        h1 = (tmp / "h1" / "eval_holdout.txt").read_bytes()
+        h2 = (tmp / "h2" / "eval_holdout.txt").read_bytes()
+        assert h1 == h2, "同一输入必须得到逐字节相同的 holdout"
+        assert m1["holdout"]["sha256"] == m2["holdout"]["sha256"]
+        assert m1["rule"] == ns["HOLDOUT_RULE"]
+        assert m1["prefix_chars"] == 200
+        assert m1["overlap_raw"]["paras"] == 1
+        assert m1["cleaning"]["removed_paras"] == 1
+        assert len(m1["cleaning"]["removed_full_sha256"]) == 1
+        assert m1["cleaning"]["kept_paras"] == 24
+        assert m1["cleaning"]["kept_chars"] == len(h1)
+        assert m1["holdout"]["paras"] == 24
+        assert m1["actual_imatrix_calib_overlap"]["value"] == "unknown", \
+            "没有 imatrix manifest 时必须标 unknown，不能假称已证明不重叠"
+        # 原始 eval 未被修改；holdout 是独立文件
+        assert ev.read_bytes() != h1
+        assert shared not in h1.decode("utf-8")
+        # isolation.json 落盘，可事后复核
+        assert (tmp / "h1" / "isolation.json").exists()
+        # 被剔除的那段记下了完整哈希（不是只记条数）
+        det = m1["overlap_raw"]["details"][0]
+        assert det["same_prefix200_only"] is True
+        assert len(det["eval_full_sha256"]) == 64
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_holdout_refuses_when_train_used_as_eval(ns):
+    """把 train 当 eval 时会剔除一大片 —— 必须停下来人工看，
+    不许调大上限把评测集清空（那正是"硬改 eval split"的陷阱）。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_hold2_"))
+    try:
+        shared = ("A paragraph that appears in both the calibration file and "
+                  "the evaluation file verbatim, which is what happens when "
+                  "someone accidentally points EVAL_TXT at the train split. ")
+        calib = tmp / "calib.txt"
+        calib.write_text("\n\n".join([shared + f"tail {i} " * 4
+                                      for i in range(24)]) + "\n",
+                         encoding="utf-8")
+        ev = tmp / "eval.txt"
+        ev.write_text("\n\n".join([shared + f"tail {i} " * 4
+                                   for i in range(24)]) + "\n",
+                      encoding="utf-8")
+        try:
+            ns["build_holdout"](calib, ev, tmp / "h")
+            raise AssertionError("train 当 eval 必须拒之门外")
+        except ns["GuardError"] as e:
+            assert "train" in str(e) and "不要调大上限" in str(e), str(e)
+        # 保底段数不足也要拒（样本太小，NLL 没有意义）。
+        # 10 段里 1 段重叠 = 10%，刚过 fraction 上限，于是剩 9 段 < 20 下限。
+        ev2 = tmp / "eval_small.txt"
+        ev2.write_text("\n\n".join(
+            [shared + "a tail that is unique enough. " * 4]
+            + [f"Unique evaluation paragraph {i} about a distinct subject in "
+               f"natural history, long enough to count. " * 2
+               for i in range(9)]) + "\n", encoding="utf-8")
+        try:
+            ns["build_holdout"](calib, ev2, tmp / "h2")
+            raise AssertionError("保底段数不足必须拒收")
+        except ns["GuardError"] as e:
+            assert "太小" in str(e) or "下限" in str(e), str(e)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_actual_imatrix_overlap_unknown_without_manifest(ns):
+    """没有 imatrix 消费清单时必须标 unknown；有 manifest 时给
+    derived_prefix_window（近似），并明确说"这不是已证明无污染"。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_imx_"))
+    try:
+        calib = tmp / "calib.txt"
+        # 104000 字符 > 16384 token × 4 chars/token 的近似窗口 → 窗口会被截断
+        body = "A calibration paragraph about steam engines and boilers. " * 2000
+        calib.write_text(body, encoding="utf-8")
+        details = [{"eval_index": 3, "calib_offsets": [10], "eval_preview": "x"}]
+
+        r = ns["imatrix_overlap"](body, details, manifest=None, need_tokens=16384)
+        assert r["value"] == "unknown" and r["level"] == "unknown"
+        assert "不能" in r["why"], r["why"]
+        # 即便 unknown，近似窗口仍在子字段里可查（窗口内/外）
+        w = r["prefix_window_check"]["window"]
+        assert w["level"] == "approx_derived_prefix_window"
+        assert w["end_char"] == 16384 * 4 and w["end_char"] < len(body)
+        assert r["prefix_window_check"]["overlap_paras_inside_window"] == 1
+
+        # 有 manifest（本次 S3 产出）→ 值不再是 unknown，但等级仍只是近似
+        m = {"prefix_window": ns["prefix_window"](body, 16384),
+             "need_tokens": 16384}
+        r2 = ns["imatrix_overlap"](body, details, manifest=m, need_tokens=16384)
+        assert r2["value"] == "present" and r2["level"] == "derived_prefix_window"
+        assert r2["prefix_window_check"]["overlap_paras_inside_window"] == 1
+        # 窗口外的交集 → none，但仍不是"证明"
+        far = [{"eval_index": 9, "calib_offsets": [len(body) - 5],
+                "eval_preview": "y"}]   # 窗口之外
+        r3 = ns["imatrix_overlap"](body, far, manifest=m, need_tokens=16384)
+        assert r3["value"] == "none"
+        assert r3["prefix_window_check"]["overlap_paras_inside_window"] == 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_parse_ppl_log_reads_observed_numbers(ns):
+    """PPL/NLL 来自日志本身；token 数是**观测值**（tokenized N tokens），
+    不是 chunks×ctx 的假设。空输出/缺行/截断都要 ok=False 且说清原因。"""
+    f = ns["parse_ppl_log"]
+    good = ("ggml_cuda_init: stub\n"
+            "main: build: 4246 (stub)\n"
+            "main: tokenized 36864 tokens\n"
+            "main: 512 tokens per chunk\n"
+            "main: n_ctx = 512\n"
+            "perplexity over 32 chunks: PPL = 8.1234 +/- 0.0567\n"
+            "final estimate: PPL = 8.1234 +/- 0.0567\n")
+    r = f(good)
+    assert r["ok"] is True and r["ppl"] == 8.1234 and r["ppl_err"] == 0.0567
+    assert abs(r["nll"] - math.log(8.1234)) < 1e-12
+    assert r["tokens_observed"] == 36864 and r["chunks_observed"] == 32
+    assert r["tokens_per_chunk"] == 512 and r["n_ctx_observed"] == 512
+
+    # ANSI 颜色码不影响解析
+    r_ansi = f("\x1b[1;32mfinal estimate: PPL = 8.1234 +/- 0.0567\x1b[0m\n")
+    assert r_ansi["ok"] is True and r_ansi["ppl"] == 8.1234
+
+    # 空输出（进程崩了 / 什么都没打）
+    for bad in ("", None, "load model...\nERROR: out of memory\n"):
+        e = f(bad)
+        assert e["ok"] is False and e["ppl"] is None and e["nll"] is None
+        assert "final estimate" in e["error"]
+
+    # 日志没有自报 token 数 → tokens_observed 保持 None（不拿 nominal 冒充）
+    r2 = f("final estimate: PPL = 5.0 +/- 0.1\n")
+    assert r2["ok"] is True and r2["tokens_observed"] is None
+    assert r2["tokens_per_chunk"] is None
+
+
+def test_extract_generation_strips_banner_perf_ansi(ns):
+    """S7 只能比**真实生成内容**：banner / perf / ANSI / prompt 回显
+    都不能混进去；只差 banner 的两份日志必须得到相同的正文。"""
+    f = ns["extract_generation"]
+    log_a = ("\x1b[0mggml_cuda_init: found 1 CUDA devices\n"
+             "main: build: 4246 (a1b2c3d)\n"
+             "main: system_info: n_threads = 4\n"
+             "generate: n_ctx = 512, n_batch = 2048, n_predict = 32\n"
+             "\n"
+             "The capital of France is Paris.\n"
+             "\n"
+             "llama_perf:        eval time = 123.45 ms\n"
+             "llama_perf: prompt eval time = 10.00 ms\n")
+    g = f(log_a)
+    assert g["text"] == "The capital of France is Paris.", g
+    assert "\x1b" not in g["text"] and "llama_perf" not in g["text"]
+    assert "build:" not in g["text"] and "system_info" not in g["text"]
+    assert g["empty"] is False
+
+    # 同一份生成，只是 banner 不同 → 正文 sha256 必须相同
+    log_b = ("main: build: 9999 (fffffff)\n"
+             "main: system_info: n_threads = 16\n"
+             "generate: n_ctx = 512, n_predict = 32\n"
+             "\n"
+             "The capital of France is Paris.\n"
+             "\n"
+             "llama_print_timings: total time = 1.00 ms\n")
+    assert f(log_b)["sha256"] == g["sha256"], "banner 不该影响正文"
+
+    # prompt 回显：取**最后**一处（banner 里回显过 prompt 时旧版会整段抓错）
+    log_c = ("generate: n_predict = 32\n"
+             "\n"
+             "The capital of France is\n"
+             "The capital of France is Paris.\n"
+             "\n[end of text]\n"
+             "llama_perf: eval time = 1.00 ms\n")
+    gc = f(log_c, prompt="The capital of France is")
+    assert gc["text"] == "Paris.", gc
+    assert gc["prompt_echoed"] is True
+
+    # 空输出（整体崩塌的一种）→ empty=True，而不是把 banner 当生成
+    ge = f("main: build: 4246\ngenerate: n_predict = 32\n\n"
+           "llama_perf: eval time = 1.00 ms\n")
+    assert ge["empty"] is True and ge["text"] == ""
+
+
+def test_eval_summary_empty_nll_is_none_not_zero(ns):
+    """req8：S6 失败而 S7 成功 → partial_success；空 NLL 是 null 不是 0，
+    报告完成不等于实验成功。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_sm_"))
+    patch = _Patch(ns)
+    patch("OUT", tmp)
+    try:
+        ns["STATE"].pop("S6_NLL", None)
+        ns["STATE"].pop("S7_QUALITY", None)
+        ns["STATE"]["S6_NLL"] = {"status": "error",
+                                 "error": "RuntimeError: 校准集与评测集有 1 行重叠"}
+        ns["STATE"]["S7_QUALITY"] = {"status": "ok", "result": {
+            "n_prompts": 8, "identical_outputs": 0, "identical_rate": 0.0,
+            "empty_outputs": {"IQ2_XS": 0, "IQ4_XS": 0},
+            "degenerate": {"IQ2_XS": 0.0, "IQ4_XS": 0.0},
+            "evidence": {"identical_outputs": "smoke_only",
+                         "can_rank_quality": False},
+            "limits": []}}
+        sm = ns["_write_eval_summary"]()
+        assert sm is not None
+        assert sm["nll"] is None, "没有 NLL 时必须写 null，不能写 {} 或 0"
+        assert sm["nll_note"] and "不是" in sm["nll_note"]
+        assert sm["delta_nll_iq2_minus_iq4"] is None
+        assert sm["partial_success"] == ["S7_QUALITY"]
+        assert sm["failed"] == ["S6_NLL"]
+        assert sm["status"] == {"S6_NLL": "error", "S7_QUALITY": "ok"}
+        # S7 的 0/8 只是 smoke，摘要里必须带着证据等级
+        assert sm["s7"]["identical_rate"] == 0.0
+        assert sm["s7"]["evidence"] == "smoke_only", \
+            "摘要里必须带证据等级，不能只给一个数字让人当质量结论"
+        assert any("smoke" in x for x in sm["limits"])
+        # 真的落盘了
+        assert json.loads((tmp / "EVAL_SUMMARY.json").read_text())["run_id"] == sm["run_id"]
+    finally:
+        ns["STATE"].pop("S6_NLL", None)
+        ns["STATE"].pop("S7_QUALITY", None)
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_run_id_resets_and_archives_previous_failure(ns):
+    """req5：同一 Session 再跑 → 新 run_id；上一轮的 FAILURE.json 归档到
+    failures/<旧 id>.json，本轮的真实异常不会被上次的 404 盖掉。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_rid_"))
+    patch = _Patch(ns)
+    patch("OUT", tmp)
+    try:
+        rid1 = ns["_run_id"](reset=True)
+        (tmp / "FAILURE.json").write_text(json.dumps({
+            "run_id": rid1, "stage": "HF_AUTH", "cause": "hf_not_found",
+            "error": "404 Not Found", "causes": ["hf_not_found"],
+            "all": [{"stage": "HF_AUTH", "cause": "hf_not_found"}]}),
+            encoding="utf-8")
+
+        assert ns["_run_id"]() == rid1, "同一轮里 run_id 必须稳定"
+        time.sleep(1.1)                # run_id 精度是秒，跨过一秒才能区分
+        rid2 = ns["_run_id"](reset=True)
+        assert rid2 != rid1, "每次 run() 都必须换新 run_id"
+
+        dst = ns["_archive_failure"]()
+        assert dst is not None and dst.name == f"{rid1}.json"
+        assert not (tmp / "FAILURE.json").exists(), "归档后本轮从空白开始"
+
+        # 本轮的新失败只记本轮的，不继承上一轮的 404
+        doc = ns["_record_failure"]("S6_NLL", error="KeyError: 'bytes'")
+        assert doc["run_id"] == rid2
+        assert doc["stage"] == "S6_NLL" and doc["cause"] != "hf_not_found"
+        assert len(doc["all"]) == 1, doc["all"]
+        assert "hf_not_found" not in (doc.get("causes") or [])
+
+        # 上一轮的现场仍在归档里可查
+        old = json.loads(dst.read_text(encoding="utf-8"))
+        assert old["stage"] == "HF_AUTH" and old["run_id"] == rid1
+    finally:
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_local_models_source_follows_hf_stamp(ns):
+    """req4：HF 下载到本地的文件不能记 local_s4；两个都在本地时仍要读
+    stamp/sidecar，缺 sidecar 明说"无法判断"，不当已核验。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_src_"))
+    patch = _Patch(ns)
+    patch("_model_path", lambda fmt: tmp / f"qwen3-8b-{fmt}.gguf")
+    old_repo = ns["CFG"]["HF_MODEL_REPO"]
+    old_fetch = ns["CFG"]["HF_FETCH_ARTIFACTS"]
+    ns["CFG"]["HF_MODEL_REPO"] = "org/repo"
+    try:
+        body = b"FAKE-GGUF-CONTENT" * 64
+        sha = __import__("hashlib").sha256(body).hexdigest()
+        p = tmp / "qwen3-8b-IQ2_XS.gguf"
+        p.write_bytes(body)
+        # 有 stamp：来源是 hf_cache，内容哈希来自 stamp
+        (tmp / "qwen3-8b-IQ2_XS.gguf.hf.json").write_text(json.dumps({
+            "repo": "org/repo", "revision": "main", "bytes": len(body),
+            "sha256": sha, "sha256_verified": True}), encoding="utf-8")
+        # 没 stamp：只能记 local_s4
+        q = tmp / "qwen3-8b-IQ4_XS.gguf"
+        q.write_bytes(body)
+
+        out = ns["_local_models"](("IQ2_XS", "IQ4_XS"))
+        assert out["IQ2_XS"]["source"] == "hf_cache"
+        assert out["IQ2_XS"]["origin_detail"] == "hf_download_stamp"
+        assert out["IQ2_XS"]["sha256_verified"] is True
+        assert out["IQ2_XS"]["sha256"] == sha
+        assert out["IQ4_XS"]["source"] == "local_s4"
+        assert out["IQ4_XS"]["origin_detail"] == "local_no_hf_stamp"
+        assert out["IQ4_XS"]["sha256_verified"] is False
+
+        # stamp 记录的大小与磁盘不符 → 拒之门外，不当复用
+        (tmp / "qwen3-8b-IQ2_XS.gguf.hf.json").write_text(json.dumps({
+            "repo": "org/repo", "revision": "main", "bytes": len(body) + 1,
+            "sha256": sha, "sha256_verified": True}), encoding="utf-8")
+        try:
+            ns["_local_models"](("IQ2_XS",))
+            raise AssertionError("stamp 与磁盘大小不符必须报错")
+        except ns["GuardError"] as e:
+            assert "不符" in str(e)
+
+        # 两个都在本地 + 不开 HF：不发请求，缺 sidecar 明说缺
+        ns["CFG"]["HF_FETCH_ARTIFACTS"] = False
+        (tmp / "qwen3-8b-IQ2_XS.gguf.hf.json").write_text(json.dumps({
+            "repo": "org/repo", "revision": "main", "bytes": len(body),
+            "sha256": sha, "sha256_verified": True}), encoding="utf-8")
+        res = ns["resolve_eval_models"](time.time() + 30, ("IQ2_XS", "IQ4_XS"))
+        assert set(res) == {"IQ2_XS", "IQ4_XS"}
+        assert res["IQ2_XS"]["sidecar_missing"] is True
+        assert res["IQ2_XS"]["sidecar"] is None, \
+            "没有 sidecar 时 fairness 只能记『无法判断』，不能当已核验"
+        assert res["IQ2_XS"]["source"] == "hf_cache"
+    finally:
+        ns["CFG"]["HF_MODEL_REPO"] = old_repo
+        ns["CFG"]["HF_FETCH_ARTIFACTS"] = old_fetch
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _stub_llama_binaries(bin_dir):
+    """写两个可执行的 stub：真子进程、真日志、按模型名给不同答案。
+
+    这不是 mock 数字 —— S6/S7 的命令行、日志解析、分组统计、bootstrap、
+    摘要全部走真代码路径，只是把"模型推理"换成了确定性的罐头输出。
+    """
+    ppl = bin_dir / "llama-perplexity"
+    ppl.write_text("""#!/usr/bin/env python3
+import sys
+a = sys.argv[1:]
+m = a[a.index("-m") + 1] if "-m" in a else ""
+ppl = "11.5000" if "IQ4_XS" in m else "12.6000"
+print("ggml_cuda_init: stub backend")
+print("main: build: 4246 (stub)")
+print("main: tokenized 4096 tokens")
+print("main: 512 tokens per chunk")
+print("main: n_ctx = 512")
+print("perplexity over 2 chunks: PPL = %s +/- 0.1000" % ppl)
+print("final estimate: PPL = %s +/- 0.1000" % ppl)
+""", encoding="utf-8")
+    cli = bin_dir / "llama-cli"
+    cli.write_text("""#!/usr/bin/env python3
+import sys
+a = sys.argv[1:]
+if "--help" in a:
+    print("--no-conversation --no-display-prompt --temp --seed --simple-io")
+    sys.exit(0)
+m = a[a.index("-m") + 1] if "-m" in a else ""
+ans = "Paris." if "IQ4_XS" in m else "Paris"
+print("ggml_cuda_init: stub backend")
+print("main: build: 4246 (stub)")
+print("main: system_info: n_threads = 4")
+print("generate: n_ctx = 512, n_batch = 2048, n_predict = 32")
+print("")
+print(ans)
+print("")
+print("llama_perf:        eval time = 1.00 ms")
+print("llama_perf: prompt eval time = 1.00 ms")
+""", encoding="utf-8")
+    ppl.chmod(0o755)
+    cli.chmod(0o755)
+    return {"llama-perplexity": str(ppl), "llama-cli": str(cli)}
+
+
+def test_s6_s7_mini_end_to_end_with_stub_binaries(ns):
+    """mini end-to-end（不占 GPU、不联网）：stub 二进制 + 本地假 GGUF，
+    跑真 S6 → S7 → EVAL_SUMMARY。断言的是**解析与统计真的发生了**：
+    PPL→NLL、paired delta、bootstrap CI、0/8 只当 smoke。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_e2e_"))
+    (tmp / "bin").mkdir(parents=True, exist_ok=True)
+    bins = _stub_llama_binaries(tmp / "bin")
+    import hashlib
+
+    patch = _Patch(ns)
+    old = {k: ns["CFG"].get(k) for k in
+           ("EVAL_TXT", "EVAL_SOURCE", "CALIB_TXT", "CALIB_SOURCE",
+            "HF_FETCH_ARTIFACTS", "NLL_GROUPS", "NLL_CHUNKS_PER_GROUP",
+            "NLL_CTX", "QUALITY_PROMPTS", "HF_MODEL_REPO")}
+    old_stages = {k: ns["STAGES"].get(k) for k in ("S6_NLL", "S7_QUALITY")}
+    try:
+        # ---- 语料：造一份"已在本地"的 eval.txt（带 pinned stamp，不联网）----
+        ev_paras = [f"Evaluation paragraph {i} covers a distinct topic in "
+                    f"natural history with enough length to be counted. " * 2
+                    for i in range(24)]
+        (ns["WORK"] / "eval.txt").write_text("\n\n".join(ev_paras) + "\n",
+                                             encoding="utf-8")
+        pin = ns["EVAL_PINNED"]
+        stamp_dir = ns["_eval_stamp_path"]().parent
+        stamp_dir.mkdir(parents=True, exist_ok=True)
+        ns["_eval_stamp_path"]().write_text(json.dumps({
+            "sha256": pin["sha256"],
+            "txt_bytes": (ns["WORK"] / "eval.txt").stat().st_size}),
+            encoding="utf-8")
+        calib = tmp / "calib.txt"
+        calib.write_text("A calibration paragraph about steam engines and "
+                         "boiler pressure. " * 40, encoding="utf-8")
+
+        # ---- 两个"已在本地"的 GGUF：带 HF stamp + 同源 sidecar ----
+        side = {"imatrix_sha256": "c" * 64, "base_repo": "Qwen/Qwen3-8B-Base",
+                "base_revision": "rev", "base_expected_sha256": "d" * 64,
+                "params": {"bits": 2}, "imatrix_base_kind": "q8_0",
+                "validity_scope": "pilot"}
+        for fmt, body in (("IQ2_XS", b"IQ2" * 512), ("IQ4_XS", b"IQ4" * 512)):
+            mp = tmp / f"qwen3-8b-{fmt}.gguf"
+            mp.write_bytes(body)
+            (tmp / f"qwen3-8b-{fmt}.gguf.hf.json").write_text(json.dumps({
+                "repo": "org/repo", "revision": "main", "bytes": len(body),
+                "sha256": hashlib.sha256(body).hexdigest(),
+                "sha256_verified": True}), encoding="utf-8")
+            (tmp / f"qwen3-8b-{fmt}.gguf.provenance.json").write_text(
+                json.dumps(side), encoding="utf-8")
+
+        ns["CFG"].update({
+            "CALIB_TXT": str(calib), "CALIB_SOURCE": "test/calib",
+            "HF_FETCH_ARTIFACTS": False, "NLL_GROUPS": 4,
+            "NLL_CHUNKS_PER_GROUP": 2, "NLL_CTX": 256, "QUALITY_PROMPTS": 4,
+            "HF_MODEL_REPO": "org/repo"})
+        ns["STAGES"]["S6_NLL"] = True
+        ns["STAGES"]["S7_QUALITY"] = True
+        patch("_model_path", lambda fmt: tmp / f"qwen3-8b-{fmt}.gguf")
+        patch("llama_bin", lambda name: bins[name])
+
+        # ---- 真跑 S6 ----
+        s6 = ns["run_stage"]("S6_NLL", ns["stage_s6_nll"])
+        assert s6 is not None, "S6 应该产出结果"
+        assert s6["isolation"]["ok"] is True
+        assert s6["isolation"]["cleaning"]["kept_paras"] == 24
+        assert s6["isolation"]["actual_imatrix_calib_overlap"]["value"] == "unknown"
+        assert s6["groups"] == 4 and len(s6["per_group"]) == 2
+        for fmt, rows in s6["per_group"].items():
+            for r in rows:
+                assert r["tokens_observed"] == 4096, r
+                assert r["tokens_nominal"] == 2 * 256
+        agg = s6["aggregate"]
+        assert abs(agg["IQ4_XS"]["mean_nll"] - __import__("math").log(11.5)) < 1e-9
+        assert abs(agg["IQ2_XS"]["mean_nll"] - __import__("math").log(12.6)) < 1e-9
+        st = s6["paired_delta_nll_iq2_minus_iq4"]
+        assert st["n"] == 4 and st["ci95"] is not None
+        assert st["mean"] > 0, "IQ2 的 PPL 更高 → delta 必须为正"
+        assert s6["measured_throughput"]["tokens_observed"] == 4096 * 8
+        assert s6["measured_throughput"]["token_count_source"].startswith("llama-perplexity")
+
+        # ---- 真跑 S7 ----
+        s7 = ns["run_stage"]("S7_QUALITY", ns["stage_s7_quality"])
+        assert s7 is not None
+        assert s7["identical_outputs"] == 0, "两个 stub 答案只差一个句点"
+        assert s7["evidence"]["can_rank_quality"] is False
+        assert s7["evidence"]["identical_outputs"] == "smoke_only"
+        assert s7["empty_outputs"] == {"IQ2_XS": 0, "IQ4_XS": 0}
+        assert s7["smoke_match"]["IQ4_XS"]["of"] == 4
+        assert s7["smoke_match"]["IQ4_XS"]["matched"] == 1, \
+            "4 个 prompt 里只有 capital-of-France 命中 paris；其余是 smoke 未命中，不是失败"
+        for p in s7["pairs"]:
+            assert p["first_divergence_char"] == 5, p
+            assert p["both_empty"] is False
+
+        # ---- 摘要：数字来自上面的 JSON，不是另算一遍 ----
+        sm = ns["_write_eval_summary"]()
+        assert sm["status"] == {"S6_NLL": "ok", "S7_QUALITY": "ok"}
+        assert sm["partial_success"] == [] and sm["failed"] == []
+        assert abs(sm["nll"]["IQ4_XS"] - round(__import__("math").log(11.5), 5)) < 1e-9
+        assert sm["delta_nll_iq2_minus_iq4"]["mean"] > 0
+        assert sm["eval"]["holdout_sha256"] == s6["isolation"]["holdout"]["sha256"]
+        assert sm["eval"]["actual_imatrix_calib_overlap"] == "unknown"
+        assert sm["inputs"]["IQ2_XS"]["source"] == "hf_cache"
+        assert sm["inputs"]["IQ2_XS"]["sha256_verified"] is True
+    finally:
+        for k, v in old.items():
+            ns["CFG"][k] = v
+        for k, v in old_stages.items():
+            ns["STAGES"][k] = v
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ---------------------------------------------------------------- runner
 
 TESTS = [
@@ -5493,6 +6344,23 @@ TESTS = [
     test_auth_status_maps_to_distinct_causes,
     test_eval_http_400_not_blamed_on_user_secrets,
     test_s0_warning_not_misleading_under_run_eval,
+    # v1.2.0 系统性审计：隔离/holdout、HF 下载链路、来源归属、解析与证据等级
+    test_resolve_url_model_repo_has_no_models_prefix,
+    test_normalize_expect_schema_is_fail_closed,
+    test_fetch_file_uses_tree_size_and_never_skips_size_check,
+    test_fetch_file_bearer_only_when_same_origin,
+    test_fetch_file_full_path_local_http_origin_and_cdn,
+    test_probe_remote_file_single_byte_range,
+    test_isolation_forensics_prefix_only_is_not_proof,
+    test_clean_holdout_is_deterministic_and_auditable,
+    test_holdout_refuses_when_train_used_as_eval,
+    test_actual_imatrix_overlap_unknown_without_manifest,
+    test_parse_ppl_log_reads_observed_numbers,
+    test_extract_generation_strips_banner_perf_ansi,
+    test_eval_summary_empty_nll_is_none_not_zero,
+    test_run_id_resets_and_archives_previous_failure,
+    test_local_models_source_follows_hf_stamp,
+    test_s6_s7_mini_end_to_end_with_stub_binaries,
 ]
 
 

@@ -21,7 +21,7 @@ from .stages_quant import stage_s4_quant, stage_s5_bytes, stage_s4_preflight
 from .stages_eval import stage_s6_nll, stage_s7_quality, stage_s8_bf16_anchor, stage_sx_explore
 from .report import _s2_report_lines, _s3_report_lines, _s4_report_lines, _s4_preflight_lines, stage_s9_report
 
-import argparse, json, sys
+import argparse, json, sys, time
 from datetime import datetime, timezone
 
 
@@ -35,14 +35,53 @@ _UPLOAD_WHITELIST = {
 }
 
 _RUN_ID = None
+# 本次运行的出站历史（逐阶段）。写进 OUT/UPLOADS.json，报告直接读它 ——
+# 这样"哪个结果真的持久化了"不靠报告作者回忆。
+UPLOAD_LOG = []
 
 
-def _run_id():
-    """一次运行的标签，用来在 HF 上留历史（`results/v{ver}/{run_id}/`）。"""
+def _run_id(reset=False):
+    """一次运行的标签，用来在 HF 上留历史（`results/v{ver}/{run_id}/`）。
+
+    v1.2.0：**每次 `run()` 都换新的**。v1.1.3 的真实 bug：模块变量只在首次
+    初始化，同一 Session 跑第二轮会写进同一个 `results/v1.1.3/<run_id>/`，
+    把上一轮的报告覆盖掉 —— 于是"404 → KeyError → 成功"三段历史只剩最后一段。
+    """
     global _RUN_ID
-    if _RUN_ID is None:
+    if reset or _RUN_ID is None:
         _RUN_ID = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return _RUN_ID
+
+
+def _archive_failure():
+    """把**上一轮**的 FAILURE.json 移到 `out/failures/<上一轮 run_id>.json`。
+
+    v1.1.3 的真实 bug：同一 Session 第二轮失败时，`_record_failure` 看到
+    `all` 里已有 `S6_NLL` 就不再追加，于是报告仍显示上一轮的 404，
+    而本轮真实的 `KeyError: 'bytes'` 只在 `S6_NLL.json` 里。
+    现在：本轮从空白开始，历史按 run_id 分开存。
+    """
+    fp = OUT / "FAILURE.json"
+    if not fp.exists():
+        return None
+    prev = {}
+    try:
+        prev = json.loads(fp.read_text(encoding="utf-8"))
+    except Exception:
+        prev = {}
+    rid = str(prev.get("run_id") or "unknown")
+    d = OUT / "failures"
+    d.mkdir(parents=True, exist_ok=True)
+    dst = d / f"{rid}.json"
+    if dst.exists():
+        dst = d / f"{rid}-{int(time.time())}.json"
+    try:
+        fp.replace(dst)
+    except OSError:
+        fp.unlink(missing_ok=True)
+        return None
+    log(f"上一轮失败现场已归档：{dst.name}（本轮从空白开始记录）")
+    return dst
 
 
 # check_access 的 status → FAILURE.json 的 cause 代码。
@@ -152,7 +191,13 @@ def _record_failure(stage, error=None, traceback_tail=None, plan=None,
     if not items and prev.get("stage"):        # 兼容 v1.1.1 的单条格式
         items = [{"stage": prev["stage"], "cause": prev.get("cause"),
                   "error": prev.get("error"), "next_step": prev.get("next_step")}]
-    if not any(i.get("stage") == stage for i in items):
+    # 同一轮里同阶段又失败了：**新错误覆盖旧错误**（旧错误已经过时），
+    # 但位置保留 —— 顶层仍然是"最早出问题的那个阶段"。
+    for _i, _it in enumerate(items):
+        if _it.get("stage") == stage:
+            items[_i] = item
+            break
+    else:
         items.append(item)
 
     causes = []
@@ -277,6 +322,25 @@ def _abort_eval(plan, auth, upload_state=None):
             "stages": {k: (STATE.get(k) or {}).get("status") for k in STAGES}}
 
 
+def _note_upload(stage, rec, files):
+    """把出站结果记进 UPLOAD_LOG 并落盘（报告要能证明"哪些真的持久化了"）。"""
+    UPLOAD_LOG.append({
+        "stage": stage,
+        "files": [b for _a, b in files],
+        "skipped": bool(rec.get("skipped")),
+        "remote_verified": rec.get("remote_verified"),
+        "not_persisted": rec.get("not_persisted") or [],
+        "commit": rec.get("commit"),
+        "why": rec.get("why") or rec.get("error"),
+        "at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    })
+    try:
+        write_json(OUT / "UPLOADS.json", {"run_id": _run_id(), "uploads": UPLOAD_LOG})
+    except Exception:
+        pass
+    return rec
+
+
 def _upload_stage(stage, force=False):
     """把一个阶段的小结果传到 HF 并**远端复核**。
 
@@ -287,11 +351,13 @@ def _upload_stage(stage, force=False):
     files = [(OUT / n, f"results/v{NOTEBOOK_VERSION}/{_run_id()}/{n}")
              for n in names if (OUT / n).exists()]
     if not files:
-        return {"stage": stage, "skipped": True, "why": "没有可上传的文件"}
+        return _note_upload(stage, {"stage": stage, "skipped": True,
+                                    "why": "没有可上传的文件"}, [])
     if not (force or CFG.get("HF_UPLOAD_AFTER_RUN")):
-        return {"stage": stage, "skipped": True,
-                "why": "CFG['HF_UPLOAD_AFTER_RUN']=False（结果只落本地，Session 结束即丢）",
-                "not_persisted": [b for _, b in files]}
+        return _note_upload(stage, {
+            "stage": stage, "skipped": True,
+            "why": "CFG['HF_UPLOAD_AFTER_RUN']=False（结果只落本地，Session 结束即丢）",
+            "not_persisted": [b for _, b in files]}, files)
 
     from .hf import upload_after_run
     try:
@@ -304,56 +370,94 @@ def _upload_stage(stage, force=False):
             rec["not_persisted"] = ([] if v.get("ok")
                                     else [b for _, b in files])
         print(f"HF 出站（{stage}）：{json.dumps(rec, ensure_ascii=False)[:400]}")
-        return rec
+        return _note_upload(stage, rec, files)
     except Exception as e:
         rec = {"stage": stage, "ok": False, "error": str(e),
                "not_persisted": [b for _, b in files]}
         print(f"!! HF 出站失败（{stage}）—— 这些结果**尚未持久化**："
               f"{rec['not_persisted']}\n   原因：{e}")
-        return rec
+        return _note_upload(stage, rec, files)
+
 
 
 def _write_eval_summary(plan=None, upload_state=None):
-    """几百字节的摘要，专为"贴到聊天里"设计。数字全部来自 S6/S7 的 JSON。"""
+    """几百字节的摘要，专为"贴到聊天里"设计。数字全部来自 S6/S7 的 JSON。
+
+    v1.2.0 的三条硬规则（都是真实运行里被"看起来成功"骗过之后加的）：
+      1. S6 失败而 S7 成功时，写 **partial_success**，不许整份摘要看着像成功；
+      2. S6 没有 NLL 时 `nll` 是 `null` + `nll_note`，**不是** `{}` 或 0 差；
+      3. 逐阶段列出出站状态（哪些真的到了 HF、哪些只在本机）。
+    """
     s6 = _get("S6_NLL") or {}
     s7 = _get("S7_QUALITY") or {}
-    if not (s6 or s7):
+    s6_status = (STATE.get("S6_NLL") or {}).get("status")
+    s7_status = (STATE.get("S7_QUALITY") or {}).get("status")
+    if not (s6 or s7 or s6_status or s7_status):
         return None
     st = s6.get("paired_delta_nll_iq2_minus_iq4") or {}
     agg = s6.get("aggregate") or {}
     inputs = ((s6.get("provenance") or {}).get("inputs") or {})
+    iso = s6.get("isolation") or {}
+    failed = [k for k, s in (("S6_NLL", s6_status), ("S7_QUALITY", s7_status))
+              if s == "error"]
+    ok_stages = [k for k, s in (("S6_NLL", s6_status), ("S7_QUALITY", s7_status))
+                 if s == "ok"]
     sm = {
         "run_id": _run_id(),
         "version": NOTEBOOK_VERSION,
-        "device": (s6.get("device_by_fmt") or {}),
+        "status": {"S6_NLL": s6_status, "S7_QUALITY": s7_status},
+        "partial_success": ok_stages if failed else [],
+        "failed": failed,
+        "device": (s6.get("device_by_fmt") or (s7.get("settings") or {}).get("device")),
         "fairness_level": s6.get("fairness_level"),
         "fairness_verified": s6.get("fairness_verified"),
         "inputs": {f: {"source": r.get("source"),
-                       "sha256_verified": r.get("sha256_verified")}
+                       "sha256_verified": r.get("sha256_verified"),
+                       "origin_detail": r.get("origin_detail")}
                    for f, r in inputs.items()},
-        "eval": {"corpus": s6.get("eval_source"), "ctx": s6.get("eval_ctx"),
+        "eval": {"corpus": s6.get("eval_source"),
+                 "ctx": s6.get("eval_ctx"),
                  "groups": s6.get("groups"),
-                 "chunks_per_group": s6.get("eval_chunks_per_group")},
-        "nll": {f: round(a.get("mean_nll", float("nan")), 5) for f, a in agg.items()},
-        "delta_nll_iq2_minus_iq4": {
+                 "chunks_per_group": s6.get("eval_chunks_per_group"),
+                 "holdout_sha256": s6.get("eval_holdout_sha256"),
+                 "overlap_raw_paras": (iso.get("overlap_raw") or {}).get("paras"),
+                 "removed_paras": (iso.get("cleaning") or {}).get("removed_paras"),
+                 "kept_paras": (iso.get("cleaning") or {}).get("kept_paras"),
+                 "actual_imatrix_calib_overlap":
+                     (iso.get("actual_imatrix_calib_overlap") or {}).get("value")},
+        # 没有 NLL 就是 None —— 绝不能写成 {} 让人读成"差值为 0"
+        "nll": ({f: round(a.get("mean_nll"), 5) for f, a in agg.items()}
+                if agg else None),
+        "nll_note": (None if agg else
+                     "S6 没有产出 NLL：这里的 null **不是**『两个量化没有差别』。"),
+        "delta_nll_iq2_minus_iq4": ({
             "mean": (round(st["mean"], 5) if st.get("mean") is not None else None),
             "ci95": st.get("ci95"), "n": st.get("n"),
+            "usable_as_test": st.get("usable_as_test"),
             "char_weighted": (round(st["char_weighted_mean"], 5)
                               if st.get("char_weighted_mean") is not None else None),
-        },
+        } if st else None),
         "verdict": s6.get("verdict"),
         "throughput_tok_s": (s6.get("measured_throughput") or {}).get("tok_per_sec"),
         "s7": ({"n_prompts": s7.get("n_prompts"),
                 "identical_rate": s7.get("identical_rate"),
-                "degenerate_repeat4": s7.get("degenerate")} if s7 else
-               "S7 not run"),
+                "empty_outputs": s7.get("empty_outputs"),
+                "smoke_match": s7.get("smoke_match"),
+                "degenerate_repeat4": s7.get("degenerate"),
+                "evidence": (s7.get("evidence") or {}).get("identical_outputs")}
+               if s7 else {"status": s7_status}),
         "upload": upload_state,
+        "uploads": UPLOAD_LOG,
         "limits": ["pilot：512 ctx / 8 组；bootstrap 的 n 是组数不是 token 数",
                    "S6/S7 不是标准任务评测，不能当能力排名",
-                   "fairness_level=hf_sidecar_declared 表示没有重算核验"],
+                   "S7 的 identical_rate / repeat4 只是 smoke 信号",
+                   "fairness_level=hf_sidecar_declared 表示没有重算核验",
+                   "actual_imatrix_calib_overlap=unknown 表示无法证明也无否证"],
     }
     write_json(OUT / "EVAL_SUMMARY.json", sm)
     print("=" * 78)
+    if failed and ok_stages:
+        print(f"评测摘要（**部分成功**：{ok_stages} 成功，{failed} 失败）")
     print("评测摘要（可直接复制粘贴，也写在 EVAL_SUMMARY.json）：")
     print(json.dumps(sm, ensure_ascii=False, indent=1))
     print("=" * 78)
@@ -371,6 +475,27 @@ def _apply_overrides(overrides):
             STAGES[k] = bool(v)
         else:
             CFG[k] = v
+
+
+def preflight_eval(deadline=None):
+    """`--preflight-eval`：评测链路的 1 分钟级体检（不编译、不下 7 GiB）。
+
+    覆盖的都是"只有真下载才会暴露"的集成断裂：resolve URL 路径、tree 的
+    size/oid、私仓小文件的 Bearer、sidecar 能否取到、语料与 clean holdout。
+    """
+    from .artifacts import lightweight_eval_preflight
+    ensure_dirs()
+    print_banner()
+    rep = lightweight_eval_preflight(deadline or (time.time() + 300))
+    print("=" * 78)
+    if rep.get("ok"):
+        print("评测链路预检通过：GGUF 的 Range 探测、sidecar 实下、语料与 holdout 都 ok。")
+        print("  注意：这只证明**下载与语料**没问题，不代表 S6/S7 已经跑过。")
+    else:
+        print(f"评测链路预检**失败**：{rep.get('why')}")
+        print(f"  明细：{OUT / 'PREFLIGHT_EVAL.json'}")
+    print("=" * 78)
+    return rep
 
 
 def run(run_s2=None, run_s3=None, run_s4=None, run_eval=None,
@@ -402,6 +527,13 @@ def run(run_s2=None, run_s3=None, run_s4=None, run_eval=None,
         if _v is not None:
             CFG[_k] = bool(_v)
     _apply_overrides(overrides)
+    ensure_dirs()
+    # v1.2.0：每轮一个新的 run_id，并把上一轮的 FAILURE.json 归档。
+    # 同一 Session 里"修一点、重跑一次"是常态，历史必须按轮分开，
+    # 否则报告会把上一轮的 404 当成本轮的结论。
+    _run_id(reset=True)
+    UPLOAD_LOG.clear()
+    _archive_failure()
     if preflight_only:
         # 只留预检：其余阶段全关，四个开关也归位（_apply_run_switches 就不再改任何字段）
         for _k in STAGES:
@@ -561,6 +693,11 @@ def run(run_s2=None, run_s3=None, run_s4=None, run_eval=None,
 
     sx = run_stage("SX_EXPLORE", stage_sx_explore)
 
+    # 两边都失败时也要有一份摘要（否则只剩 FAILURE.json，看不出"哪些阶段试过"）
+    if (CFG["RUN_EVAL"] and not _get("S6_NLL") and not _get("S7_QUALITY")
+            and (STATE.get("S6_NLL") or STATE.get("S7_QUALITY"))):
+        _write_eval_summary(plan)
+
     s9 = run_stage("S9_REPORT", stage_s9_report)
 
     if s9 or upload:
@@ -584,12 +721,19 @@ def run(run_s2=None, run_s3=None, run_s4=None, run_eval=None,
             print("!! 但 S6/S7 没有产出数据 —— 这不叫成功，检查开关与日志。")
             ok = False
     else:
-        print(f"本次运行**失败**：{failed}；根因 {causes or ['未分类']}")
+        _ok_stages = [k for k, v in stages.items() if v == "ok" and k.startswith("S")]
+        if _ok_stages:
+            print(f"本次运行**部分成功**：{_ok_stages} 成功；{failed} 失败。")
+            print("  已成功阶段的结果仍然有效（已出站的部分在 UPLOADS.json 里），"
+                  "不要把整轮当成什么都没发生。")
+        else:
+            print(f"本次运行**失败**：{failed}；根因 {causes or ['未分类']}")
         print(f"  现场：{fp}；报告（含失败说明）：{OUT / 'report.md'}")
         print("  修好后新 Session 重跑即可，HF 上的输入不用重下。")
+    print(f"  run_id：{_run_id()}（出站历史：{OUT / 'UPLOADS.json'}）")
     print("=" * 78)
     return {"ok": ok, "failed": failed, "causes": causes,
-            "plan": plan, "stages": stages}
+            "run_id": _run_id(), "plan": plan, "stages": stages}
 
 
 def main(argv=None):
@@ -603,6 +747,9 @@ def main(argv=None):
                     help="只评测 S6/S7/S9：从 HF 已存的 GGUF 取输入，不编译、不重量化")
     ap.add_argument("--preflight-only", action="store_true",
                     help="只跑 S4_PREFLIGHT：几秒内核查磁盘/暂存盘/imatrix，不编译不下载")
+    ap.add_argument("--preflight-eval", action="store_true",
+                    help=("评测链路轻量体检：Range 0-0 探 GGUF、真下 2 KB sidecar、"
+                          "真跑 clean holdout；不编译、不下 7 GiB、不需要 GPU"))
     ap.add_argument("--check-hf", action="store_true",
                     help="只检查 HF 凭据与仓库可读性，不打印 token")
     ap.add_argument("--upload", action="store_true",
@@ -616,6 +763,10 @@ def main(argv=None):
         from .hf import status
         print(json.dumps(status(), indent=1, ensure_ascii=False))
         return 0
+
+    if args.preflight_eval:
+        rep = preflight_eval()
+        return 0 if rep.get("ok") else 2
 
     over = {"FORCE_RERUN": True} if args.force_rerun else {}
     for kv in args.set:

@@ -13,13 +13,39 @@ from .config import CFG, EVAL_PINNED, FORMATS, LOGS, WORK
 from .errors import GuardError, UnknownGGMLType
 from .paths import _model_path, llama_bin
 from .gguf import gguf_scan
-from .core import _anchor_decision, _fit_ngl, _get, check_deadline, log, need, paired_bootstrap, run_cmd, run_ppl, split_eval, vram_gb
+from .core import (_anchor_decision, _fit_ngl, _get, check_deadline, log, need,
+                   paired_bootstrap, run_cmd, run_ppl, split_eval, vram_gb)
 from .imatrix import resolve_imatrix
+from .isolation import build_holdout
 from .artifacts import (eval_device, eval_preflight, fairness_from_sidecars,
                         resolve_eval_models)
 
-import json, os, subprocess, time
+import json, os, re, subprocess, time
 from pathlib import Path
+
+
+def _calib_manifest_from_imatrix():
+    """从本次 S3 的结果 / imatrix provenance 里取"校准实际用了什么"的 manifest。
+
+    有它，`actual_imatrix_calib_overlap` 才能从 `unknown` 变成
+    `derived_prefix_window`（近似）。没有就老实写 unknown —— 不许假装已知。
+    """
+    cands = []
+    s3 = _get("S3_IMATRIX") or {}
+    if isinstance(s3, dict) and s3.get("calib_manifest"):
+        cands.append(s3["calib_manifest"])
+    try:
+        p = resolve_imatrix()
+        if p is not None:
+            side = Path(str(p)).with_name(Path(str(p)).name + ".provenance.json")
+            if side.exists():
+                d = json.loads(side.read_text(encoding="utf-8"))
+                if isinstance(d.get("calib_manifest"), dict):
+                    cands.append(d["calib_manifest"])
+    except Exception:
+        pass
+    return cands[0] if cands else None
+
 
 
 def _eval_ngl(nbytes, vram_total_gb):
@@ -74,35 +100,61 @@ def stage_s6_nll(deadline):
         log("!! 公平性来自 HF 上的 provenance sidecar（声明级，本次未重算）—— "
             "结论里必须标注 verified_level=hf_sidecar_declared")
 
-    # ---- 校准/评测隔离断言（内容级）----
-    isolation = {"ok": None}
-    if CFG["CALIB_TXT"] and Path(CFG["CALIB_TXT"]).exists():
-        c = Path(CFG["CALIB_TXT"]).read_text(errors="replace")
-        e = eval_txt.read_text(errors="replace")
-        cset = {ln.strip()[:200] for ln in c.split("\n") if len(ln.strip()) > 40}
-        eset = {ln.strip()[:200] for ln in e.split("\n") if len(ln.strip()) > 40}
-        ov = cset & eset
-        isolation.update(
-            calib=str(CFG["CALIB_TXT"]), calib_source=CFG["CALIB_SOURCE"],
-            eval=str(eval_txt), eval_source=CFG["EVAL_SOURCE"],
-            calib_lines=len(cset), eval_lines=len(eset),
-            overlap_lines=len(ov), ok=(len(ov) == 0))
-        if ov:
-            raise RuntimeError(
-                f"校准集与评测集有 {len(ov)} 行重叠（前 200 字符比对）。"
-                "必须换 split 后再跑，否则 NLL 会被 imatrix 污染。")
-        log(f"隔离检查通过：calib {len(cset)} 行 / eval {len(eset)} 行 / 重叠 0")
-    else:
+    # ---- 校准/评测隔离：取证 + 确定性 clean holdout（v1.2.0）----
+    # 旧版在这里 `raise RuntimeError("有 1 行重叠")`，整轮 S6 归零。
+    # 但"train 和 test 里都有一句相同的话"并不等于"imatrix 实际看过评测数据"：
+    # imatrix 只消费 chunks×ctx ≈ 16k token，而 train 有 10.6 MB。
+    # 现在改成：取证 → 剔除 → 用同一份 holdout 切组 → 如实标注 unknown。
+    iso_manifest = None
+    holdout_path = eval_txt
+    calib_path = (Path(CFG["CALIB_TXT"])
+                  if CFG.get("CALIB_TXT") and Path(CFG["CALIB_TXT"]).exists()
+                  else None)
+    if calib_path is None:
+        isolation = {"ok": None, "overlap_lines": None,
+                     "note": ("没有校准语料路径，无法做隔离断言 —— "
+                              "结论里必须标注这一点"),
+                     "actual_imatrix_calib_overlap": {
+                         "value": "unknown", "level": "unknown",
+                         "why": "没有校准语料，无法比较"}}
         log("!! 没有校准语料路径，无法做隔离断言 —— 结论里必须标注这一点")
+    else:
+        iso_manifest = build_holdout(
+            calib_path, eval_txt, WORK / "isolation",
+            imatrix_manifest=_calib_manifest_from_imatrix(),
+            cfg=CFG, eval_label=CFG.get("EVAL_SOURCE"))
+        holdout_path = Path(iso_manifest["holdout"]["path"])
+        isolation = {
+            "ok": True,
+            "rule": iso_manifest["rule"],
+            # 兼容旧报告的字段名：这里现在是**原始**交集条数，不是"错误数"
+            "overlap_lines": iso_manifest["overlap_raw"]["paras"],
+            "overlap_raw": iso_manifest["overlap_raw"],
+            "cleaning": iso_manifest["cleaning"],
+            "holdout": iso_manifest["holdout"],
+            "actual_imatrix_calib_overlap":
+                iso_manifest["actual_imatrix_calib_overlap"],
+            "calib": str(calib_path), "calib_source": CFG["CALIB_SOURCE"],
+            "calib_lines": iso_manifest["calib"]["paras"],
+            "eval": str(eval_txt), "eval_source": CFG["EVAL_SOURCE"],
+            "eval_lines": iso_manifest["eval_raw"]["paras"],
+            "manifest": str(WORK / "isolation" / "isolation.json"),
+            "note": iso_manifest["note"],
+        }
+        log(f"隔离：原始交集 {isolation['overlap_lines']} 段 → 剔除后 "
+            f"{isolation['cleaning']['kept_paras']} 段保留；"
+            f"actual_imatrix_calib_overlap="
+            f"{isolation['actual_imatrix_calib_overlap']['value']}")
 
     if len(models) < 2:
         raise GuardError(
             f"需要两个格式的文件，现有 {list(models)}。\n"
             "  → 本地没有就去 HF 取：RUN_EVAL=True（或 CFG['HF_FETCH_ARTIFACTS']=True）。")
 
-    groups, meta = split_eval(eval_txt, CFG["NLL_GROUPS"], WORK / "eval_groups")
-    log(f"评测集切成 {len(groups)} 组：" +
+    groups, meta = split_eval(holdout_path, CFG["NLL_GROUPS"], WORK / "eval_groups")
+    log(f"评测集（clean holdout）切成 {len(groups)} 组：" +
         ", ".join(f"g{m['group']}({m['paras']}段/{m['chars']}字符)" for m in meta))
+
 
     per_model = {}
     # 一次只装一个模型：每个格式算自己的 -ngl，跑完就释放（llama-perplexity
@@ -150,11 +202,31 @@ def stage_s6_nll(deadline):
             "nll_sd": (sum((x["nll"] - mu) ** 2 for x in vals) / max(1, len(vals) - 1)) ** 0.5,
         }
 
-    # 实测速率回填：把"假设值"换成这一次的真实值，供下一轮估成本
-    tokens_done = len(groups) * CFG["NLL_CHUNKS_PER_GROUP"] * CFG["NLL_CTX"] * len(models)
-    measured = {"elapsed_sec": round(elapsed, 1), "tokens": tokens_done,
-                "tok_per_sec": round(tokens_done / max(1e-6, elapsed), 2),
-                "note": "这是**这一次**的实测吞吐，只对同机器同设置可比"}
+    # 实测速率回填：把"假设值"换成这一次的真实值，供下一轮估成本。
+    # v1.2.0：区分 nominal（我们请求的 chunks×ctx）与 observed（日志自报的
+    # tokenized N tokens）。语料不够长时 llama.cpp 会少算，吞吐不能拿 nominal 冒充。
+    per_group_nominal = int(CFG["NLL_CHUNKS_PER_GROUP"]) * int(CFG["NLL_CTX"])
+    tokens_nominal = per_group_nominal * len(groups) * len(models)
+    _obs = [r.get("tokens_observed") for vals in per_model.values() for r in vals
+            if r.get("tokens_observed")]
+    tokens_observed = sum(_obs) if _obs else None
+    used_tokens = tokens_observed or tokens_nominal
+    measured = {
+        "elapsed_sec": round(elapsed, 1),
+        "tokens_nominal": tokens_nominal,
+        "tokens_observed": tokens_observed,
+        "tokens_used_for_rate": used_tokens,
+        "token_count_source": ("llama-perplexity 日志的 `tokenized N tokens`"
+                               if tokens_observed else
+                               "日志没有自报 token 数 → 退回 chunks×ctx（上界）"),
+        "tok_per_sec": round(used_tokens / max(1e-6, elapsed), 2),
+        "note": ("这是**这一次**的实测吞吐，只对同机器同设置可比；"
+                 "token 数优先用日志自报值，缺失时才用 chunks×ctx。"),
+    }
+    if tokens_observed and tokens_observed != tokens_nominal:
+        log(f"!! 日志自报 {tokens_observed} token ≠ 请求的 {tokens_nominal} —— "
+            "语料可能不够长，或 llama.cpp 调整了 chunk 数；已按观测值算吞吐")
+
 
     out = {
         "isolation": isolation,
@@ -164,6 +236,9 @@ def stage_s6_nll(deadline):
         "base_scope": base_scope,
         "scope_note": scope_note,
         "eval_source": CFG["EVAL_SOURCE"],
+        "eval_txt": str(eval_txt),
+        "eval_used_txt": str(holdout_path),
+        "eval_holdout_sha256": (iso_manifest or {}).get("holdout", {}).get("sha256"),
         "eval_ctx": CFG["NLL_CTX"],
         "eval_chunks_per_group": CFG["NLL_CHUNKS_PER_GROUP"],
         "groups": len(groups),
@@ -183,6 +258,7 @@ def stage_s6_nll(deadline):
         "measured_throughput": measured,
         "statistics_note": ("NLL_GROUPS 只用于 pilot 估计。bootstrap 的 n 是**组数**不是 token 数，"
                             "组间 token 数也不严格相等；正式 CI 应按独立文档重新设计。"),
+
         "provenance": {
             "inputs": {f: {"path": r["path"], "bytes": r["bytes"],
                            "source": r.get("source"),
@@ -214,9 +290,19 @@ def stage_s6_nll(deadline):
           f"char_weighted={stats['char_weighted_mean']:+.4f}  "
           f"CI95={stats['ci95']}  n={stats['n']}")
     print(f"公平性已核验: {fairness_verified}（级别 {fair_level}）")
+    if isolation.get("ok") is not None:
+        _ov = isolation["actual_imatrix_calib_overlap"]
+        print(f"隔离：原始交集 {isolation['overlap_lines']} 段 → "
+              f"clean holdout 剔除 {isolation['cleaning']['removed_paras']} 段、"
+              f"保留 {isolation['cleaning']['kept_paras']} 段"
+              f"（≈{isolation['cleaning']['kept_tokens_est']} token）")
+        print(f"actual_imatrix_calib_overlap = {_ov['value']}（level {_ov['level']}）"
+              + ("；近似窗口检查见 isolation.json" if _ov.get("prefix_window_check") else ""))
     print("执行设备: " + ", ".join(f"{f}={d['device']}(-ngl {d['ngl']})"
                                   for f, d in dev_by_fmt.items()))
-    print(f"实测吞吐: {measured['tok_per_sec']} tok/s（{elapsed:.0f} s，{tokens_done} token）")
+    print(f"实测吞吐: {measured['tok_per_sec']} tok/s（{elapsed:.0f} s，"
+          f"{measured['tokens_used_for_rate']} token，来源：{measured['token_count_source']}）")
+
     print("=" * 78)
 
     ci = stats.get("ci95")
@@ -243,6 +329,121 @@ QUALITY_PROMPTS_DEFAULT = [
     "Translate 'good morning' into Chinese:",
 ]
 
+# **smoke** 用的期望片段（小写、子串匹配）。这不是能力评测：
+# 它的唯一用途是区分"模型在正常续写"与"输出是 banner / 乱码 / 空"。
+# 命中率低**不能**推出"IQ2 比 IQ4 差"；命中率高也**不能**推出"两个量化都好"。
+QUALITY_SMOKE_EXPECT = {
+    "The capital of France is": ["paris"],
+    "def fibonacci(n):": ["return", "fib"],
+    "In 1969, the first humans landed on": ["moon"],
+    "The chemical formula for table salt is": ["nacl"],
+    "Q: What is 17 * 23?\nA:": ["391"],
+    "The three primary colors of light are": ["red", "green", "blue"],
+    "Translate 'good morning' into Chinese:": ["早上好", "早安"],
+}
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+# llama.cpp 的元信息行（banner / 计时 / 采样参数 / 模型加载）。
+# 只用于**剥掉**它们，绝不把整行内容当生成文本。
+_META_LINE_RE = re.compile(
+    r"^(?:"
+    r"llama_perf|llama_print_timings|llama_model_loader|llama_context|llama_kv_cache|"
+    r"llama_model_quantize|llama_new_context|ggml_|load_backend|load_tensors|"
+    r"register_backend|system_info|sampling|generate|main|build|model params|"
+    r"print_info|using device|CUDA|ggml_cuda|"
+    r"load time|prompt eval time|eval time|total time|sampling time|"
+    r"[IWED]\s+\d{2}:\d{2}:\d{2}"
+    r")\b",
+    re.I,
+)
+
+
+def _is_meta_line(line):
+    s = line.strip()
+    if not s:
+        return False
+    return bool(_META_LINE_RE.match(s))
+
+
+def extract_generation(log_text, prompt=None):
+    """从 `llama-cli` 的混合日志里只取**生成文本**（v1.2.0）。
+
+    旧版是 `txt.split(prompt, 1)[1]`，再按 `llama_perf` 切一刀。两个问题：
+      · `split(..., 1)` 取**第一处** prompt —— banner 里若回显 prompt（或 prompt
+        是常见词），会把 banner 之后的所有东西都当成生成；
+      · 只认 `llama_perf`，别的版本打的是 `llama_print_timings`，计时行会混进
+        "生成文本"，于是两个模型的 `identical` 比较被噪声决定。
+
+    这里按结构切：ANSI → 去掉尾部计时 → 从最后一个 `generate:` / `sampling:`
+    块之后开始 → 去掉 prompt 回显 → 去掉 `[end of text]` → 去掉残余元信息行。
+    返回的每个字段都能进 JSON，方便事后复核"到底比的是什么"。
+    """
+    raw = log_text or ""
+    clean = _ANSI_RE.sub("", raw)
+    lines = clean.split("\n")
+
+    # 1) 尾部：第一条计时/加载行之后全部丢弃
+    cut = len(lines)
+    for i, ln in enumerate(lines):
+        if re.match(r"^(llama_perf|llama_print_timings|llama_model_loader)",
+                    ln.strip(), re.I):
+            cut = i
+            break
+    body_lines = lines[:cut]
+
+    # 2) 头部：最后一个 generate:/sampling: 块之后才是正文
+    start = 0
+    for i, ln in enumerate(body_lines):
+        s = ln.strip()
+        if re.match(r"^(generate:|sampling:)", s, re.I):
+            start = i + 1
+    # 跳过紧跟其后的参数续行（以 tab / 空格开头）与空行
+    while start < len(body_lines) and (
+            not body_lines[start].strip() or body_lines[start][:1] in ("\t", " ")):
+        start += 1
+    # 3) 再跳过残余的 banner 行（build:/main:/system_info:/model params ...）
+    while start < len(body_lines) and _is_meta_line(body_lines[start]):
+        start += 1
+    body = "\n".join(body_lines[start:])
+
+    prompt_echoed = False
+    if prompt:
+        if prompt in body:
+            prompt_echoed = True
+            body = body.rsplit(prompt, 1)[1]      # 取**最后**一处，不是第一处
+        elif prompt.strip() and prompt.strip() in body:
+            prompt_echoed = True
+            body = body.rsplit(prompt.strip(), 1)[1]
+
+    # 4) 交互式提示符与结束标记
+    body = body.strip()
+    while body.startswith(">"):
+        body = body[1:].lstrip()
+    body = body.replace("[end of text]", "").strip()
+
+    # 5) 兜底：清掉夹在正文里的元信息行（只删整行匹配的）
+    kept = [ln for ln in body.split("\n") if not _is_meta_line(ln)]
+    dropped = len(body.split("\n")) - len(kept)
+    body = "\n".join(kept).strip()
+
+    return {
+        "text": body,
+        "chars": len(body),
+        "empty": not body,
+        "prompt_echoed": prompt_echoed,
+        "dropped_meta_lines": dropped,
+        "raw_chars": len(raw),
+        "sha256": __import__("hashlib").sha256(body.encode("utf-8")).hexdigest(),
+    }
+
+
+def smoke_match(prompt, text):
+    """期望片段命中（**smoke**，不是评分）。"""
+    exp = QUALITY_SMOKE_EXPECT.get(prompt) or []
+    low = (text or "").lower()
+    hit = next((e for e in exp if e in low), None) if exp else None
+    return {"expected_any": exp, "matched": bool(hit) if exp else None, "hit": hit}
 
 
 def probe_help(binary):
@@ -315,11 +516,21 @@ def stage_s7_quality(deadline):
             run_cmd(cmd, logf, deadline)          # rc != 0 直接抛，不再当成功
 
             txt = logf.read_text(errors="replace")
-            body = txt.split(pr, 1)[1] if pr in txt else txt
-            body = body.replace("llama_perf", "\nllama_perf").split("\nllama_perf")[0].strip()
-            per_model[fmt].append({"prompt": pr, "text": body[:400],
-                                   "repeat4": round(repeat_ratio(body), 4),
-                                   "chars": len(body)})
+            g = extract_generation(txt, pr)
+            row = {"prompt": pr, "text": g["text"][:400],
+                   "text_sha256": g["sha256"], "chars": g["chars"],
+                   "empty": g["empty"],
+                   "prompt_echoed": g["prompt_echoed"],
+                   "dropped_meta_lines": g["dropped_meta_lines"],
+                   "raw_chars": g["raw_chars"],
+                   "repeat4": round(repeat_ratio(g["text"]), 4),
+                   "smoke": smoke_match(pr, g["text"]),
+                   "log": str(logf)}
+            per_model[fmt].append(row)
+            if g["empty"]:
+                log(f"!! {fmt} p{i} 的生成文本为空（rc=0）—— 记为空输出，不算有效样本")
+            elif g["dropped_meta_lines"]:
+                log(f"  {fmt} p{i}: 已剥掉 {g['dropped_meta_lines']} 行元信息/计时")
         log(f"释放 {fmt}")
 
     pairs = []
@@ -331,15 +542,25 @@ def stage_s7_quality(deadline):
         while k < min(len(a), len(b)) and a[k] == b[k]:
             k += 1
         pairs.append({"prompt": pr, "identical": a == b, "first_divergence_char": k,
-                      "len_iq2": len(a), "len_iq4": len(b)})
+                      "len_iq2": len(a), "len_iq4": len(b),
+                      "both_empty": (not a and not b)})
 
     n_id = sum(1 for p in pairs if p["identical"])
+    empty = {fmt: sum(1 for x in v2 if x["empty"]) for fmt, v2 in per_model.items()}
+    sm = {}
+    for fmt, v2 in per_model.items():
+        got = [x["smoke"]["matched"] for x in v2 if x["smoke"]["matched"] is not None]
+        sm[fmt] = {"matched": sum(1 for x in got if x),
+                   "of": len(got),
+                   "rate": round(sum(1 for x in got if x) / len(got), 4) if got else None}
     out = {
         "n_prompts": len(prompts),
         "identical_outputs": n_id,
         "identical_rate": round(n_id / len(prompts), 4) if prompts else None,
         "pairs": pairs,
         "per_model": per_model,
+        "empty_outputs": empty,
+        "smoke_match": sm,
         "degenerate": {fmt: round(sum(x["repeat4"] for x in v2) / len(v2), 4)
                        for fmt, v2 in per_model.items()},
         "settings": {"temperature": 0, "seed": CFG["SEED"],
@@ -347,26 +568,42 @@ def stage_s7_quality(deadline):
                      "ngl": {f: d["ngl"] for f, d in dev_by_fmt.items()},
                      "device": {f: d["device"] for f, d in dev_by_fmt.items()},
                      "one_model_at_a_time": True,
-                     "gpu_allowed": bool(CFG["EVAL_ALLOW_GPU"])},
+                     "gpu_allowed": bool(CFG["EVAL_ALLOW_GPU"]),
+                     "parser": "extract_generation/v1.2.0"},
+        "evidence": {
+            "identical_outputs": "smoke_only",
+            "repeat4": "degenerate_signal_only",
+            "smoke_match": "smoke_only_substring_not_benchmark",
+            "can_rank_quality": False,
+            "why": ("8 题 × 32 token 的贪心续写只能发现整体崩塌（空输出、乱码、"
+                    "复读），**不能**排序 IQ2 与 IQ4 的细微质量差异。"
+                    "0/8 完全一致不等于 IQ2 更差；8/8 一致也不等于两者等价。"),
+        },
         "provenance": {
             "inputs": {f: {"path": r["path"], "source": r.get("source"),
-                           "sha256_verified": r.get("sha256_verified")}
+                           "sha256_verified": r.get("sha256_verified"),
+                           "origin_detail": r.get("origin_detail")}
                        for f, r in models.items()},
-            "note": "输入来自 HF 上已存的量化产物或本地 S4 产物，本次未重量化",
+            "note": ("输入来自 HF 上已存的量化产物或本地 S4 产物，本次未重量化；"
+                     "source=hf_cache 表示本地文件带 HF 下载 stamp（不是本次量化）。"),
         },
         "limits": [
             "贪心解码 + 32 token，样本量很小，只能发现整体崩塌，不能排序细微质量",
             "不是标准任务评测（GSM8K / HumanEval 之类），绝对分数不构成能力证据",
             "repeat4 只是退化信号，不是质量分数",
+            "smoke_match 是子串匹配，用来排除 banner/空输出，不是准确率",
         ],
     }
     print("=" * 78)
-    print(f"完全一致的输出: {n_id}/{len(prompts)}  ({out['identical_rate']})")
+    print(f"完全一致的输出: {n_id}/{len(prompts)}  ({out['identical_rate']}) "
+          "—— smoke，不是质量结论")
+    print(f"空输出: {empty}；期望片段命中（smoke）: {sm}")
     print(f"平均 repeat4: {out['degenerate']}")
     for p in pairs:
         print(f"  div@{p['first_divergence_char']:4d}  {p['prompt'][:44]}")
     print("=" * 78)
     return out
+
 
 
 
@@ -394,8 +631,15 @@ def stage_s8_bf16_anchor(deadline):
         print(json.dumps(d, indent=1, ensure_ascii=False, default=str))
         return d
 
-    eval_txt = need("EVAL_TXT")
+    # v1.2.0：锚点必须与 S6 用**同一份** clean holdout，否则 rho 的分子分母
+    # 不是同一个评测集，比出来的东西没有意义。
+    _s6 = _get("S6_NLL") or {}
+    if _s6.get("eval_used_txt"):
+        eval_txt = Path(_s6["eval_used_txt"])
+    else:
+        eval_txt = need("EVAL_TXT")
     groups, meta = split_eval(eval_txt, CFG["NLL_GROUPS"], WORK / "eval_groups")
+
     vals = []
     for i, g in enumerate(groups):
         check_deadline(deadline, f"S8 g{i}")
@@ -447,7 +691,11 @@ def stage_sx_explore(deadline):
     }
 
     if CFG["EVAL_TXT"] and Path(CFG["EVAL_TXT"]).exists():
-        groups, meta = split_eval(Path(CFG["EVAL_TXT"]), CFG["NLL_GROUPS"], WORK / "eval_groups")
+        # 与 S6 同口径：有 clean holdout 就用它
+        _s6 = _get("S6_NLL") or {}
+        evp = Path(_s6["eval_used_txt"]) if _s6.get("eval_used_txt") else Path(CFG["EVAL_TXT"])
+        groups, meta = split_eval(evp, CFG["NLL_GROUPS"], WORK / "eval_groups")
+
         vals = []
         for i, g in enumerate(groups):
             check_deadline(deadline, f"SX g{i}")

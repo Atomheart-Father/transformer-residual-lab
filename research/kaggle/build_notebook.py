@@ -15,6 +15,12 @@
   排在编译之前（没 token 就 3 秒内停）、失败写 `FAILURE.json` 且最早根因不被覆写。
 * v1.1.3：修 tree API 的 HTTP 400（`expand=true` + `limit=1000` 被 Hub 拒），
   错误正文留证并脱敏，失败分类按状态码（400 ≠ 凭据问题）。
+* v1.2.0：S6/S7 系统性审计 —— 隔离改为"取证 + 确定性 clean holdout"（不再
+  见 1 行文本匹配就整轮归零），`actual_imatrix_calib_overlap` 证明不了时
+  如实写 `unknown`；HF 下载链路修 4 个真实 bug（resolve URL 前缀 /
+  `size`↔`bytes` schema 统一 / 同源 200 带 Bearer 而 CDN 302 绝不透传 /
+  来源按 `.hf.json` stamp 判定）；S6 读日志自报 token 数，S7 重写日志提取；
+  `EVAL_SUMMARY` 区分部分成功，空 NLL 记 null 不当零差。
 
 用法：
     python3 build_notebook.py                 # 钉当前 HEAD（要求工作区干净）

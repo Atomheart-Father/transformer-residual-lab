@@ -291,7 +291,11 @@ def repo_files(repo, revision="main", token=None, dataset=False, max_pages=20):
             if not isinstance(e, dict) or e.get("type") != "file":
                 continue
             lfs = e.get("lfs") or {}
-            out.append({"path": e["path"], "size": int(e.get("size") or 0),
+            size = int(e.get("size") or 0)
+            # v1.2.0：`size` 是 HF API 的字段名，`bytes` 是下载器内部的名字。
+            # 两边都写、且必须相等 —— 只写一个的话，调用方一定会有人读错，
+            # 而读错的表现是"缓存校验被静默跳过"（v1.1.3 的真实 bug）。
+            out.append({"path": e["path"], "size": size, "bytes": size,
                         "sha256": lfs.get("oid"), "is_lfs": bool(lfs)})
         link = _h(hdrs, "link")
         nxt = None
@@ -316,14 +320,42 @@ def repo_sha(repo, revision="main", token=None, dataset=False):
 
 
 def resolve_url(repo, revision, path, dataset=False):
-    kind = "datasets/" if dataset else "models/"
+    """下载（resolve）URL。
+
+    **模型仓库没有 `/models/` 前缀**；dataset 才有 `datasets/`。
+    这与 REST API 的 `/api/models/...`、`/api/datasets/...` 是两套不同的路径，
+    混用会 404（v1.1.3 的真实 Kaggle 现场：两个 GGUF 都 404）。
+    """
+    kind = "datasets/" if dataset else ""
     return f"{HF_BASE}/{kind}{repo}/resolve/{revision}/{path}"
 
 
-def resolve_signed(url, token=None):
-    """把 resolve URL 换成最终的（带签名的）CDN 地址，顺带取 x-linked-etag。
+def _same_origin(url, base=HF_BASE):
+    """url 是否与 HF 同源（https + 同一 host + 同一端口）。
 
-    私有仓库的 302 目标自带签名；对那个地址**不要**再带 Authorization。
+    Authorization **只能**发到同源地址。302 到 CDN 之后，签名本身即凭据，
+    再带 Bearer 既没用也可能被拒（v1.0.2 已踩过）。
+    """
+    from urllib.parse import urlsplit
+    try:
+        a, b = urlsplit(url), urlsplit(base)
+    except Exception:
+        return False
+    return (a.scheme == b.scheme and a.hostname == b.hostname
+            and (a.port or 0) == (b.port or 0))
+
+
+def resolve_signed(url, token=None):
+    """把 resolve URL 换成最终下载地址，并说清它是**哪一类**地址。
+
+    返回 dict：
+      · `kind="signed_cdn"`    —— 302/307 到带签名的 CDN：**不要**带 Authorization
+      · `kind="direct_origin"` —— 200/206 直接返回 HF 同源地址：私有仓库的
+        非 LFS 小文件（provenance.json 之类）走这条，**必须**带 Bearer
+      · `etag` —— `x-linked-etag`（= LFS oid = 内容 sha256），非 LFS 时为空
+
+    v1.1.3 的 bug：只返回 URL，下载器一律不带 token，于是私仓里 2 KB 的
+    provenance.json 401 —— 大 GGUF 是 302 到 CDN（不需要 token），所以只有小文件失败。
     """
     st, hdrs, _body = _http_get(url, headers=_auth_headers(token),
                                 follow=False, read_body=False)
@@ -332,12 +364,14 @@ def resolve_signed(url, token=None):
         loc = _h(hdrs, "location")
         if not loc:
             raise GuardError(f"302 但没有 Location 头：{url}")
-        return loc, etag
+        return {"url": loc, "etag": etag, "kind": "signed_cdn",
+                "status": st, "same_origin": _same_origin(loc)}
     if st in (200, 206):
-        return url, etag            # 公开仓库可以直连，没有跳转
+        return {"url": url, "etag": etag, "kind": "direct_origin",
+                "status": st, "same_origin": _same_origin(url)}
     if st in (401, 403, 404):
-        raise GuardError(f"取 {url} 失败（HTTP {st}）。\n" + _no_token_hint("该仓库"))
-    raise GuardError(f"取 {url} 失败（HTTP {st}）。")
+        raise HFHttpError(st, f"取 {url} 失败（HTTP {st}）。\n" + _no_token_hint("该仓库"))
+    raise HFHttpError(st, f"取 {url} 失败（HTTP {st}）。")
 
 
 # ---------------------------------------------------------------- 下载
@@ -347,19 +381,64 @@ def _stamp_path(dst):
     return dst.with_name(dst.name + ".hf.json")
 
 
+def normalize_expect(expect):
+    """把 tree 条目 / 调用方字典统一成 `{path, bytes, sha256, is_lfs}`。
+
+    v1.1.3 的真实事故：`repo_files()` 给的是 `size`，`fetch_file()` 读的是
+    `expect["bytes"]` → `KeyError: 'bytes'`；更隐蔽的是 `_cached()` 里
+    `expect.get("bytes")` 恒为 None，于是**远端大小校验被静默跳过**。
+
+    规则（fail-closed）：
+      · `size` 与 `bytes` 都给时必须相等，否则拒收；
+      · 都不给 / 不是正整数 → 拒收（没有期望大小就没法判"下完了"）；
+      · `sha256` 允许为空（非 LFS 文件），但会把 `sha256_verified` 记成 False。
+    """
+    if expect is None:
+        raise GuardError("normalize_expect: expect 不能为 None（先查 tree）")
+    if not isinstance(expect, dict):
+        raise GuardError(f"normalize_expect: expect 必须是 dict，收到 {type(expect).__name__}")
+    size, byt = expect.get("size"), expect.get("bytes")
+    if size is not None and byt is not None and int(size) != int(byt):
+        raise GuardError(
+            f"normalize_expect: size={size} 与 bytes={byt} 不一致（path={expect.get('path')}）"
+            "—— 调用方把两种 schema 混在一起了，不能猜哪个对。")
+    val = size if size is not None else byt
+    try:
+        val = int(val)
+    except (TypeError, ValueError):
+        raise GuardError(
+            f"normalize_expect: 没有可用的文件大小（expect={expect}）。"
+            "必须先用 tree API 拿到 size/bytes 再下载。")
+    if val <= 0:
+        raise GuardError(f"normalize_expect: 文件大小必须 > 0，收到 {val}")
+    sha = expect.get("sha256") or None
+    if sha is not None:
+        sha = str(sha).strip().strip('"').lower()
+        if len(sha) != 64:
+            raise GuardError(
+                f"normalize_expect: sha256 长度不对（{len(sha)}）—— "
+                "非 LFS 文件没有内容 sha256，应当留空而不是塞 git blob sha1。")
+    return {"path": expect.get("path"), "size": val, "bytes": val,
+            "sha256": sha, "is_lfs": bool(expect.get("is_lfs", bool(sha)))}
+
+
 def _cached(dst, expect, repo, revision):
-    """本地已有文件能否直接复用（不重算 4.5 GiB 的 sha256）。"""
+    """本地已有文件能否直接复用（不重算 4.5 GiB 的 sha256）。
+
+    `expect` 必须是 `normalize_expect()` 的输出 —— 这样 size 校验**不可能**
+    因为字段名写错而被跳过（v1.1.3 的隐性 bug）。
+    """
     dst = Path(dst)
     if not dst.exists():
         return None
-    if expect.get("bytes") and dst.stat().st_size != int(expect["bytes"]):
+    if dst.stat().st_size != int(expect["bytes"]):
         return None
     st = _read_json(_stamp_path(dst))
     if not isinstance(st, dict):
         return None
     if st.get("repo") != repo or st.get("revision") != revision:
         return None
-    if expect.get("bytes") and st.get("bytes") != int(expect["bytes"]):
+    if st.get("bytes") != int(expect["bytes"]):
         return None
     if expect.get("sha256") and st.get("sha256") != expect["sha256"]:
         return None
@@ -373,7 +452,13 @@ def fetch_file(repo, path, dst, deadline, revision="main", token=None,
                expect=None, dataset=False, tag=None, force=False):
     """按 tree 的 size/lfs.oid 校验着把 path 下到 dst（断点续传 + 复用）。
 
-    返回 {path, bytes, sha256, origin, sha256_verified, repo, revision, url}。
+    返回 {path, bytes, sha256, origin, sha256_verified, repo, revision, url,
+          fetch_auth}。
+
+    `fetch_auth` 记录这次下载**有没有带 Bearer**，以及为什么：
+      · `bearer_same_origin` —— 200/206 直连 HF 同源（私仓非 LFS 小文件），带
+      · `none_signed_cdn`    —— 302 到签名 CDN，签名即凭据，绝不转发 token
+      · `none_no_token`      —— 没 token（公开仓库）
     """
     dst = Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -386,6 +471,7 @@ def fetch_file(repo, path, dst, deadline, revision="main", token=None,
                 f"{repo}@{revision} 里没有 `{path}`。\n"
                 f"  现有文件（前 20 个）：{sorted(entries)[:20]}")
         expect = entries[path]
+    expect = normalize_expect(expect)
 
     if not force:
         hit = _cached(dst, expect, repo, revision)
@@ -394,7 +480,8 @@ def fetch_file(repo, path, dst, deadline, revision="main", token=None,
             return hit
 
     url = resolve_url(repo, revision, path, dataset)
-    signed, etag = resolve_signed(url, token)
+    r = resolve_signed(url, token)
+    signed, etag, kind = r["url"], r["etag"], r["kind"]
     if expect.get("sha256") and etag and etag != expect["sha256"]:
         raise GuardError(
             f"{tag}: resolve 响应头 x-linked-etag 与 tree 的 lfs.oid 不一致。\n"
@@ -402,21 +489,35 @@ def fetch_file(repo, path, dst, deadline, revision="main", token=None,
             f"  etag      {etag}\n"
             "上游在两次请求之间换过文件，拒绝继续。")
 
+    # 只在"直连 HF 同源"时带 Bearer。CDN 地址一律不带。
+    if token and kind == "direct_origin" and r.get("same_origin"):
+        auth = _auth_headers(token)
+        fetch_auth = "bearer_same_origin"
+    elif token:
+        auth, fetch_auth = None, ("none_signed_cdn" if kind == "signed_cdn"
+                                  else "none_cross_origin")
+    else:
+        auth, fetch_auth = None, "none_no_token"
+
     pin = {"url": url, "bytes": int(expect["bytes"]),
            "sha256": expect.get("sha256") or None}
-    meta = _fetch_pinned_blob(pin, dst, deadline, tag, fetch_url=signed)
+    meta = _fetch_pinned_blob(pin, dst, deadline, tag, fetch_url=signed,
+                             auth_headers=auth)
     local_sha = meta["sha256"]
     write_json(_stamp_path(dst), {
         "repo": repo, "revision": revision, "path": path,
         "bytes": meta["bytes"], "sha256": local_sha,
         "sha256_verified": bool(expect.get("sha256")),
         "tree_oid": expect.get("sha256"), "url": url,
+        "fetch_auth": fetch_auth, "fetch_url_kind": kind,
         "fetched_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     })
     return {"path": str(dst), "bytes": meta["bytes"], "sha256": local_sha,
             "origin": "downloaded",
             "sha256_verified": bool(expect.get("sha256")),
-            "repo": repo, "revision": revision, "url": url}
+            "repo": repo, "revision": revision, "url": url,
+            "fetch_auth": fetch_auth, "fetch_url_kind": kind}
+
 
 
 def fetch_many(repo, items, deadline, revision="main", token=None,
@@ -432,6 +533,85 @@ def fetch_many(repo, items, deadline, revision="main", token=None,
                                deadline, revision=revision, token=token,
                                expect=entries[path], dataset=dataset)
     return out
+
+
+# ---------------------------------------------------------------- 轻量探测
+
+_CONTENT_RANGE_RE = re.compile(r"bytes\s+(\d+)-(\d+)/(\d+|\*)", re.I)
+
+
+def probe_remote_file(repo, path, deadline=None, revision="main", token=None,
+                      expect=None, dataset=False, timeout=None):
+    """`Range: bytes=0-0` 探测一个远端文件：**不下载正文**也能验完整下载链路。
+
+    存在理由（v1.2.0）：真实 Kaggle 上连续踩了三个只在"真下载"时才暴露的 bug
+    （resolve URL 多了 `/models/`、`expect` 字段名不对、私仓小文件没带 Bearer）。
+    每次都要下 2.5 / 4.3 GiB 才能发现。这里只取第 1 个字节，一次几秒：
+
+      1. `resolve_url()` 对不对（404 → 立刻知道是路径拼错）
+      2. `resolve_signed()` 的分类对不对（signed_cdn / direct_origin）
+      3. 私仓直连 200 有没有带 Bearer（401 → 立刻知道）
+      4. CDN 的 `Content-Range` 总长是否等于 tree 的 size（对不上 → 上游换过文件）
+      5. `x-linked-etag` 是否等于 tree 的 lfs.oid
+
+    返回 dict，`ok=False` 时 `why` 里是**一条**原因。
+    """
+    if expect is None:
+        entries = {e["path"]: e for e in repo_files(repo, revision, token, dataset)}
+        if path not in entries:
+            raise GuardError(f"{repo}@{revision} 里没有 `{path}`；"
+                             f"现有：{sorted(entries)[:20]}")
+        expect = entries[path]
+    expect = normalize_expect(expect)
+
+    url = resolve_url(repo, revision, path, dataset)
+    out = {"repo": repo, "revision": revision, "path": path,
+           "resolve_url": url, "expect_bytes": expect["bytes"],
+           "expect_sha256": expect.get("sha256"), "ok": False, "why": None}
+    try:
+        r = resolve_signed(url, token)
+    except HFHttpError as e:
+        out.update(stage="resolve", http_status=e.status,
+                   why=f"resolve 失败 HTTP {e.status}：{str(e)[:300]}")
+        return out
+    out.update(url_kind=r["kind"], resolve_status=r["status"],
+               same_origin=r.get("same_origin"))
+    if expect.get("sha256") and r.get("etag") and r["etag"] != expect["sha256"]:
+        out.update(stage="resolve",
+                   why=(f"x-linked-etag 与 tree oid 不一致（etag {r['etag'][:12]}… "
+                        f"vs oid {expect['sha256'][:12]}…）"))
+        return out
+    out["etag"] = r.get("etag") or None
+
+    auth = (_auth_headers(token)
+            if (token and r["kind"] == "direct_origin" and r.get("same_origin"))
+            else None)
+    out["probe_auth"] = "bearer_same_origin" if auth else "none"
+    hdrs = dict(auth or {})
+    hdrs["Range"] = "bytes=0-0"
+    st, hdrs2, _body = _http_get(r["url"], headers=hdrs, timeout=timeout or 30,
+                                 read_body=False)
+    total = None
+    cr = _h(hdrs2, "content-range")
+    m = _CONTENT_RANGE_RE.match(cr or "")
+    if m and m.group(3) != "*":
+        total = int(m.group(3))
+    elif st == 200:
+        total = int(_h(hdrs2, "content-length") or 0) or None
+    out.update(probe_status=st, content_range=cr or None, total_bytes=total,
+               content_length=_h(hdrs2, "content-length") or None)
+    if st not in (200, 206):
+        out.update(stage="range_get",
+                   why=f"取第 1 个字节失败（HTTP {st}）—— 鉴权/路径/上游问题")
+        return out
+    if total is not None and total != expect["bytes"]:
+        out.update(stage="size",
+                   why=(f"远端总长 {total} 与 tree 的 {expect['bytes']} 不符 —— "
+                        "上游在两次请求之间换过文件"))
+        return out
+    out.update(ok=True, stage="ok")
+    return out
+
 
 
 # ---------------------------------------------------------------- 上传（opt-in）

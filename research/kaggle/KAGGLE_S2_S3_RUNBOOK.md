@@ -427,6 +427,10 @@ S3 成功后 Q8_0 会被回收（8.11 GiB），所以 S4 **不再要求**读 ima
 
 ## 六之二、S6/S7：只评测，不再量化（v1.1.0）
 
+**v1.2.0 起（2026-10-23 系统性审计）**：S6 不再"见 1 行重叠就整轮归零"，改为
+取证 → 剔除 → 用同一份 clean holdout；`actual_imatrix_calib_overlap` 无法证明时
+如实写 `unknown`。缺二进制仍会自动只编 S2，不需要第二个开关。
+
 **前提**：S4/S5 的产物已经备份在 HF 私有仓库 `Atomheart-Father/trlab-qwen3-8b-quant-pilot`
 （commit `097e692`），包含 `qwen3-8b-IQ2_XS.gguf`、`qwen3-8b-IQ4_XS.gguf`、
 `imatrix.gguf` 与三份 `*.provenance.json`。所以这一节**不需要 BF16、不需要 S3、
@@ -564,6 +568,9 @@ CPU 被拦时预检给三个选项，不是跑一半被杀：缩小 pilot / 开 
 | `cause=hf_rate_limited`（429/5xx） | 同上 | Hub 侧限流或临时故障，等 30–60 秒重跑，不用改配置 |
 | `cause=hf_network` | 同上 | 连不上 HF：先确认 `Settings → Internet = On`，再看 Kaggle 出口；不涉及 token |
 | `cause=binaries_missing` | 同上 | **你不需要单独开 S2**：v1.1.2 起 `RUN_EVAL=True` 会自动只编 S2。若它反复出现，看 `S2_BUILD` 的日志 |
+| `isolation` 报剔除比例超限 / 保留段数不足 | `out/isolation/isolation.json` | 评测集里有 >10% 的段与校准集共享前 200 字符（像把 train 当 eval），或清洗后不足 20 段。**不要**调大 `ISOLATION_MAX_DROP_FRAC` 绕过；核对 `EVAL_TXT` 是否真的指向 test split |
+| `normalize_expect` / `size 与 bytes 不一致` | `FAILURE.json` | 调用方混用了两种 schema —— 这是代码缺陷，不是环境问题。把 `FAILURE.json` 贴回 Issue #5 |
+| `实际污染`（交集里出现 `full_equal=true`） | `out/isolation/isolation.json` 的 `overlap_raw.details` | 整段完全相同才需要认真对待：换 `EVAL_TXT` 或先重跑 S3 换校准子集，**不要**跳过断言 |
 | `cause=s2_build_failed` | `out/S2_BUILD.json` + `logs/s2_*.log` | 编译本身失败，S6/S7 已主动跳过。按第七节修 S2 |
 | `估算 X h 超过上限` | `out/S6_NLL.json` 的 `cost_estimate` | 按 6.2.4 的三选一；最省事是开 GPU Session |
 | `sha256 与 HF 不符` | 同上 | 本地缓存坏了。删掉那个 GGUF 重跑（`.partial` 会续传，但哈希不符必须整个重来） |
@@ -661,7 +668,7 @@ fairness_level、逐格式设备、吞吐、S7 的 identical_rate、upload 状�
 19. **v1.0 的引导格未在真实 Kaggle 上跑过**（本地已验证）：GitHub 匿名 sparse fetch、`rev-parse` 强校验、stamp 复用都在干净目录实测通过，但 Kaggle 镜像里 `git` 的版本与 `core.sparseCheckout` 支持情况、以及 Kaggle 出口到 github.com 的带宽/限流未实测。失败时的报错信息会说明原因，`--embed` 内嵌变体可绕过仓库依赖。
 20. **仓库转私有后匿名 fetch 会失效**。当前 GitHub 仓库是 public（用户 2026-10-22 设为公开）。若之后转回私有，用 `python3 build_notebook.py --embed` 生成内嵌执行包的版本，或在 Kaggle 环境里配好身份。
 21. **Kaggle 上重复 `Run All` 的 stamp 复用未实测**：同一 Session 内第二次执行应命中 `_trlab_src/.trlab_commit` 直接复用、不重新 fetch；这是本地验证过的逻辑，Kaggle 上的 `/kaggle/working` 持久化行为（第 7 条）会叠加影响。
-22. **S6/S7 从未在真实 Kaggle 上跑通过**（v1.1.3）。155 项测试全是 CPU/mock，`test_s6_end_to_end_from_hf` 用的是假 HF 服务器桩。2026-10-23 的真实首跑在**评测开始前**就停了（缺二进制 + 私仓无 token），只留下 11 秒的失败现场。**所以"量化对 NLL / 质量的影响"目前没有数据**，报告那两节会写 "S6/S7 not yet evaluated" 或直接标"失败"。
+22. **S6/S7 从未在真实 Kaggle 上跑通过**（v1.2.0）。171 项测试全是 CPU/mock，`test_s6_end_to_end_from_hf` 用的是假 HF 服务器桩。2026-10-23 的真实首跑在**评测开始前**就停了（缺二进制 + 私仓无 token），只留下 11 秒的失败现场。**所以"量化对 NLL / 质量的影响"目前没有数据**，报告那两节会写 "S6/S7 not yet evaluated" 或直接标"失败"。
    - 附带：**自动只编 S2 与凭据门只在 mock + 本机 macOS 上走过**（v1.1.2）。真实 Kaggle 的 CUDA 编译（`CUDA_ARCH=75` / `BUILD_JOBS=4`）与"`RUN_EVAL` 自动开 S2"这条路径都**没有真机证据**；本机复现的是"无 token + 无二进制 → 3.1 s fail fast、两条根因、不开始编译"。
 23. **HF 真实下载只验到 401 路径**。`python -m trlab --check-hf` 在无 token 时正确报 `token_present: false` + 401 + 三条取 token 的路（真机 macOS 跑过）；**带 token 下载 2.7 / 4.56 GiB 未实测**。断点续传逻辑与 S3 的 Q8_0 下载共用同一份 `_fetch_pinned_blob`，那份是真机跑过的。
 24. **`hf_sidecar_declared` 级 fairness 未在真实 sidecar 上走过**。测试里是构造的；真实 sidecar 字段是否齐、跨 Session 会不会误判 `imatrix_base_consistent: false`，第一次真跑才知道。

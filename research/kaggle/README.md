@@ -946,7 +946,7 @@ CPU 不可行时 fail closed、预检在缺二进制时说唯一一步、
 `RUN_EVAL` 开关作用域、`run_ppl` 默认 `-ngl 0`、S6 从 HF 端到端、
 评测语料是 test split（不是 train）、`_ensure_eval_txt` 全流程。
 
-当前结果：**155/155 通过，约 50 秒**（v1.1.2 是 149 项、v1.1.1 是 144 项、v1.0.1 是 118 项；见第九之十～第九之十二）。
+当前结果：**171/171 通过，约 60 秒**（v1.1.3 是 155 项、v1.1.2 是 149 项、v1.1.1 是 144 项、v1.0.1 是 118 项；见第九之十～第九之十三）。
 
 
 ---
@@ -1230,13 +1230,98 @@ GET /api/models/openai-community/gpt2/tree/main?recursive=1&expand=true&limit=10
 
 ---
 
+## 九之十三、v1.2.0：S6/S7 系统性审计与稳定化（2026-10-23）
+
+真实首跑拿到两个 GGUF、S7 也真跑过之后，用户明确要求**停止靠热补丁让用户反复当
+集成测试员**，改为一次系统性审计。两个 P0 级科学/工程缺陷在这一轮修掉。
+
+### 1. 科学缺陷（优先于新功能）：1 行重叠 ≠ 污染
+
+v1.1.x 的隔离断言是"`calib.txt` 全文 vs `eval.txt` 全文按行求交，出现任意 1 条就
+`raise`，整轮 S6 归零"。它既**证明不了污染**（imatrix 只消费
+`IMATRIX_CHUNKS × IMATRIX_CTX ≈ 16.4k` token，而 train 有 10.6 MB，绝大多数段落
+从未进入校准），也**证明不了没有污染**（采样位置未知）。真实首跑正是被一句
+维基百科常见句式拦住。
+
+新模块 `trlab/isolation.py` 做三件可审计的事：
+
+| 机制 | 做法 |
+|---|---|
+| **取证** | 每条交集记完整文本 sha256、train/test 段索引与字符偏移、是否只是前 200 字符相同（`same_prefix200_only`）、是否 wiki 标题 |
+| **确定性 clean holdout** | 把与校准集规范化后前 200 字符相同的**评测段**剔除，产出 `eval_holdout.txt` + `isolation.json`（规则、剔除数量与被剔段全量哈希、保留段/字符/估算 token、holdout 自身 sha256）。两个量化用**完全同一份** holdout（S6 只切一次组） |
+| **诚实标注** | `actual_imatrix_calib_overlap` 只有本次真跑过 S3 并写下消费窗口时才有值，且等级仅 `derived_prefix_window`（llama-imatrix 顺序读文件，按 4 chars/token 近似）；否则一律 `unknown`，并明写"这不是已证明无污染" |
+
+仍然 fail-closed，但不再"见 1 行就全否"：剔除比例 >10%（像把 train 当 eval）或
+保留段数 <20 都会停下并说清原因，**不许调大上限把评测集清空**。
+
+### 2. 工程：一次梳理所有已发生真实故障
+
+| # | 故障 | 修法 |
+|---|---|---|
+| 1 | `resolve_url` 给模型仓库多了一段 `/models/` | 模型 `/{repo}/resolve/...`，dataset 保留 `datasets/`，API tree 仍是 `/api/models/` |
+| 2 | `repo_files()` 给 `size`、`fetch_file()` 读 `bytes` → `KeyError`；更隐蔽的是 `_cached()` 里 `expect.get("bytes")` 恒 None，**远端大小校验被静默跳过** | `normalize_expect()` 统一 schema：两者都给必须相等、都没有就拒收、git blob sha1 不许冒充 sha256；缓存复用前必校 size+sha |
+| 3 | 私仓非 LFS 小文件直接 200 被当"不需要凭据" → 401；同时 CDN 302 又怕把 token 透传到别的域 | `resolve_signed()` 返回 `kind`（`direct_origin` / `signed_cdn`）+ `same_origin`；**只有同源直连才带 Bearer**，CDN 一律不带。每次下载把 `fetch_auth` 写进 stamp |
+| 4 | HF 下载的文件被记成 `local_s4`；两个模型都在本地时 early return，不读 stamp、不补 sidecar | `_local_models()` 按 `.hf.json` stamp 判定来源（`hf_cache` / `local_s4` / `hf`），stamp 与磁盘不符直接报错；sidecar 一定尝试补齐，缺就写 `sidecar_missing` |
+| 5 | 同一 Session 二轮：`run_id` 不换、旧 `FAILURE.json` 把上次的 404 当这次的异常 | `_run_id(reset=True)` 每次运行换新；`_archive_failure()` 把上轮现场移到 `out/failures/<run_id>.json`，本轮从空白开始 |
+| 6 | S6 的 token 数是 `chunks × ctx` 的**假设**，语料不够长时 llama.cpp 少算也不告诉你 | `parse_ppl_log()` 纯函数读日志自报的 `tokenized N tokens` / `N tokens per chunk` / `n_ctx`，实测与请求值分开记录 |
+| 7 | S7 的"生成文本"是 `txt.split(prompt,1)[1]` 再按 `llama_perf` 切 —— banner 回显 prompt 时整段抓错，别的版本打 `llama_print_timings` 时计时行混进正文 | `extract_generation()` 按结构切：ANSI → 尾部计时 → 最后一个 `generate:`/`sampling:` 块 → 去 prompt 回显（取**最后**一处）→ 去 `[end of text]` → 去残余元信息行 |
+| 8 | S6 失败 S7 成功时报告看着像成功；空 NLL 被读成"零差" | `EVAL_SUMMARY` 写 `partial_success`；没有 NLL 时 `nll: null` + `nll_note`（"**不是**两个量化没有差别"）；逐阶段列出站状态 |
+
+### 3. 轻量预检（不下载 7 GiB、不编译）
+
+`hf.probe_remote_file()` 只发 `Range: bytes=0-0`（1 个字节）就能验完整下载链路：
+resolve → 鉴权方式 → 远端总长 vs tree 的 size。`verify_real_hf.py --probe`
+几秒出结果；`--small` 真下一个小文件（默认就是 S6 要用的 wikitext-2 test
+parquet，732,610 B）并做 size + 内容 sha256 双校验。
+
+### 4. 测试：155 → **171 项**（CPU、不联网、约 60 秒）
+
+| 测试 | 钉住什么 |
+|---|---|
+| `test_isolation_forensics_prefix_only_is_not_proof` | 只有前 200 字符相同 → `same_prefix200_only=True`；整段相同才 `full_equal` |
+| `test_clean_holdout_is_deterministic_and_auditable` | 同输入→逐字节相同 holdout；剔除段留下完整哈希；`actual_imatrix_calib_overlap=unknown` |
+| `test_holdout_refuses_when_train_used_as_eval` | 剔除 >10% 或保留 <20 段必须拒之门外，不许调上限绕过 |
+| `test_actual_imatrix_overlap_unknown_without_manifest` | 无 manifest → `unknown`；有 → `derived_prefix_window`，且明确"不是证明" |
+| `test_resolve_url_model_repo_has_no_models_prefix` | 模型 URL 无 `/models/`；dataset 有 `datasets/`；tree 用 `/api/models/` |
+| `test_normalize_expect_schema_is_fail_closed` | size/bytes 冲突、缺失、sha1 冒充 sha256 一律拒收 |
+| `test_fetch_file_uses_tree_size_and_never_skips_size_check` | tree 的 `size` 也参与校验；本地文件被改短不许当复用 |
+| `test_fetch_file_bearer_only_when_same_origin` | 同源 200 带 Bearer；CDN 302 与跨域直连绝不带 token |
+| `test_fetch_file_full_path_local_http_origin_and_cdn` | **真 socket** 全路径：本地起两个服务器，私仓同源 200 与 CDN 302 分别覆盖，GGUF 与 provenance JSON 同一套规则 |
+| `test_probe_remote_file_single_byte_range` | 探测只发 1 字节；size 不符/401 都明确失败，不装作成功 |
+| `test_parse_ppl_log_reads_observed_numbers` | PPL/NLL 来自日志；空输出/缺行 → `ok=False`；没有自报 token 数时不拿 nominal 冒充 |
+| `test_extract_generation_strips_banner_perf_ansi` | banner/perf/ANSI/回显 prompt 都不进正文；只差 banner 的两份日志正文 sha256 相同 |
+| `test_eval_summary_empty_nll_is_none_not_zero` | 空 NLL 是 `null` 不是 0；S6 失败 S7 成功 → `partial_success` |
+| `test_run_id_resets_and_archives_previous_failure` | 新 `run_id`；旧 `FAILURE.json` 归档；本轮异常不被上次 404 盖掉 |
+| `test_local_models_source_follows_hf_stamp` | HF 下载记 `hf_cache` 不记 `local_s4`；stamp 不符报错；缺 sidecar 明说缺 |
+| `test_s6_s7_mini_end_to_end_with_stub_binaries` | **mini end-to-end**：stub 二进制（真子进程、真日志）+ 本地假 GGUF，跑真 S6→S7→摘要。断言 PPL→NLL、paired delta>0、bootstrap CI、0/8 只当 smoke，不是 mock 数字伪成功 |
+
+### 5. 真机验收（本机 macOS）
+
+| 场景 | 结果 |
+|---|---|
+| 公开数据集仓库 + 修后 URL + 匿名 `repo_files()` | 200，LFS 文件带 `lfs.oid` |
+| `--probe`（真实 wikitext test parquet） | 302 → 签名 CDN，**206** `bytes 0-0/732610`，etag = pinned sha256，总长相符，`probe_auth=none`（**只用了 1 个字节**） |
+| `--small`（真下 732,610 B） | size ✓、内容 sha256 = tree `lfs.oid` = `5f1bea06…` ✓、`.hf.json` stamp 已写（`fetch_auth=none_no_token`、`kind=signed_cdn`） |
+| 本地 HTTP 全路径（私仓同源 200 / CDN 302） | 见 `test_fetch_file_full_path_local_http_origin_and_cdn`（真 socket，127.0.0.1） |
+
+**私仓带真 token 的路径仍未经真机验证**（本机没有 token）：公开数据集是匿名 +
+CDN，私仓的"同源 200 + Bearer"只走了本地模拟。这一点在报告里如实标注。
+
+### 6. 仍未验证
+
+- **S6/S7 依然没在真实 Kaggle 跑通过** → 能力结论**仍然零数据**。
+- 自动只编 S2 的真 CUDA 编译、带真 token 的 7.3 GB 下载与上传，仍未发生。
+- `derived_prefix_window` 只是 4 chars/token 的近似，仓库里没有分词器。
+
+---
+
 ## 十、怎么跑测试
 
 ```bash
 python3 research/kaggle/test_trlab.py
 ```
 
-不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。v1.0 起它**直接 import `trlab/` 包**（不再解析 notebook 字符串），在临时工作目录里补齐默认三阶段，然后跑 155 项断言。当前结果：**155/155 通过，约 50 秒**（v1.0.1 是 118 项 / 约 31 秒；多出来的时间主要是新增项里那几条要在干净子进程里单独 import 模块、以及 bootstrap 用本地 git 仓真跑 fetch）。
+不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。v1.0 起它**直接 import `trlab/` 包**（不再解析 notebook 字符串），在临时工作目录里补齐默认三阶段，然后跑 171 项断言。当前结果：**171/171 通过，约 60 秒**（v1.0.1 是 118 项 / 约 31 秒；多出来的时间主要是新增项里那几条要在干净子进程里单独 import 模块、以及 bootstrap 用本地 git 仓真跑 fetch）。
 
 v1.0 新增的 10 项架构回归（对应 Issue #5 的验收清单）：
 

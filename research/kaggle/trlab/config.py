@@ -6,7 +6,7 @@
 
 from pathlib import Path
 
-NOTEBOOK_VERSION = "1.1.3"
+NOTEBOOK_VERSION = "1.2.0"
 
 
 
@@ -285,6 +285,14 @@ CFG = {
     "EVAL_CPU_MAX_WALL_SEC": 5400,
     # 评测前是否强制核对 GGUF 与 HF tree 的 lfs.oid（4.5 GiB 约 2–4 s/个）。
     "EVAL_VERIFY_HASH":   True,
+    # ---- 校准/评测隔离（v1.2.0）----
+    # 旧版"见 1 行重叠就整轮拒绝"证明不了污染，也证明不了没污染。现在改成
+    # 取证 + 确定性 clean holdout：剔除与校准集共享前 200 字符的**评测段**，
+    # 两个量化用同一份 holdout。下面两个阈值是 fail-closed 的护栏：
+    #   · 剔除比例超过 10% → 更像"把 train 当成 eval"，必须停下来看；
+    #   · 剔除后不足 20 段 → 评测集太小，NLL 没意义。
+    "ISOLATION_MAX_DROP_FRAC": 0.10,
+    "ISOLATION_MIN_PARAS":     20,
 
     # ---------- 预算（硬上限，超了主动抛异常而不是被 OOM kill） ----------
     "MAX_WALL_SEC":      8 * 3600,
@@ -560,6 +568,8 @@ def print_banner():
               f"（{'已允许拉取' if CFG['HF_FETCH_ARTIFACTS'] else '拉取未允许'}）")
         print(f"评测语料      : {EVAL_PINNED['config']}/{EVAL_PINNED['split']}"
               f"（{EVAL_PINNED['bytes']/2**20:.2f} MiB，与校准集的 train split 严格分离）")
+        print(f"隔离口径      : 取证 + clean holdout（剔除与 train 共享前 200 字符的评测段；"
+              f"两个量化用同一份）")
         print(f"评测规模      : ctx={CFG['NLL_CTX']} × {CFG['NLL_GROUPS']} 组"
               f" × {CFG['NLL_CHUNKS_PER_GROUP']} chunk"
               f"（约 {CFG['NLL_CTX']*CFG['NLL_GROUPS']*CFG['NLL_CHUNKS_PER_GROUP']/1000:.1f}k token/模型）")
