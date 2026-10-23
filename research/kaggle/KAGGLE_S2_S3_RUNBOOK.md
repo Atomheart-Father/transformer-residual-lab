@@ -423,6 +423,97 @@ S3 成功后 Q8_0 会被回收（8.11 GiB），所以 S4 **不再要求**读 ima
 - [ ] 产物旁各有一个 `.provenance.json`（schema 2，含 base/imatrix sha256 与 `quant_fp`）
 - [ ] **Save Version（Quick Save）**，把两个 GGUF 与记录存进版本
 
+---
+
+## 六之二、S6/S7：只评测，不再量化（v1.1.0）
+
+**前提**：S4/S5 的产物已经备份在 HF 私有仓库 `Atomheart-Father/trlab-qwen3-8b-quant-pilot`
+（commit `097e692`），包含 `qwen3-8b-IQ2_XS.gguf`、`qwen3-8b-IQ4_XS.gguf`、
+`imatrix.gguf` 与三份 `*.provenance.json`。所以这一节**不需要 BF16、不需要 S3、
+不需要重新量化、不需要编译**。
+
+### 6.2.0 唯一操作开关
+
+把开关格里的 `RUN_EVAL = False` 改成 `RUN_EVAL = True`，`Settings → Internet = On`，
+`Run all`。就这三步。
+
+`RUN_EVAL=True` 会展开成：`S6_NLL` + `S7_QUALITY` + `S9_REPORT`，并自动置
+`HF_FETCH_ARTIFACTS=True`。它**不会**打开 `RUN_S2/S3/S4`，也**不会**打开
+`EVAL_ALLOW_GPU` —— 后者必须你自己显式改，因为 GPU 会消耗额度。
+
+### 6.2.1 token：三条路，任选一条，别写进仓库
+
+| 方式 | 具体做法 |
+|---|---|
+| 环境变量 | 本地 shell `export HF_TOKEN=hf_xxx`，再 `python -m trlab --run-eval` |
+| Kaggle secret | 网页 `Add-ons → Secrets` → 新建 `HF_TOKEN` → 在该 notebook 上勾选 attach。代码用 `kaggle_secrets.UserSecretsClient` 读 |
+| HF 官方缓存 | 本机 `huggingface-cli login` 一次，之后 `~/.cache/huggingface/token` 会被复用 |
+
+三者都没有时，预检会停在下载之前，说"没有 token"并列出这三条路。
+**不要**把 token 贴进 notebook cell、git、或 Issue 评论里；代码本身也不会打印它
+（只打印 `token_source`，如 `env:HF_TOKEN`）。
+
+### 6.2.2 会下载什么、多大
+
+| 文件 | 用途 | 量级 |
+|---|---|---|
+| `qwen3-8b-IQ2_XS.gguf` | S6/S7 的输入之一 | ≈2.7 GB |
+| `qwen3-8b-IQ4_XS.gguf` | 同上 | ≈4.56 GB |
+| `imatrix.gguf` | 只做 provenance 引用，不参与计算 | 10.7 MB |
+| `*.provenance.json` ×3 | fairness / 来源记录 | KB 级 |
+| wikitext-2-raw **test** parquet | 评测语料（**不是** train） | 732,610 B |
+
+合计 ≈7.3 GB。权威字节数以 HF tree API 与 sidecar 为准，上表只是量级。
+`EVAL_VERIFY_HASH=True`（默认）会在评测前把本地 GGUF 与 tree 的 `lfs.oid`
+对一遍（4.5 GiB 约 2–4 s/个）。
+
+### 6.2.3 评测语料与校准语料是两份不同的东西
+
+| | 用途 | 来源 | 大小 |
+|---|---|---|---|
+| 校准集 | S3 算 imatrix | wikitext-2-raw **train** | 6,357,543 B |
+| 评测集 | S6/S7 打分 | wikitext-2-raw **test** | 732,610 B |
+
+两者 sha256 都预登记（`CALIB_PINNED` / `EVAL_PINNED`），S6 会做内容级重叠断言，
+重叠非零直接拒绝。S6 单独跑时也会把 calib.txt 取来（6.35 MB）只为做这个断言，
+失败只 log 不致命。
+
+### 6.2.4 规模与成本（默认纯 CPU）
+
+`NLL_CTX=512`、`NLL_CHUNKS_PER_GROUP=1`、`NLL_GROUPS=8` → 8 组 × 1 chunk × 512 ctx
+≈ 4k token/模型、共 8k token。
+
+`eval_cost_estimate()` 用**假设速率**（CPU 2.5 tok/s / GPU 30 tok/s，字段
+`assumed_rate_note` 写明"不是实测"）估算墙钟：默认规模纯 CPU **≈0.94 h**；
+旧的 8×4×2048 是 **14.59 h**，会超过 `EVAL_CPU_MAX_WALL_SEC=5400` 而被拦。
+被拦时预检给三个选项，不是跑一半被杀：
+
+1. 缩小 pilot（减 `NLL_GROUPS` / `NLL_CTX`）；
+2. 你**自己**显式 `EVAL_ALLOW_GPU=True`（会消耗额度，代码不替你决定）；
+3. 只跑 S7（`trlab.run(run_eval=True, S6_NLL=False)`）。
+
+### 6.2.5 6.2 人工核对清单
+
+- [ ] `S6_NLL.json` 的 `provenance.inputs` 三个文件都是 `source` 为 `hf`（或 `local`），
+      且 `sha256_verified` 与你的预期一致
+- [ ] `fairness_level` 是 `hf_sidecar_declared`（不是 `s4_runtime`）。**引用结论时必须带这个前缀**
+- [ ] `settings.gpu == false`，日志里每条 llama 命令都是 `-ngl 0`
+- [ ] `measured_throughput` 有值 —— 它才是实测，报告里的 0.94 h 是假设
+- [ ] 报告第 6/7 节写的是数字，不是 "not yet evaluated"（写了就说明 S6/S7 没真跑）
+- [ ] `S7_QUALITY.json` 的 `settings` 与 S6 一致（同 prompt 数 / 同 n_predict / 同 seed）
+
+### 6.2.6 失败恢复
+
+| 现象 | 去哪看 | 处置 |
+|---|---|---|
+| `没有 HF token` + 三条路 | 预检输出 / `out/S6_NLL.json` | 按 6.2.1 任选一条；**不要把 token 写进 notebook** |
+| `401 / 403` | 同上 | token 无效或没权限。`--check-hf` 可以只验 token 不下载 |
+| `找不到 llama-perplexity` | `out/S6_NLL.json` | 二进制不在。要么先跑一次 `RUN_S2=True`（只编译，不下载模型、不重量化），要么把已有的 build 目录挂成 Input |
+| `估算 X h 超过上限` | `out/S6_NLL.json` 的 `cost_estimate` | 按 6.2.4 的三选一 |
+| `sha256 与 HF 不符` | 同上 | 本地缓存坏了。删掉那个 GGUF 重下（`.partial` 会续传，但哈希不符时必须整个重来） |
+| 下载中断 | 日志里的 `.partial` 提示 | 直接重跑，`Range` 续传；输入指纹没变就会接着下 |
+| `probe_only` 时看到 `source: hf_pending` | `out/S6_NLL.json` | 正常：预检不拉 7 GB，真跑时才下载 |
+
 ## 七、失败排查
 
 | 现象 | 去哪看 | 处置 |
@@ -487,6 +578,11 @@ S3 成功后 Q8_0 会被回收（8.11 GiB），所以 S4 **不再要求**读 ima
 19. **v1.0 的引导格未在真实 Kaggle 上跑过**（本地已验证）：GitHub 匿名 sparse fetch、`rev-parse` 强校验、stamp 复用都在干净目录实测通过，但 Kaggle 镜像里 `git` 的版本与 `core.sparseCheckout` 支持情况、以及 Kaggle 出口到 github.com 的带宽/限流未实测。失败时的报错信息会说明原因，`--embed` 内嵌变体可绕过仓库依赖。
 20. **仓库转私有后匿名 fetch 会失效**。当前 GitHub 仓库是 public（用户 2026-10-22 设为公开）。若之后转回私有，用 `python3 build_notebook.py --embed` 生成内嵌执行包的版本，或在 Kaggle 环境里配好身份。
 21. **Kaggle 上重复 `Run All` 的 stamp 复用未实测**：同一 Session 内第二次执行应命中 `_trlab_src/.trlab_commit` 直接复用、不重新 fetch；这是本地验证过的逻辑，Kaggle 上的 `/kaggle/working` 持久化行为（第 7 条）会叠加影响。
+22. **S6/S7 从未在真实 Kaggle 上跑过**（v1.1.0）。139 项测试全是 CPU/mock，`test_s6_end_to_end_from_hf` 用的是假 HF 服务器桩。**所以"量化对 NLL / 质量的影响"目前没有数据**，报告那两节会写 "S6/S7 not yet evaluated"。
+23. **HF 真实下载只验到 401 路径**。`python -m trlab --check-hf` 在无 token 时正确报 `token_present: false` + 401 + 三条取 token 的路（真机 macOS 跑过）；**带 token 下载 2.7 / 4.56 GiB 未实测**。断点续传逻辑与 S3 的 Q8_0 下载共用同一份 `_fetch_pinned_blob`，那份是真机跑过的。
+24. **`hf_sidecar_declared` 级 fairness 未在真实 sidecar 上走过**。测试里是构造的；真实 sidecar 字段是否齐、跨 Session 会不会误判 `imatrix_base_consistent: false`，第一次真跑才知道。
+25. **往 HF 上传没有真的发生过**。`upload_after_run()` 在 `HF_UPLOAD_AFTER_RUN=False` 时直接跳过；只有 dry-run 与 mock 覆盖。上传时若真的执行，也只做远端 size 对比（LFS 再比 sha256），不是逐文件内容复核。
+26. **评测成本是假设速率**（CPU 2.5 tok/s / GPU 30 tok/s）。0.94 h 不能当承诺，真实数字要等 `measured_throughput`。
 
 ### 已被真实 Kaggle 运行验证的部分（v0.3.0–v0.5.0，2026-10-21/22）
 
@@ -508,6 +604,28 @@ S3 成功后 Q8_0 会被回收（8.11 GiB），所以 S4 **不再要求**读 ima
 
 **没验证的（如实标注）**：Kaggle 上 `/kaggle/tmp` 是否存在、是否独立文件系统、空闲多少；预检的判定在真实 Kaggle 上会不会误判；S4 的真实 CPU 量化耗时与成功率。
 
+### 已在本地验证的部分（v1.1.0，2026-10-22/23，非 Kaggle）
+
+1. **S3 的 P0 回归已修并钉住**：`_write_stamp() got multiple values for keyword argument 'bytes'`。
+   修法是把 `_parquet_to_txt()` 的返回键改成 `converted_bytes`、`_ensure_calib_txt()`
+   改成显式 dict 合并 + 重名 `GuardError`（不再 `**` 摊字典）。
+   回归是**跨函数全流程**的（假 pyarrow → 真转换 → 写 stamp → cache hit），
+   另加一条 AST 静态不变量禁止"同一调用里既有 `bytes=` 又有 `**`"。
+2. **139 项 CPU 回归全绿**（不联网、约 12 秒）：118 项旧 + 2 项 S3 回归 + 19 项 v1.1
+   （token 链 / 绝不打印 token / tree 分页 / 错误码可操作性 / 复用与 etag 双源守卫 /
+   `verify_remote` 只声明真核过的 / 上传门槛与 opt-in / 缺 `huggingface_hub` 时拒绝
+   `pip install -U` / 本地优先 / `probe_only` 绝不下载 / sidecar fairness 只能到
+   `declared` / CPU 不可行 fail closed / 预检缺二进制说唯一一步 / `RUN_EVAL` 作用域 /
+   `run_ppl` 默认 `-ngl 0` / S6 从 HF 端到端 / 评测语料是 test split / `_ensure_eval_txt` 全流程）。
+3. **`--check-hf` 真机跑过**：对 Private 仓库、无 token 的情况下返回
+   `token_present: false` + 401 的可操作提示，且**没有**打印任何 token。
+4. **CLI 入口可用**：`python -m trlab --help` 列出 `--run-eval/--eval-only`、
+   `--check-hf`、`--upload`、`--preflight-only`。
+
+**v1.1.0 没验证的（如实标注）**：S6/S7 在真实 Kaggle 上的一次完整运行；带 token 的
+7.3 GB 真实下载；真实 sidecar 的 fairness 判定；往 HF 的真实上传；真实 CPU 吞吐
+（0.94 h 是假设速率算的）。
+
 ---
 
 ## 九、动态条件（不假定）
@@ -518,7 +636,12 @@ Kaggle 的每日 GPU 配额、单会话时长上限、并发会话数、存储�
 
 ## 十、下一步
 
-改一个开关：上传 7.3 KB 的 `trlab_kaggle.ipynb` → 把 `RUN_S4 = False` 改成 `RUN_S4 = True` → `Settings → Internet = On` → `Run all` → 核对 5.4 与 6.6 两份清单 → 停下。
+**如果你要的是"把 S6/S7 跑出来"（v1.1.0 的默认下一步）**：上传 `trlab_kaggle.ipynb` →
+把 `RUN_EVAL = False` 改成 `RUN_EVAL = True` → 配好 HF token（6.2.1 三条路任选一条，
+**不要写进 notebook**）→ `Settings → Internet = On` → `Run all` → 对着 6.2.5 的清单核一遍 → 停下。
+不编译、不下载 BF16、不重做 S3、不重新量化；默认纯 CPU，不会消耗 GPU 额度。
+
+**如果你要的是"把量化再做一遍"**：把 `RUN_S4 = False` 改成 `RUN_S4 = True` → `Settings → Internet = On` → `Run all` → 核对 5.4 与 6.6 两份清单 → 停下。
 
 **唯一可能需要的一次性操作**：如果 Kaggle 没有 working 之外的暂存盘，按 6.1 用 `trlab_fetch_bf16.ipynb` 把 BF16 挂成只读 Input（6 次点击，之后每个 Session 零点击）。有暂存盘就全自动，这一步也会被省掉。
 

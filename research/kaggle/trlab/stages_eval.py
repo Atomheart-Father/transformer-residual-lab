@@ -1,26 +1,57 @@
-"""S6 配对 NLL + S7 质量抽查 + S8 高精度锚点 + SX 探索。"""
+"""S6 配对 NLL + S7 质量抽查 + S8 高精度锚点 + SX 探索。
 
-from .config import CFG, FORMATS, LOGS, WORK
+v1.1：S6/S7 的输入不再要求"本 Session 刚量化过"。本地 `models/` 有就用，
+没有就从 Hugging Face 上已存的量化 GGUF 取（`trlab/artifacts.py`），
+**不重量化、不下载 BF16、不重做 S3**。评测默认纯 CPU（`EVAL_ALLOW_GPU=False`）。
+"""
+
+from .config import CFG, EVAL_PINNED, FORMATS, LOGS, WORK
 from .errors import GuardError, UnknownGGMLType
 from .paths import _model_path, llama_bin
 from .gguf import gguf_scan
 from .core import _anchor_decision, _fit_ngl, _get, check_deadline, log, need, paired_bootstrap, run_cmd, run_ppl, split_eval, vram_gb
 from .imatrix import resolve_imatrix
+from .artifacts import (eval_preflight, fairness_from_sidecars,
+                        resolve_eval_models)
 
-import json, os, subprocess
+import json, os, subprocess, time
 from pathlib import Path
 
+
+def _eval_ngl(nbytes, vram_total_gb):
+    """评测要不要上 GPU —— **默认不**。
+
+    `EVAL_ALLOW_GPU=False` 时一律 `-ngl 0`（纯 CPU）：GPU 会消耗额度，
+    必须由用户显式打开。这条不能靠"显存够就自动用"来猜。
+    """
+    if not CFG.get("EVAL_ALLOW_GPU"):
+        return 0
+    usable = (vram_total_gb - 1.0) if vram_total_gb else 0.0
+    return _fit_ngl(nbytes, usable, CFG["NGL_MARGIN_GB"])
+
+
+def _fairness_for_s6(models):
+    """S4 的运行时记录优先（那是真核验过的），否则退到 HF sidecar 的声明级。"""
+    s4r = _get("S4_QUANT") or {}
+    fair = s4r.get("_fairness") or {}
+    if fair:
+        return fair, "s4_runtime"
+    return fairness_from_sidecars(models), "hf_sidecar_declared"
+
+
 def stage_s6_nll(deadline):
-    eval_txt = need("EVAL_TXT")
+    # ---- 0. 预检：先算账，再决定要不要拉 7 GiB ----
+    pf = eval_preflight(deadline, do_download=False)
+    models = resolve_eval_models(deadline)      # 现在才真下载 + 校验
+    eval_txt = Path(CFG["EVAL_TXT"]) if CFG.get("EVAL_TXT") else need("EVAL_TXT")
     if not CFG["EVAL_SOURCE"]:
         log("!! CFG['EVAL_SOURCE'] 未设置，provenance 里会缺这一项")
 
-    # ---- 公平性：S4 的核验结果决定这次比较能不能叫"公平" ----
-    s4r = _get("S4_QUANT") or {}
-    fair = s4r.get("_fairness") or {}
+    # ---- 公平性：S4 运行时记录优先，否则 sidecar 声明级 ----
+    fair, fair_level = _fairness_for_s6(models)
     if fair.get("same_imatrix") is False:
         raise RuntimeError(
-            "S4 记录显示 imatrix 的 sha256 与 S3 不一致，配对比较无效。重跑 S4。")
+            "两个量化用的 imatrix 不是同一份（sha256 不一致），配对比较无效。")
     cons = fair.get("imatrix_base_consistent") or {}
     if cons.get("ok") is False:
         raise RuntimeError(
@@ -37,6 +68,9 @@ def stage_s6_nll(deadline):
     elif fair.get("imatrix_base_from_approx"):
         scope_note = ("量化 base 是高精度，但 imatrix 由量化过的 base 算出："
                       "激活是对高精度的近似，影响远小于二次量化，仍需在结论里声明。")
+    if fair_level == "hf_sidecar_declared":
+        log("!! 公平性来自 HF 上的 provenance sidecar（声明级，本次未重算）—— "
+            "结论里必须标注 verified_level=hf_sidecar_declared")
 
     # ---- 校准/评测隔离断言（内容级）----
     isolation = {"ok": None}
@@ -59,26 +93,31 @@ def stage_s6_nll(deadline):
     else:
         log("!! 没有校准语料路径，无法做隔离断言 —— 结论里必须标注这一点")
 
-    models = {f: _model_path(f) for f in FORMATS if _model_path(f).exists()}
     if len(models) < 2:
-        raise GuardError(f"需要两个格式的文件，现有 {list(models)}。先跑 S4。")
+        raise GuardError(
+            f"需要两个格式的文件，现有 {list(models)}。\n"
+            "  → 本地没有就去 HF 取：RUN_EVAL=True（或 CFG['HF_FETCH_ARTIFACTS']=True）。")
 
     groups, meta = split_eval(eval_txt, CFG["NLL_GROUPS"], WORK / "eval_groups")
     log(f"评测集切成 {len(groups)} 组：" +
         ", ".join(f"g{m['group']}({m['paras']}段/{m['chars']}字符)" for m in meta))
 
     per_model = {}
-    for fmt, mp in models.items():
+    t_start = time.time()
+    for fmt, rec in models.items():
+        mp = Path(rec["path"])
         per_model[fmt] = []
         for i, g in enumerate(groups):
             check_deadline(deadline, f"S6 {fmt} g{i}")
             r = run_ppl(mp, g, deadline, f"{fmt}_g{i}")
             r["group"] = i
             r["chars"] = meta[i]["chars"]
+            r["model_source"] = rec.get("source")
             per_model[fmt].append(r)
             log(f"  {fmt} g{i}: PPL={r['ppl']:.4f} NLL={r['nll']:.4f}")
+    elapsed = time.time() - t_start
 
-    d = [per_model["IQ2_XS"][i]["nll"] - per_model["IQ4_XS"][i]["nll"]
+    d = [per_model[FORMATS[0]][i]["nll"] - per_model[FORMATS[1]][i]["nll"]
          for i in range(len(groups))]
     stats = paired_bootstrap(d)
 
@@ -96,29 +135,52 @@ def stage_s6_nll(deadline):
             "nll_sd": (sum((x["nll"] - mu) ** 2 for x in vals) / max(1, len(vals) - 1)) ** 0.5,
         }
 
+    # 实测速率回填：把"假设值"换成这一次的真实值，供下一轮估成本
+    tokens_done = len(groups) * CFG["NLL_CHUNKS_PER_GROUP"] * CFG["NLL_CTX"] * len(models)
+    measured = {"elapsed_sec": round(elapsed, 1), "tokens": tokens_done,
+                "tok_per_sec": round(tokens_done / max(1e-6, elapsed), 2),
+                "note": "这是**这一次**的实测吞吐，只对同机器同设置可比"}
+
     out = {
         "isolation": isolation,
         "fairness_verified": fairness_verified,
+        "fairness_level": fair_level,
         "fairness_record": fair,
         "base_scope": base_scope,
         "scope_note": scope_note,
         "eval_source": CFG["EVAL_SOURCE"],
+        "eval_ctx": CFG["NLL_CTX"],
+        "eval_chunks_per_group": CFG["NLL_CHUNKS_PER_GROUP"],
         "groups": len(groups),
         "group_meta": meta,
         "per_group": per_model,
         "aggregate": agg,
         "paired_delta_nll_iq2_minus_iq4": stats,
         "deltas": [round(x, 6) for x in d],
+        "resources": pf.get("resources"),
+        "cost_estimate": pf.get("cost"),
+        "measured_throughput": measured,
         "statistics_note": ("NLL_GROUPS 只用于 pilot 估计。bootstrap 的 n 是**组数**不是 token 数，"
                             "组间 token 数也不严格相等；正式 CI 应按独立文档重新设计。"),
         "provenance": {
+            "inputs": {f: {"path": r["path"], "bytes": r["bytes"],
+                           "source": r.get("source"),
+                           "sha256_verified": r.get("sha256_verified")}
+                       for f, r in models.items()},
             "base_gguf": CFG["BASE_GGUF"], "base_kind": CFG["BASE_KIND"],
             "imatrix": str(resolve_imatrix()),
             "imatrix_base": (fair or {}).get("imatrix_base"),
             "base_scope": base_scope,
-            "self_quantized": True,
+            # v1.1：输入可能来自 HF 上已存的产物 —— 那不是本次量化，
+            # 所以 self_quantized 只能是"来源自述"，不能写成 True。
+            "self_quantized": fair_level == "s4_runtime",
             "fair_comparison": fairness_verified,
-            "note": "同 base、同 imatrix、同 token 窗口；fair_comparison=False 表示来源未核验",
+            "fairness_level": fair_level,
+            "gpu": bool(CFG["EVAL_ALLOW_GPU"]),
+            "note": ("输入来自 " + ", ".join(sorted({r.get("source") or "?" for r in models.values()}))
+                     + f"；公平性级别 {fair_level}。"
+                     "同 base、同 imatrix、同 token 窗口；fair_comparison=False 表示"
+                     "本次没有重算核验（sidecar 声明级）。"),
         },
     }
 
@@ -128,7 +190,8 @@ def stage_s6_nll(deadline):
     print(f"配对差 (IQ2 - IQ4): mean={stats['mean']:+.4f}  "
           f"char_weighted={stats['char_weighted_mean']:+.4f}  "
           f"CI95={stats['ci95']}  n={stats['n']}")
-    print(f"公平性已核验: {fairness_verified}")
+    print(f"公平性已核验: {fairness_verified}（级别 {fair_level}）")
+    print(f"实测吞吐: {measured['tok_per_sec']} tok/s（{elapsed:.0f} s，{tokens_done} token）")
     print("=" * 78)
 
     ci = stats.get("ci95")
@@ -194,17 +257,24 @@ def stage_s7_quality(deadline):
     log(f"llama-cli flags: {flags}")
     cli = llama_bin("llama-cli")
 
-    models = {f: _model_path(f) for f in FORMATS if _model_path(f).exists()}
+    # v1.1：输入同样走"本地优先 / 否则 HF"，且不重量化。
+    models = resolve_eval_models(deadline)
     if len(models) < 2:
-        raise GuardError("需要两个格式的文件，先跑 S4")
+        raise GuardError(
+            f"需要两个格式的文件，现有 {list(models)}。\n"
+            "  → 本地没有就去 HF 取：RUN_EVAL=True（或 CFG['HF_FETCH_ARTIFACTS']=True）。")
 
     prompts = QUALITY_PROMPTS_DEFAULT[:CFG["QUALITY_PROMPTS"]]
     v = vram_gb()
-    usable = (v["total"] - 1.0) if v else 0.0
+    # 默认纯 CPU：GPU 会消耗额度，必须 EVAL_ALLOW_GPU=True 才用。
+    ngl_by_fmt = {fmt: _eval_ngl(rec["bytes"], (v or {}).get("total"))
+                  for fmt, rec in models.items()}
+    log(f"S7 -ngl: {ngl_by_fmt}（EVAL_ALLOW_GPU={CFG['EVAL_ALLOW_GPU']}）")
 
     per_model = {}
-    for fmt, mp in models.items():
-        ngl = _fit_ngl(mp.stat().st_size, usable)
+    for fmt, rec in models.items():
+        mp = Path(rec["path"])
+        ngl = ngl_by_fmt[fmt]
         per_model[fmt] = []
         for i, pr in enumerate(prompts):
             check_deadline(deadline, f"S7 {fmt} p{i}")
@@ -225,9 +295,10 @@ def stage_s7_quality(deadline):
                                    "chars": len(body)})
 
     pairs = []
+    fa, fb = FORMATS[0], FORMATS[1]
     for i, pr in enumerate(prompts):
-        a = per_model["IQ2_XS"][i]["text"]
-        b = per_model["IQ4_XS"][i]["text"]
+        a = per_model[fa][i]["text"]
+        b = per_model[fb][i]["text"]
         k = 0
         while k < min(len(a), len(b)) and a[k] == b[k]:
             k += 1
@@ -243,6 +314,15 @@ def stage_s7_quality(deadline):
         "per_model": per_model,
         "degenerate": {fmt: round(sum(x["repeat4"] for x in v2) / len(v2), 4)
                        for fmt, v2 in per_model.items()},
+        "settings": {"temperature": 0, "seed": CFG["SEED"],
+                     "n_predict": CFG["QUALITY_N_PREDICT"],
+                     "ngl": ngl_by_fmt, "gpu_allowed": bool(CFG["EVAL_ALLOW_GPU"])},
+        "provenance": {
+            "inputs": {f: {"path": r["path"], "source": r.get("source"),
+                           "sha256_verified": r.get("sha256_verified")}
+                       for f, r in models.items()},
+            "note": "输入来自 HF 上已存的量化产物或本地 S4 产物，本次未重量化",
+        },
         "limits": [
             "贪心解码 + 32 token，样本量很小，只能发现整体崩塌，不能排序细微质量",
             "不是标准任务评测（GSM8K / HumanEval 之类），绝对分数不构成能力证据",

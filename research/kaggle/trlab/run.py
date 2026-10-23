@@ -29,27 +29,34 @@ def _apply_overrides(overrides):
             CFG[k] = v
 
 
-def run(run_s2=None, run_s3=None, run_s4=None, preflight_only=False, **overrides):
+def run(run_s2=None, run_s3=None, run_s4=None, run_eval=None,
+        preflight_only=False, upload=False, **overrides):
     """按开关顺序执行各阶段。
 
-    三个开关都 None 时读 CFG 里的值（默认全 False → 只跑 S0/S1/S9，
+    三个量化开关都 None 时读 CFG 里的值（默认全 False → 只跑 S0/S1/S9，
     不联网、不下载）。overrides 可直接改任意 CFG 键，例如
     run(run_s4=True, FORCE_RERUN=True)；阶段名（S6_NLL 等）写 STAGES。
 
     preflight_only=True：只跑 S4_PREFLIGHT（几秒的只读磁盘/暂存盘/imatrix
     核查），不编译、不下载。RUN_S4=True 的正常一键运行会**自动**先跑它，
     不过就地在下载前停下。
+
+    run_eval=True（v1.1）：只评测。从 HF 上已存的量化 GGUF 取输入，跑 S6/S7/S9，
+    **不编译、不下载 15 GiB BF16、不重做 S3、不重新量化**；默认纯 CPU。
+
+    upload=True：显式 opt-in，把本轮小结果（JSON/report）传到 HF。默认不传。
     """
-    for _k, _v in (("RUN_S2", run_s2), ("RUN_S3", run_s3), ("RUN_S4", run_s4)):
+    for _k, _v in (("RUN_S2", run_s2), ("RUN_S3", run_s3),
+                   ("RUN_S4", run_s4), ("RUN_EVAL", run_eval)):
         if _v is not None:
             CFG[_k] = bool(_v)
     _apply_overrides(overrides)
     if preflight_only:
-        # 只留预检：其余阶段全关，三个开关也归位（_apply_run_switches 就不再改任何字段）
+        # 只留预检：其余阶段全关，四个开关也归位（_apply_run_switches 就不再改任何字段）
         for _k in STAGES:
             STAGES[_k] = False
         STAGES["S4_PREFLIGHT"] = True
-        CFG["RUN_S2"] = CFG["RUN_S3"] = CFG["RUN_S4"] = False
+        CFG["RUN_S2"] = CFG["RUN_S3"] = CFG["RUN_S4"] = CFG["RUN_EVAL"] = False
     plan = _apply_run_switches()
     ensure_dirs()
     print_banner()
@@ -166,23 +173,58 @@ def run(run_s2=None, run_s3=None, run_s4=None, preflight_only=False, **overrides
 
     s9 = run_stage("S9_REPORT", stage_s9_report)
 
+    if upload:
+        _upload_results()
+
     return {"plan": plan,
             "stages": {k: (STATE.get(k) or {}).get("status") for k in STAGES}}
 
 
+def _upload_results():
+    """显式 opt-in：把本轮的小结果（JSON + report）传到 HF。
+
+    只传白名单里的小文件；GGUF 那种大件走单独的上传路径，不在自动流程里。
+    **默认不传**：`upload=False` 时连这个函数都不会被调用。
+    """
+    from .hf import upload_after_run
+    files = [(OUT / n, f"results/v{NOTEBOOK_VERSION}/{n}")
+             for n in ("report.md", "results.json",
+                       "S6_NLL.json", "S7_QUALITY.json", "S9_REPORT.json")
+             if (OUT / n).exists()]
+    try:
+        rec = upload_after_run(files)
+        print(f"HF 上传：{rec}")
+        return rec
+    except Exception as e:
+        # 上传失败不该把已经跑完的评测判成失败 —— 本地产物都还在。
+        print(f"!! HF 上传失败（本地结果不受影响）：{e}")
+        return {"ok": False, "error": str(e)}
+
+
 def main(argv=None):
-    """CLI 入口：python -m trlab.run --run-s4 [--set KEY=JSON]"""
+    """CLI 入口：python -m trlab [--run-s4 | --run-eval] [--set KEY=JSON]"""
     ap = argparse.ArgumentParser(prog="trlab",
                                  description="transformer-residual-lab Kaggle 验证台")
     ap.add_argument("--run-s2", action="store_true", help="编译 llama.cpp（S2）")
     ap.add_argument("--run-s3", action="store_true", help="S2+S3：生成 imatrix")
     ap.add_argument("--run-s4", action="store_true", help="S2+S3+S4+S5：量化 IQ2_XS/IQ4_XS")
+    ap.add_argument("--run-eval", "--eval-only", dest="run_eval", action="store_true",
+                    help="只评测 S6/S7/S9：从 HF 已存的 GGUF 取输入，不编译、不重量化")
     ap.add_argument("--preflight-only", action="store_true",
                     help="只跑 S4_PREFLIGHT：几秒内核查磁盘/暂存盘/imatrix，不编译不下载")
+    ap.add_argument("--check-hf", action="store_true",
+                    help="只检查 HF 凭据与仓库可读性，不打印 token")
+    ap.add_argument("--upload", action="store_true",
+                    help="显式 opt-in：把本轮小结果传到 HF（默认不传）")
     ap.add_argument("--force-rerun", action="store_true", help="忽略断点强制重跑")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=JSON",
-                    help="覆盖任意 CFG 键，例如 --set IMATRIX_CTX=256")
+                    help="覆盖任意 CFG 键，例如 --set NLL_CTX=256")
     args = ap.parse_args(argv)
+
+    if args.check_hf:
+        from .hf import status
+        print(json.dumps(status(), indent=1, ensure_ascii=False))
+        return 0
 
     over = {"FORCE_RERUN": True} if args.force_rerun else {}
     for kv in args.set:
@@ -192,7 +234,8 @@ def main(argv=None):
         except Exception:
             over[k] = v
     run(run_s2=args.run_s2 or None, run_s3=args.run_s3 or None,
-        run_s4=args.run_s4 or None, preflight_only=args.preflight_only, **over)
+        run_s4=args.run_s4 or None, run_eval=args.run_eval or None,
+        preflight_only=args.preflight_only, upload=args.upload, **over)
     print_artifacts()
     return 0
 

@@ -301,11 +301,28 @@ def stage_s9_report(deadline):
     L.append("## 6. 配对 NLL\n")
     if s6r:
         iso = s6r.get("isolation", {})
+        prov = s6r.get("provenance") or {}
         L.append(f"- 评测语料来源：{s6r.get('eval_source') or '未声明'}")
         L.append(f"- 校准/评测隔离：{iso.get('ok')}（重叠 {iso.get('overlap_lines')} 行）")
-        L.append(f"- **公平性已核验**：{s6r.get('fairness_verified')}")
-        L.append(f"- 分组数：{s6r['groups']}，每组 {CFG['NLL_CHUNKS_PER_GROUP']} chunk × "
-                 f"{CFG['NLL_CTX']} ctx")
+        L.append(f"- **公平性已核验**：{s6r.get('fairness_verified')}"
+                 f"（级别 `{s6r.get('fairness_level') or '未声明'}`）")
+        if s6r.get("fairness_level") == "hf_sidecar_declared":
+            L.append("  - 这是**声明级**：数字来自 HF 上的 provenance sidecar，"
+                     "本次没有重算核验。可核的只有 sidecar 之间的一致性与 GGUF 对 lfs.oid。")
+        ins = prov.get("inputs") or {}
+        if ins:
+            L.append("- 输入：" + "；".join(
+                f"{f} ← {v.get('source')}（{v.get('bytes', 0) / 2**30:.2f} GiB，"
+                f"sha256 {'已核' if v.get('sha256_verified') else '未核'}）"
+                for f, v in ins.items()))
+        L.append(f"- 分组数：{s6r['groups']}，每组 {s6r.get('eval_chunks_per_group')} chunk × "
+                 f"{s6r.get('eval_ctx')} ctx（两个模型同设置）")
+        if s6r.get("measured_throughput"):
+            mt = s6r["measured_throughput"]
+            L.append(f"- 实测吞吐：{mt['tok_per_sec']} tok/s（{mt['elapsed_sec']} s，"
+                     f"{mt['tokens']} token；只对同机器同设置可比）")
+        if prov.get("gpu") is False:
+            L.append("- 执行设备：**纯 CPU**（`EVAL_ALLOW_GPU=False`，未消耗 GPU 额度）")
         L.append("")
         L.append("| 格式 | 平均 NLL | 平均 PPL | NLL 标准差 |")
         L.append("|---|---|---|---|")
@@ -321,7 +338,8 @@ def stage_s9_report(deadline):
             L.append(f"\n**结论效力**：{s6r['scope_note']}")
         L.append(f"\n统计口径限制：{s6r.get('statistics_note')}")
     else:
-        L.append("_S6_NLL 未运行_")
+        L.append("_S6_NLL 未运行 —— **S6/S7 not yet evaluated**（这两个量化对模型能力"
+                 "的影响目前没有任何实测结论）_")
     L.append("")
 
     # ---- 7 质量 ----
@@ -330,10 +348,14 @@ def stage_s9_report(deadline):
         L.append(f"- 贪心续写完全一致：{s7r['identical_outputs']}/{s7r['n_prompts']}"
                  f"（{s7r['identical_rate']}）")
         L.append(f"- 平均 repeat4（越低越好）：{s7r['degenerate']}")
+        setts = s7r.get("settings") or {}
+        if setts:
+            L.append(f"- 设置：temp={setts.get('temperature')} seed={setts.get('seed')} "
+                     f"n_predict={setts.get('n_predict')} -ngl={setts.get('ngl')}")
         for lim in s7r["limits"]:
             L.append(f"- 限制：{lim}")
     else:
-        L.append("_S7_QUALITY 未运行_")
+        L.append("_S7_QUALITY 未运行 —— **S6/S7 not yet evaluated**_")
     L.append("")
 
     # ---- 8 锚点 ----

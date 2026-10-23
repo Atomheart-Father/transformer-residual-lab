@@ -25,6 +25,22 @@ def _calib_txt_path():
 
 
 
+def _eval_parquet_path():
+    """评测语料的 parquet 落点（与 calib 的 parquet 分开，避免互相覆盖）。"""
+    return MODEL_DL / "wikitext-2-raw-v1-test.parquet"
+
+
+
+def _eval_txt_path():
+    return WORK / "eval.txt"
+
+
+
+def _eval_stamp_path():
+    return MODEL_DL / "eval.stamp.json"
+
+
+
 def _s3_stamp_path():
     """下载缓存的 stamp：记 sha256 / bytes / 完成时间，用于"不重下"与二次校验。"""
     return MODEL_DL / "pinned_inputs.json"

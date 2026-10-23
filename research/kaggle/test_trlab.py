@@ -14,6 +14,7 @@ build_notebook.py 生成，本身不含逻辑。
 
 import copy
 import json
+import math
 import os
 import re
 import shutil
@@ -23,11 +24,18 @@ import sys
 import tempfile
 import time
 import traceback
+import types
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
+
+# 有些容器/沙箱里 /tmp 可写但**不可删**，tempfile 的可用性探测会直接失败，
+# 于是连 import 都过不去。显式钉一个项目内的临时根，避免探测。
+_TMP_ROOT = HERE / ".trlab_tmp"
+_TMP_ROOT.mkdir(parents=True, exist_ok=True)
+tempfile.tempdir = str(_TMP_ROOT)
 
 
 def _trlab_modules():
@@ -1235,7 +1243,8 @@ def test_s2_default_off_no_network(ns):
                                            "S4_AUTO_FETCH_BASE", "S4_RECLAIM_Q8_CACHE",
                                            "S3_SKIP_IF_IMATRIX_OK")}
     out = ns["_apply_run_switches"]()
-    assert out == {"run_s2": False, "run_s3": False, "run_s4": False}, out
+    assert out == {"run_s2": False, "run_s3": False, "run_s4": False,
+                   "run_eval": False}, out
     assert ns["STAGES"] == before_stages, "三个开关都 False 时不许改 STAGES"
     for k, v in before_cfg.items():
         assert ns["CFG"][k] == v, f"三个开关都 False 时不许改 CFG['{k}']"
@@ -1720,7 +1729,7 @@ def _fake_stream(src_file):
     """
     state = {"calls": [], "offsets": []}
 
-    def fake(url, path, offset, hasher, deadline, tag, expect_bytes):
+    def fake(url, path, offset, hasher, deadline, tag, expect_bytes, headers=None):
         state["calls"].append({"url": url, "offset": offset,
                                "path": str(path), "tag": tag})
         state["offsets"].append(offset)
@@ -2034,7 +2043,7 @@ def test_s3_download_etag_mismatch_refuses(ns):
     src.write_bytes(os.urandom(2048))
     pin, restore_pin = _pin_blob(ns, src)
     try:
-        def fake(url, path, offset, hasher, deadline, tag, expect_bytes):
+        def fake(url, path, offset, hasher, deadline, tag, expect_bytes, headers=None):
             data = Path(src).read_bytes()
             with open(path, "ab") as f:
                 f.write(data)
@@ -2069,7 +2078,7 @@ def test_s3_download_no_duplicate_full_copy(ns):
         seen = {"max_big": 0, "files_at_end": None}
         real = _fake_stream(src)
 
-        def spy(url, path, offset, hasher, deadline, tag, expect_bytes):
+        def spy(url, path, offset, hasher, deadline, tag, expect_bytes, headers=None):
             r = real(url, path, offset, hasher, deadline, tag, expect_bytes)
             big = [p.name for p in Path(path).parent.iterdir()
                    if p.is_file() and p.stat().st_size >= expect_bytes * 0.5]
@@ -2170,7 +2179,7 @@ def test_s3_download_network_failure_keeps_partial(ns):
         side = dst.with_name(dst.name + ".partial.json")
         part.parent.mkdir(parents=True, exist_ok=True)
 
-        def boom(url, path, offset, hasher, deadline, tag, expect_bytes):
+        def boom(url, path, offset, hasher, deadline, tag, expect_bytes, headers=None):
             with open(path, "ab") as f:
                 f.write(b"half")
                 hasher.update(b"half")
@@ -3747,7 +3756,8 @@ def test_switches_off_change_nothing(ns):
         for k in ("RUN_S2", "RUN_S3", "RUN_S4"):
             cfg[k] = False
         plan = ns["_apply_run_switches"]()
-        assert plan == {"run_s2": False, "run_s3": False, "run_s4": False}, plan
+        assert plan == {"run_s2": False, "run_s3": False, "run_s4": False,
+                        "run_eval": False}, plan
         assert cfg == saved[0], "全 False 时 CFG 被改了"
         assert stages == saved[1], "全 False 时 STAGES 被改了"
     finally:
@@ -3830,8 +3840,11 @@ def test_generated_notebook_is_thin(ns):
     assert nb_path.stat().st_size < 20_000, nb_path.stat().st_size
     src = "\n".join("".join(c["source"]) for c in nb["cells"])
     assert len(src) < 12_000, f"notebook 源码 {len(src)} B"
-    for must in ("RUN_S2", "RUN_S3", "RUN_S4", "trlab.run(", "rev-parse"):
+    for must in ("RUN_EVAL", "RUN_S2", "RUN_S3", "RUN_S4", "trlab.run(", "rev-parse"):
         assert must in src, must
+    # v1.1：RUN_EVAL 必须真的被传给 run()，否则开关格里的那一行等于装饰
+    assert re.search(r"trlab\.run\([^)]*\brun_eval=RUN_EVAL", src), \
+        "notebook 的 trlab.run(...) 没把 RUN_EVAL 传进去"
     assert "_BUNDLE_B64" not in src, "默认 notebook 不该内嵌执行包"
     m = re.search(r'SRC_COMMIT\s*=\s*"([0-9a-f]{40})"', src)
     assert m, "找不到钉死的 SRC_COMMIT"
@@ -4178,6 +4191,679 @@ def test_s4_quant_budget_is_protective(ns):
                 p.unlink()
 
 
+# ---------------------------------------------------------------- v1.0.2 S3 bytes 回归
+
+class _FakeParquetModule:
+    """假 pyarrow.parquet：只为让**真的** `_parquet_to_txt` 跑完。
+
+    不测 pyarrow 本身，测的是"转换元数据里有哪些 key"——那正是 v0.4 / v1.0.1
+    真实 Kaggle 失败的地方（key 叫 bytes → 与 stamp 的 bytes= 撞车 → TypeError）。
+    """
+
+    __version__ = "0.0-fake"
+
+    class _Schema:
+        names = ["text"]
+
+        def field(self, c):
+            return types.SimpleNamespace(type="string")
+
+    class _Col:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def to_pylist(self):
+            return self._rows
+
+    class _Table:
+        schema = None
+
+        def __init__(self):
+            self.schema = _FakeParquetModule._Schema()
+
+        def column(self, c):
+            return _FakeParquetModule._Col(["first paragraph", "", "second paragraph"])
+
+    @staticmethod
+    def read_table(p):
+        return _FakeParquetModule._Table()
+
+
+def _with_fake_parquet(fn):
+    """临时把假 pyarrow 塞进 sys.modules，跑完还原（含"本来没装"的情况）。"""
+    saved = {k: sys.modules.get(k) for k in ("pyarrow", "pyarrow.parquet")}
+    mod = types.ModuleType("pyarrow")
+    pq = types.ModuleType("pyarrow.parquet")
+    pq.read_table = _FakeParquetModule.read_table
+    pq.__version__ = _FakeParquetModule.__version__
+    mod.parquet = pq
+    sys.modules["pyarrow"] = mod
+    sys.modules["pyarrow.parquet"] = pq
+    try:
+        return fn()
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+
+def test_calib_txt_full_flow_no_duplicate_bytes(ns):
+    """完整走 `_ensure_calib_txt`：下载(桩) → 真转换 → 写 stamp → 二次命中缓存。
+
+    钉住 v0.4 的真实 Kaggle 失败：`_parquet_to_txt` 返回 `bytes` 时，
+    `_write_stamp(..., bytes=pin["bytes"], **conv)` 直接
+    `TypeError: got multiple values for keyword argument 'bytes'`。
+    这里不 stub `_ensure_calib_txt`（旧测试就是这么漏掉的），而是走完整链路。
+    """
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_calib_flow_"))
+    parquet = tmp / "dl" / "train.parquet"
+    txt = tmp / "calib.txt"
+    stamp = tmp / "calib.stamp.json"
+    patch = _Patch(ns)
+    patch("_calib_parquet_path", lambda: parquet)
+    patch("_calib_txt_path", lambda: txt)
+    patch("_calib_stamp_path", lambda: stamp)
+
+    def fake_fetch(pin, dst, deadline, tag):
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
+        Path(dst).write_bytes(b"PARQUET-FAKE" * 10)   # 内容无所谓，转换被假 pyarrow 接管
+        return {"origin": "downloaded", "bytes": pin["bytes"],
+                "sha256": pin["sha256"], "seconds": 0.0}
+
+    patch("_fetch_pinned_blob", fake_fetch)
+    try:
+        p, meta = _with_fake_parquet(lambda: ns["_ensure_calib_txt"](time.time() + 60))
+        assert p == txt and txt.exists()
+        # 1) 不炸（这是回归本体）
+        assert meta["origin"] == "downloaded"
+        # 2) parquet 的 bytes 必须原样保留，不能被 txt 大小覆盖
+        assert meta["bytes"] == ns["CALIB_PINNED"]["bytes"], meta
+        assert meta["sha256"] == ns["CALIB_PINNED"]["sha256"], meta
+        # 3) 转换产物的字节数要单独有一个不会撞车的名字
+        assert meta["converted_bytes"] == txt.stat().st_size, meta
+
+        st = json.loads(stamp.read_text())
+        assert st["bytes"] == ns["CALIB_PINNED"]["bytes"], st
+        assert st["txt_bytes"] == txt.stat().st_size, st
+        assert st["converted_bytes"] == txt.stat().st_size, st
+        assert st["nonempty_rows"] == 2, st
+        assert st["split"] == "train" and st["sha256"] == ns["CALIB_PINNED"]["sha256"]
+
+        # 4) 二次调用命中缓存，不再下载（_fetch 被换成会炸的桩）
+        patch("_fetch_pinned_blob", lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("缓存命中还去下载了")))
+        p2, meta2 = ns["_ensure_calib_txt"](time.time() + 60)
+        assert meta2["origin"] == "cache" and p2 == txt
+    finally:
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_no_splat_into_write_stamp(ns):
+    """静态不变量：`_write_stamp(...)` 不许**同时**出现显式 `bytes=` 与 `**` 摊字典。
+
+    v0.4 / v1.0.1 的 bug 就是 `**conv` 里的 bytes 撞上显式 `bytes=`。用 AST 查
+    （注释和 docstring 里出现的同名字样不算），比字符串搜索可靠。
+    """
+    import ast
+
+    offenders = []
+    for f in sorted((HERE / "trlab").glob("*.py")):
+        tree = ast.parse(f.read_text(encoding="utf-8"), filename=str(f))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            name = (fn.attr if isinstance(fn, ast.Attribute) else
+                    (fn.id if isinstance(fn, ast.Name) else None))
+            if name != "_write_stamp":
+                continue
+            has_bytes = any(k.arg == "bytes" for k in node.keywords)
+            has_splat = any(k.arg is None for k in node.keywords)
+            if has_bytes and has_splat:
+                offenders.append(f"{f.name}:{node.lineno}")
+    assert not offenders, (
+        "`_write_stamp` 不能同时用 bytes= 和 ** 摊字典（v0.4 的 TypeError 根因）："
+        + ", ".join(offenders))
+
+
+# ---------------------------------------------------------------- v1.1 HF 输入 / S6-S7 评测
+
+def _hf_env(ns, *, token="hf_TESTTOKEN_do_not_log", source="env:HF_TOKEN"):
+    """把 token 查找钉住，避免读到真机环境变量/缓存。"""
+    patch = _Patch(ns)
+    patch("hf_token", lambda env=None, allow_cache=True: {"token": token,
+                                                          "source": source if token else None})
+    patch("_kaggle_secret", lambda *a, **k: None)
+    patch("_hf_cache_token", lambda: None)
+    return patch
+
+
+def test_hf_token_chain(ns):
+    """凭据查找优先级：env → kaggle secret → HF 缓存文件；都没有就明确返回 None。"""
+    f = ns["hf_token"]
+    assert f(env={"HF_TOKEN": "hf_a"}, allow_cache=False) == {
+        "token": "hf_a", "source": "env:HF_TOKEN"}
+    assert f(env={"HUGGING_FACE_HUB_TOKEN": "hf_b"}, allow_cache=False)["source"] == \
+        "env:HUGGING_FACE_HUB_TOKEN"
+    # HF_TOKEN 优先于其它两个环境变量
+    r = f(env={"HF_TOKEN": "first", "HUGGINGFACEHUB_API_TOKEN": "second"},
+          allow_cache=False)
+    assert r["token"] == "first", r
+
+    patch = _Patch(ns)
+    try:
+        patch("_kaggle_secret", lambda *a, **k: "hf_secret")
+        patch("_hf_cache_token", lambda: "hf_cache")
+        assert f(env={})["source"] == "kaggle_secret"
+        patch("_kaggle_secret", lambda *a, **k: None)
+        assert f(env={})["source"] == "hf_cache_file"
+        patch("_hf_cache_token", lambda: None)
+        assert f(env={}) == {"token": None, "source": None}
+    finally:
+        patch.undo()
+
+
+def test_hf_token_never_logged(ns):
+    """token 只能以"来源名字"出现：异常消息、status() 的 JSON 里都不许有值。"""
+    secret = "hf_THIS_MUST_NEVER_APPEAR_9f8e7d"
+    patch = _hf_env(ns, token=secret)
+    try:
+        patch("_http_get", lambda *a, **k: (401, {}, b""))
+        out = ns["status"]("someone/private-repo")
+        blob = json.dumps(out, ensure_ascii=False, default=str)
+        assert secret not in blob, "status() 把 token 打出来了"
+        assert out["token_present"] is True and out["token_source"] == "env:HF_TOKEN"
+        assert out["ok"] is False and "不要把 token 写进" in out["error"]
+
+        # 底层库异常里带 token 时，redact 必须抹掉
+        assert secret not in ns["redact"](f"boom {secret} end", secret)
+        assert "***REDACTED***" in ns["redact"](f"boom {secret}", secret)
+    finally:
+        patch.undo()
+
+
+def test_hf_tree_parse(ns):
+    """tree 解析：size 取整、lfs.oid 当 sha256、非 LFS 不冒充 sha256、目录跳过。"""
+    page2 = [{"type": "file", "path": "models/qwen3-8b-IQ4_XS.gguf",
+              "size": 4560000000, "lfs": {"oid": "b" * 64}}]
+    calls = {"n": 0}
+
+    def fake_get(url, headers=None, timeout=None, follow=True, read_body=True):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            body = [{"type": "file", "path": "models/qwen3-8b-IQ2_XS.gguf",
+                     "size": 2900000000, "lfs": {"oid": "a" * 64}},
+                    {"type": "file", "path": "models/README.md", "size": 123},
+                    {"type": "directory", "path": "models/sub"}]
+            return 200, {"Link": '<https://hf/api/next>; rel="next"'}, \
+                json.dumps(body).encode()
+        return 200, {}, json.dumps(page2).encode()
+
+    patch = _Patch(ns)
+    patch("_http_get", fake_get)
+    try:
+        files = ns["repo_files"]("r/x")
+        by = {f["path"]: f for f in files}
+        assert len(files) == 3 and calls["n"] == 2, (len(files), calls)
+        g = by["models/qwen3-8b-IQ2_XS.gguf"]
+        assert g["size"] == 2900000000 and g["sha256"] == "a" * 64 and g["is_lfs"] is True
+        md = by["models/README.md"]
+        assert md["sha256"] is None and md["is_lfs"] is False, \
+            "非 LFS 文件 HF 只给 git blob sha1，不能冒充内容 sha256"
+        assert by["models/qwen3-8b-IQ4_XS.gguf"]["sha256"] == "b" * 64
+    finally:
+        patch.undo()
+
+
+def test_hf_api_errors_are_actionable(ns):
+    """401/404 都要给"怎么给 token"，而且私有仓库的 404 必须解释清楚。"""
+    patch = _Patch(ns)
+    try:
+        patch("_http_get", lambda *a, **k: (401, {}, b""))
+        try:
+            ns["repo_files"]("r/x")
+            raise AssertionError("401 必须抛")
+        except ns["GuardError"] as e:
+            assert "不要把 token 写进" in str(e) and "HF_TOKEN" in str(e)
+
+        patch("_http_get", lambda *a, **k: (404, {}, b""))
+        try:
+            ns["repo_files"]("r/x")
+            raise AssertionError("404 必须抛")
+        except ns["GuardError"] as e:
+            msg = str(e)
+            assert "404" in msg and "没有 token" in msg, msg
+    finally:
+        patch.undo()
+
+
+def test_hf_fetch_file_reuse_and_etag_guard(ns):
+    """下载：tree 的 size/oid 是期望值；命中本地就复用；etag 与 oid 不符要拒收。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_hf_fetch_"))
+    dst = tmp / "models" / "qwen3-8b-IQ2_XS.gguf"
+    state = {"fetch": 0, "etag": "a" * 64}
+
+    def fake_fetch(pin, dstp, deadline, tag, fetch_url=None, auth_headers=None):
+        state["fetch"] += 1
+        Path(dstp).write_bytes(b"z" * 16)
+        return {"origin": "downloaded", "bytes": 16,
+                "sha256": pin.get("sha256") or "z" * 64, "path": str(dstp)}
+
+    patch = _hf_env(ns)
+    patch("_fetch_pinned_blob", fake_fetch)
+    patch("resolve_signed", lambda url, token=None: ("https://cdn/x", state["etag"]))
+    expect = {"bytes": 16, "sha256": "a" * 64}
+    try:
+        r1 = ns["fetch_file"]("r/x", "models/qwen3-8b-IQ2_XS.gguf", dst,
+                              time.time() + 60, token="hf_t", expect=expect)
+        assert r1["origin"] == "downloaded" and r1["sha256_verified"] is True
+        r2 = ns["fetch_file"]("r/x", "models/qwen3-8b-IQ2_XS.gguf", dst,
+                              time.time() + 60, token="hf_t", expect=expect)
+        assert r2["origin"] == "reused" and state["fetch"] == 1, \
+            "本地已有且与 tree 记录一致时必须复用，不许重下 2.7 GiB"
+
+        state["etag"] = "b" * 64          # 上游换过文件
+        try:
+            ns["fetch_file"]("r/x", "models/qwen3-8b-IQ2_XS.gguf", dst,
+                             time.time() + 60, token="hf_t", expect=expect,
+                             force=True)
+            raise AssertionError("etag 与 tree oid 不符必须拒收")
+        except ns["GuardError"] as e:
+            assert "x-linked-etag" in str(e), str(e)
+    finally:
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_hf_verify_remote_marks_what_was_checked(ns):
+    """上传后复核：size 必比；LFS 再比内容 sha256；非 LFS 明确说没比内容。"""
+    entries = [
+        {"path": "models/a.gguf", "size": 10, "sha256": "a" * 64, "is_lfs": True},
+        {"path": "results/report.md", "size": 5, "sha256": None, "is_lfs": False},
+    ]
+    patch = _Patch(ns)
+    patch("repo_files", lambda *a, **k: entries)
+    try:
+        ok = ns["verify_remote"]("r/x", [
+            {"path": "models/a.gguf", "bytes": 10, "sha256": "a" * 64},
+            {"path": "results/report.md", "bytes": 5, "sha256": "c" * 64},
+        ])
+        assert ok["ok"] is True, ok
+        by = {f["path"]: f for f in ok["files"]}
+        assert by["models/a.gguf"]["content_sha256_verified"] is True
+        assert by["results/report.md"]["content_sha256_verified"] is False, \
+            "非 LFS 文件没有可比的内容哈希，不能假装比过"
+
+        bad = ns["verify_remote"]("r/x", [
+            {"path": "models/a.gguf", "bytes": 11, "sha256": "a" * 64}])
+        assert bad["ok"] is False and bad["files"][0]["size_match"] is False
+
+        wrong_sha = ns["verify_remote"]("r/x", [
+            {"path": "models/a.gguf", "bytes": 10, "sha256": "d" * 64}])
+        assert wrong_sha["ok"] is False, "LFS sha256 不符必须判否"
+    finally:
+        patch.undo()
+
+
+def test_hf_upload_guards_and_optin(ns):
+    """上传：没 token 就明说；缺库时禁止 `pip -U`；默认 opt-in 关闭时一个字节都不发。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_hf_up_"))
+    f = tmp / "report.md"
+    f.write_text("x", encoding="utf-8")
+    patch = _hf_env(ns, token=None)
+    try:
+        try:
+            ns["upload_files"]("r/x", [(f, "results/report.md")], token=None)
+            raise AssertionError("没有 token 必须拒绝")
+        except ns["GuardError"] as e:
+            assert "不要把 token 写进" in str(e), str(e)
+
+        # 默认不 opt-in：upload_after_run 必须直接跳过
+        CFG = ns["CFG"]
+        old = CFG["HF_UPLOAD_AFTER_RUN"]
+        CFG["HF_UPLOAD_AFTER_RUN"] = False
+        try:
+            rec = ns["upload_after_run"]([(f, "results/report.md")])
+            assert rec.get("skipped") is True, rec
+            assert "False" in rec["why"]
+        finally:
+            CFG["HF_UPLOAD_AFTER_RUN"] = old
+
+        # dry-run 不联网
+        rec = ns["upload_files"]("r/x", [(f, "results/report.md")],
+                                 token="hf_t", dry_run=True)
+        assert rec["dry_run"] is True and rec["would_upload"][0]["bytes"] == 1
+    finally:
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_hf_missing_hub_refuses_pip_u(ns):
+    """缺 huggingface_hub 时给"别乱 -U"的指引，而不是自动装。"""
+    patch = _hf_env(ns, token="hf_t")
+
+    def boom():
+        raise ns["GuardError"](
+            "上传需要 `huggingface_hub`，当前解释器没有这个包。\n"
+            "  → **不要** `pip install -U huggingface_hub`：Kaggle 镜像里 "
+            "tokenizers 0.23.x 对 hub 有 <2.0 的约束")
+    patch("_hf_hub", boom)
+    try:
+        try:
+            ns["upload_files"]("r/x", [(Path("/nope"), "a")], token="hf_t")
+            raise AssertionError("必须抛")
+        except ns["GuardError"] as e:
+            assert "pip install -U" in str(e) and "tokenizers" in str(e), str(e)
+    finally:
+        patch.undo()
+
+
+def test_eval_models_local_first(ns):
+    """本地有 S4 产物就用本地的 —— 一次 HF 请求都不该发。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_local_models_"))
+    patch = _Patch(ns)
+    patch("_model_path", lambda fmt: tmp / f"qwen3-8b-{fmt}.gguf")
+    patch("repo_files", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("本地已有文件却去列 HF")))
+    try:
+        for fmt in ("IQ2_XS", "IQ4_XS"):
+            (tmp / f"qwen3-8b-{fmt}.gguf").write_bytes(b"q" * 8)
+        models = ns["resolve_eval_models"](time.time() + 60)
+        assert set(models) == {"IQ2_XS", "IQ4_XS"}
+        assert all(m["source"] == "local_s4" for m in models.values()), models
+    finally:
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_eval_models_probe_only_never_downloads(ns):
+    """预检只探测：拿到 size/oid 就够，绝不能为了"看一眼"去拉 7 GiB。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_probe_"))
+    entries = [{"path": f"models/qwen3-8b-{f}.gguf", "size": 1234 * i,
+                "sha256": "e" * 64, "is_lfs": True}
+               for i, f in enumerate(("IQ2_XS", "IQ4_XS"), start=1)]
+    patch = _hf_env(ns)
+    patch("_model_path", lambda fmt: tmp / f"qwen3-8b-{fmt}.gguf")
+    patch("repo_files", lambda *a, **k: entries)
+    patch("_fetch_pinned_blob", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("probe_only 不许下载")))
+    old = ns["CFG"]["HF_FETCH_ARTIFACTS"]
+    try:
+        ns["CFG"]["HF_FETCH_ARTIFACTS"] = True
+        models = ns["resolve_eval_models"](time.time() + 60, probe_only=True)
+        assert all(m["source"] == "hf_pending" for m in models.values()), models
+        assert models["IQ2_XS"]["bytes"] == 1234
+        assert models["IQ4_XS"]["bytes"] == 2468
+        assert not (tmp / "qwen3-8b-IQ2_XS.gguf").exists()
+    finally:
+        ns["CFG"]["HF_FETCH_ARTIFACTS"] = old
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_fairness_from_sidecars_is_declared_not_verified(ns):
+    """sidecar 一致性可以核；但"没重算"就必须写 verified=False / 级别=hf_sidecar_declared。"""
+    base = {"base_repo": "u/Q", "base_revision": "r1",
+            "base_expected_sha256": "f" * 64, "imatrix_sha256": "i" * 64,
+            "imatrix_base_kind": "q8_0", "validity_scope": "from_high_precision",
+            "params": {"ctx": 512}}
+    models = {"IQ2_XS": {"sidecar": dict(base), "sha256_verified": True},
+              "IQ4_XS": {"sidecar": dict(base), "sha256_verified": True}}
+    fair = ns["fairness_from_sidecars"](models)
+    assert fair["verified"] is False, "没重算就不能叫 verified"
+    assert fair["verified_level"] == "hf_sidecar_declared"
+    assert fair["same_imatrix"] is True and fair["same_base"] is True
+    assert fair["imatrix_base_from_approx"] is True, "imatrix base 是 Q8_0，必须标近似"
+    assert fair["imatrix_base_consistent"]["ok"] is True
+    assert fair["sha256_verified"] is True
+
+    bad = {"IQ2_XS": {"sidecar": dict(base), "sha256_verified": True},
+           "IQ4_XS": {"sidecar": {**base, "imatrix_sha256": "j" * 64},
+                      "sha256_verified": True}}
+    fair2 = ns["fairness_from_sidecars"](bad)
+    assert fair2["same_imatrix"] is False
+    assert fair2["imatrix_base_consistent"]["ok"] is False
+
+    only_one = {"IQ2_XS": {"sidecar": dict(base)}}
+    fair3 = ns["fairness_from_sidecars"](only_one)
+    assert fair3["same_imatrix"] is None and fair3["verified"] is False
+
+
+def test_eval_cost_estimate_blocks_cpu_infeasible(ns):
+    """旧的 8×4×2048 在纯 CPU 上估算是 14 小时级 —— 必须在开跑前挡住。"""
+    est = ns["eval_cost_estimate"]
+    default = est(2, ns["CFG"]["NLL_GROUPS"], ns["CFG"]["NLL_CHUNKS_PER_GROUP"],
+                  ns["CFG"]["NLL_CTX"])
+    assert default["fits_budget"] is True, default
+    assert default["assumed_tok_per_sec"] == 2.5
+    assert "不是实测" in default["assumed_rate_note"]
+
+    old = est(2, 8, 4, 2048)
+    assert old["fits_budget"] is False, old
+    assert old["wall_est_hours"] > 10, old
+
+    gpu = est(2, 8, 4, 2048, allow_gpu=True)
+    assert gpu["gpu_allowed"] is True and gpu["wall_est_hours"] < old["wall_est_hours"]
+
+
+def test_eval_preflight_fails_closed_without_binaries(ns):
+    """没有 llama-perplexity 就停，并只给一步（把 RUN_S2 一起打开）。"""
+    patch = _Patch(ns)
+
+    def no_bin(name):
+        raise ns["GuardError"](f"找不到 {name}")
+    patch("llama_bin", no_bin)
+    try:
+        try:
+            ns["eval_preflight"](time.time() + 60)
+            raise AssertionError("必须 fail-closed")
+        except ns["GuardError"] as e:
+            msg = str(e)
+            assert "RUN_S2" in msg and "不下载模型" in msg, msg
+            assert msg.count("唯一的最简下一步") == 1, msg
+    finally:
+        patch.undo()
+
+
+def test_eval_preflight_cpu_only_and_resources(ns):
+    """体检要报 RAM/显存，并且默认 gpu_allowed=False（不擅自消耗额度）。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_pf_eval_"))
+    eval_txt = tmp / "eval.txt"
+    eval_txt.write_text(("a paragraph long enough to be counted as one line " * 2 + "\n\n") * 40,
+                        encoding="utf-8")
+    calib = tmp / "calib.txt"
+    calib.write_text(("another paragraph, definitely different from eval " * 2 + "\n\n") * 40,
+                     encoding="utf-8")
+    patch = _Patch(ns)
+    patch("llama_bin", lambda name: Path("/bin/echo"))
+    patch("_model_path", lambda fmt: tmp / f"qwen3-8b-{fmt}.gguf")
+    patch("_ensure_eval_txt", lambda d: (eval_txt, {"origin": "stub"}))
+    patch("ensure_calib_for_isolation", lambda d: calib)
+    patch("vram_gb", lambda: {"total": 15.0, "free": 14.0, "used": 1.0})
+    patch("_ram_total_gb", lambda: 24.0)
+    try:
+        for fmt in ("IQ2_XS", "IQ4_XS"):
+            (tmp / f"qwen3-8b-{fmt}.gguf").write_bytes(b"q" * 8)
+        rep = ns["eval_preflight"](time.time() + 60)
+        assert rep["binaries"] == "ok"
+        assert rep["resources"]["gpu_allowed"] is False, "默认不许上 GPU"
+        assert rep["resources"]["ram_total_gb"] == 24.0
+        assert rep["resources"]["vram_total_gb"] == 15.0
+        assert rep["cost"]["gpu_allowed"] is False
+        assert rep["calib_corpus"]["available"] is True
+    finally:
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_run_eval_switch_scope(ns):
+    """RUN_EVAL=True：只开 S6/S7，绝不带 S2/S3/S4，也不许上 GPU。"""
+    CFG, STAGES = ns["CFG"], ns["STAGES"]
+    snap = (dict(CFG), dict(STAGES))
+    try:
+        for k in ("RUN_S2", "RUN_S3", "RUN_S4"):
+            CFG[k] = False
+        CFG["RUN_EVAL"] = True
+        for k in STAGES:
+            STAGES[k] = False
+        plan = ns["_apply_run_switches"]()
+        assert plan["run_eval"] is True, plan
+        assert plan["run_s2"] is False and plan["run_s3"] is False
+        assert STAGES["S6_NLL"] is True and STAGES["S7_QUALITY"] is True
+        assert STAGES["S2_BUILD"] is False and STAGES["S3_IMATRIX"] is False
+        assert STAGES["S4_QUANT"] is False, "评测模式绝不能顺带重量化"
+        assert STAGES["S4_PREFLIGHT"] is False, "不编译不下载，预检也不必跑"
+        assert CFG["HF_FETCH_ARTIFACTS"] is True
+        assert CFG["EVAL_ALLOW_GPU"] is False
+        assert "hf:" in plan["eval_models_from"]
+    finally:
+        CFG.clear(); CFG.update(snap[0])
+        STAGES.clear(); STAGES.update(snap[1])
+
+
+def test_run_ppl_cpu_by_default(ns):
+    """有 15 GiB 显存也必须 -ngl 0；只有 EVAL_ALLOW_GPU=True 才上 GPU。"""
+    CFG = ns["CFG"]
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_ppl_"))
+    mp = tmp / "m.gguf"
+    mp.write_bytes(b"q" * (3 << 20))
+    txt = tmp / "t.txt"
+    txt.write_text("hello world", encoding="utf-8")
+    seen = {}
+
+    def fake_cmd(cmd, log_path, deadline, cwd=None, env=None):
+        seen["cmd"] = [str(c) for c in cmd]
+        Path(log_path).write_text("final estimate: PPL = 10.0000 +/- 0.1\n",
+                                  encoding="utf-8")
+        return 0, "ok"
+
+    patch = _Patch(ns)
+    patch("llama_bin", lambda name: Path("/bin/echo"))
+    patch("run_cmd", fake_cmd)
+    patch("vram_gb", lambda: {"total": 15.0, "free": 14.0, "used": 1.0})
+    old = CFG["EVAL_ALLOW_GPU"]
+    try:
+        CFG["EVAL_ALLOW_GPU"] = False
+        r = ns["run_ppl"](mp, txt, time.time() + 60, "cpu")
+        cmd = seen["cmd"]
+        assert cmd[cmd.index("-ngl") + 1] == "0", cmd
+        assert r["ngl"] == 0
+        assert abs(r["nll"] - 2.302585) < 1e-3
+
+        CFG["EVAL_ALLOW_GPU"] = True
+        ns["run_ppl"](mp, txt, time.time() + 60, "gpu")
+        cmd = seen["cmd"]
+        assert cmd[cmd.index("-ngl") + 1] == "99", cmd
+    finally:
+        CFG["EVAL_ALLOW_GPU"] = old
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s6_end_to_end_from_hf(ns):
+    """S6 走 HF 输入：记录来源、声明级 fairness、纯 CPU，且不给"已核验"的假象。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_s6_"))
+    eval_txt = tmp / "eval.txt"
+    eval_txt.write_text(("paragraph about the sea and the wind and the rain " * 2 + "\n\n") * 24,
+                        encoding="utf-8")
+    calib = tmp / "calib.txt"
+    calib.write_text(("totally different calibration sentence number " * 2 + "\n\n") * 24,
+                     encoding="utf-8")
+    sc = {"base_repo": "u/Q", "base_revision": "r1", "base_expected_sha256": "f" * 64,
+          "imatrix_sha256": "i" * 64, "imatrix_base_kind": "q8_0",
+          "validity_scope": "from_high_precision", "params": {"ctx": 512}}
+    models = {f: {"path": str(tmp / f"qwen3-8b-{f}.gguf"), "bytes": 3 << 20,
+                  "sha256": "a" * 64, "source": "hf", "sha256_verified": True,
+                  "sidecar_path": None, "sidecar": dict(sc)}
+              for f in ("IQ2_XS", "IQ4_XS")}
+
+    patch = _Patch(ns)
+    patch("eval_preflight", lambda d, do_download=False: {
+        "binaries": "ok", "resources": {"gpu_allowed": False, "ram_total_gb": 24.0},
+        "cost": {"fits_budget": True, "wall_est_hours": 0.5}})
+    patch("resolve_eval_models", lambda d, formats=None, probe_only=False: models)
+    patch("run_ppl", lambda mp, txt, d, tag: {
+        "ppl": 10.0 + (0.5 if "IQ2" in str(mp) else 0.0), "ppl_err": 0.1,
+        "nll": math.log(10.0 + (0.5 if "IQ2" in str(mp) else 0.0)),
+        "ngl": 0, "chunks": 1, "ctx": 512})
+    patch("_get", lambda name: {})            # 没有 S4 运行时记录
+    patch("resolve_imatrix", lambda: None)
+    patch("vram_gb", lambda: {"total": 15.0})
+    old = (ns["CFG"]["EVAL_TXT"], ns["CFG"]["CALIB_TXT"], ns["CFG"]["EVAL_SOURCE"],
+           ns["CFG"]["NLL_GROUPS"])
+    try:
+        ns["CFG"]["EVAL_TXT"] = str(eval_txt)
+        ns["CFG"]["CALIB_TXT"] = str(calib)
+        ns["CFG"]["EVAL_SOURCE"] = "wikitext-2-raw-v1/test"
+        ns["CFG"]["NLL_GROUPS"] = 4
+        out = ns["stage_s6_nll"](time.time() + 300)
+        assert out["fairness_verified"] is False
+        assert out["fairness_level"] == "hf_sidecar_declared"
+        assert out["isolation"]["ok"] is True, out["isolation"]
+        assert out["provenance"]["inputs"]["IQ2_XS"]["source"] == "hf"
+        assert out["provenance"]["gpu"] is False
+        assert out["provenance"]["self_quantized"] is False, \
+            "输入是 HF 上已存的产物，不是本次量化"
+        assert out["measured_throughput"]["tok_per_sec"] > 0
+        assert out["paired_delta_nll_iq2_minus_iq4"]["n"] == 4
+        assert "IQ2" in out["verdict"] or "CI" in out["verdict"]
+    finally:
+        (ns["CFG"]["EVAL_TXT"], ns["CFG"]["CALIB_TXT"], ns["CFG"]["EVAL_SOURCE"],
+         ns["CFG"]["NLL_GROUPS"]) = old
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_eval_corpus_is_test_split(ns):
+    """评测语料必须是 test split，且与 calib(train) 是两个不同的文件。"""
+    ev, ca = ns["EVAL_PINNED"], ns["CALIB_PINNED"]
+    assert ev["split"] == "test" and ca["split"] == "train"
+    assert ev["sha256"] != ca["sha256"], "同一个文件不能同时当校准集和评测集"
+    assert ev["config"] == ca["config"] == "wikitext-2-raw-v1"
+    assert ev["bytes"] == 732610 and ev["revision"] == ca["revision"]
+
+
+def test_eval_txt_full_flow(ns):
+    """`_ensure_eval_txt` 全流程：下载(桩) → 真转换 → stamp → 命中缓存。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_eval_flow_"))
+    parquet = tmp / "dl" / "test.parquet"
+    txt = tmp / "eval.txt"
+    stamp = tmp / "eval.stamp.json"
+    patch = _Patch(ns)
+    patch("_eval_parquet_path", lambda: parquet)
+    patch("_eval_txt_path", lambda: txt)
+    patch("_eval_stamp_path", lambda: stamp)
+
+    def fake_fetch(pin, dst, deadline, tag):
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
+        Path(dst).write_bytes(b"PARQUET" * 5)
+        return {"origin": "downloaded", "bytes": pin["bytes"], "sha256": pin["sha256"]}
+
+    patch("_fetch_pinned_blob", fake_fetch)
+    old = (ns["CFG"]["EVAL_TXT"], ns["CFG"]["EVAL_SOURCE"])
+    try:
+        p, meta = _with_fake_parquet(lambda: ns["_ensure_eval_txt"](time.time() + 60))
+        assert p == txt and txt.exists()
+        assert ns["CFG"]["EVAL_TXT"] == str(txt)
+        assert ns["CFG"]["EVAL_SOURCE"] == "wikitext-2-raw-v1/test"
+        assert meta["bytes"] == ns["EVAL_PINNED"]["bytes"]
+        assert meta["converted_bytes"] == txt.stat().st_size
+        st = json.loads(stamp.read_text())
+        assert st["split"] == "test" and st["converted_bytes"] == txt.stat().st_size
+
+        patch("_fetch_pinned_blob", lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("缓存命中还去下载了")))
+        _p2, meta2 = ns["_ensure_eval_txt"](time.time() + 60)
+        assert meta2["origin"] == "cache"
+    finally:
+        ns["CFG"]["EVAL_TXT"], ns["CFG"]["EVAL_SOURCE"] = old
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ---------------------------------------------------------------- runner
 
 TESTS = [
@@ -4301,6 +4987,29 @@ TESTS = [
     test_s4_preflight_config_and_budget,
     test_preflight_only_runs_only_preflight,
     test_s4_quant_budget_is_protective,
+    # v1.0.2 S3 bytes 回归
+    test_calib_txt_full_flow_no_duplicate_bytes,
+    test_no_splat_into_write_stamp,
+    # v1.1 HF 输入 / S6-S7 评测
+    test_hf_token_chain,
+    test_hf_token_never_logged,
+    test_hf_tree_parse,
+    test_hf_api_errors_are_actionable,
+    test_hf_fetch_file_reuse_and_etag_guard,
+    test_hf_verify_remote_marks_what_was_checked,
+    test_hf_upload_guards_and_optin,
+    test_hf_missing_hub_refuses_pip_u,
+    test_eval_models_local_first,
+    test_eval_models_probe_only_never_downloads,
+    test_fairness_from_sidecars_is_declared_not_verified,
+    test_eval_cost_estimate_blocks_cpu_infeasible,
+    test_eval_preflight_fails_closed_without_binaries,
+    test_eval_preflight_cpu_only_and_resources,
+    test_run_eval_switch_scope,
+    test_run_ppl_cpu_by_default,
+    test_s6_end_to_end_from_hf,
+    test_eval_corpus_is_test_split,
+    test_eval_txt_full_flow,
 ]
 
 

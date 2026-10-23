@@ -60,7 +60,7 @@ def _ensure_q8(deadline):
 
 
 
-def _parquet_to_txt(parquet_path, out_txt):
+def _parquet_to_txt(parquet_path, out_txt, label="校准语料"):
     """parquet → 纯文本（`llama-imatrix -f` 只吃文本；上游 `arg.cpp:1808`
     是 `params.prompt = read_file(value)`）。
 
@@ -125,10 +125,16 @@ def _parquet_to_txt(parquet_path, out_txt):
         raise GuardError(
             f"parquet 列 `{col}` 里没有任何非空文本（{len(rows)} 行全空）")
     os.replace(tmp, out_txt)
-    log(f"校准语料就绪：{out_txt.name} {out_txt.stat().st_size / 1024:.0f} KB，"
+    log(f"{label}就绪：{out_txt.name} {out_txt.stat().st_size / 1024:.0f} KB，"
         f"{n_nonempty} 段（{engine}，列 `{col}`）")
+    # v1.0.2：这里**不能**叫 `bytes`。调用方 `_ensure_calib_txt()` 会把本字典
+    # `**conv` 摊进 `_write_stamp(..., bytes=pin["bytes"], **conv)`，同关键字重复
+    # 直接 `TypeError: got multiple values for keyword argument 'bytes'` ——
+    # 这是 v0.4 的真实 Kaggle 失败，v1.0.1 拆包时被原样抄了回来。
+    # 改名后语义也更准确：这是**转换出来的 txt** 的字节数，不是 parquet 的。
     return {"engine": engine, "column": col, "rows": len(rows),
-            "nonempty_rows": n_nonempty, "bytes": out_txt.stat().st_size}
+            "nonempty_rows": n_nonempty,
+            "converted_bytes": out_txt.stat().st_size}
 
 
 
@@ -152,11 +158,21 @@ def _ensure_calib_txt(deadline):
     meta = _fetch_pinned_blob(pin, parquet, deadline,
                               tag=f"S3/{pin['path'].split('/')[-1]}")
     conv = _parquet_to_txt(parquet, txt)
-    _write_stamp(stamp, sha256=pin["sha256"], bytes=pin["bytes"],
-                 txt_bytes=txt.stat().st_size, repo=pin["repo"],
-                 revision=pin["revision"], config=pin["config"],
-                 split=pin["split"], **conv)
-    meta.update(conv)
+    # v1.0.2：显式合并 + 重名检查，而不是 `_write_stamp(..., bytes=..., **conv)`。
+    # 那种写法一旦 conv 里出现 bytes（v0.4/v1.0.1 就是这样）就直接 TypeError，
+    # 而且报错信息完全不指向真正的原因。
+    stamp_rec = {"sha256": pin["sha256"], "bytes": pin["bytes"],
+                 "txt_bytes": txt.stat().st_size, "repo": pin["repo"],
+                 "revision": pin["revision"], "config": pin["config"],
+                 "split": pin["split"]}
+    clash = sorted(set(stamp_rec) & set(conv))
+    if clash:
+        raise GuardError(
+            f"转换元数据与 stamp 字段重名 {clash}：继续写会把 parquet 的 "
+            f"bytes / sha256 覆盖成转换产物的大小，provenance 就错了。")
+    stamp_rec.update(conv)
+    _write_stamp(stamp, **stamp_rec)
+    meta.update(conv)          # parquet 的 bytes/sha256 必须原样保留
     return txt, meta
 
 

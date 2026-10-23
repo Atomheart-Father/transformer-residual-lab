@@ -27,11 +27,16 @@ STAGE_DEPS = {
     "S5_BYTES":       (["BASE_GGUF", "BASE_KIND"],
                        [lambda: need("BASE_GGUF"),
                         lambda: _model_path("IQ2_XS"), lambda: _model_path("IQ4_XS")]),
+    # v1.1：S6/S7 的输入可能来自 HF（本地没有时），所以指纹里既有本地路径，
+    # 也有"从哪取"（repo/revision）。本地文件存在时 _path_fp 会把它的
+    # 大小/mtime 带进来，换了 GGUF 就会让旧结果失效。
     "S6_NLL":         (["EVAL_TXT", "EVAL_SOURCE", "NLL_CTX", "NLL_CHUNKS_PER_GROUP",
-                        "NLL_GROUPS", "SEED"],
+                        "NLL_GROUPS", "SEED", "EVAL_ALLOW_GPU",
+                        "HF_FETCH_ARTIFACTS", "HF_MODEL_REPO", "HF_MODEL_REVISION"],
                        [lambda: need("EVAL_TXT"),
                         lambda: _model_path("IQ2_XS"), lambda: _model_path("IQ4_XS")]),
-    "S7_QUALITY":     (["QUALITY_PROMPTS", "QUALITY_N_PREDICT", "SEED"],
+    "S7_QUALITY":     (["QUALITY_PROMPTS", "QUALITY_N_PREDICT", "SEED", "EVAL_ALLOW_GPU",
+                        "HF_FETCH_ARTIFACTS", "HF_MODEL_REPO", "HF_MODEL_REVISION"],
                        [lambda: _model_path("IQ2_XS"), lambda: _model_path("IQ4_XS")]),
     "S8_BF16_ANCHOR": (["BASE_GGUF", "BASE_KIND", "ANCHOR_EXTRA_GB", "ANCHOR_ALLOW_APPROX"],
                        [lambda: need("BASE_GGUF")]),

@@ -4,11 +4,12 @@
 
 设计要点（对应 Issue #5 comment-6346361186 的改造要求）：
 
-* notebook 不再是 250 KB 巨物，只有 3 个 cell：开关 / 引导 / run()。
+* notebook 不再是 250 KB 巨物，只有 5 个 cell：标题 / 开关 / 开关格 / 执行 / 引导+run。
 * 执行包不从 notebook 里搬进去，而是**钉 commit 从公开仓库 sparse fetch**
   （实测：197 KiB、1–3 秒、`git rev-parse HEAD` 强校验）。私有仓库不可匿名读，
   所以这条路要求仓库是 public 的；`--embed` 可生成不依赖仓库的自包含版本。
 * 产物确定性：同样的 trlab/ 源码 → 同样的 notebook（zip 用固定时间戳 + 排序）。
+* v1.1.0：开关格多了 `RUN_EVAL`（只评测：从 HF 已存 GGUF 取输入，默认纯 CPU）。
 
 用法：
     python3 build_notebook.py                 # 钉当前 HEAD（要求工作区干净）
@@ -109,7 +110,7 @@ if _pkg_parent not in _sys.path:
 import trlab
 print(f"trlab v{{trlab.__version__}}  运行位置：{{'Kaggle' if _KAGGLE else '本地/其他'}}")
 
-trlab.run(run_s2=RUN_S2, run_s3=RUN_S3, run_s4=RUN_S4)
+trlab.run(run_s2=RUN_S2, run_s3=RUN_S3, run_s4=RUN_S4, run_eval=RUN_EVAL)
 '''
 
 EMBED_BLOCK = '''
@@ -145,12 +146,17 @@ MD_TITLE = """# transformer-residual-lab · Kaggle 低位宽量化验证台（v{
 
 | 开关 | 会做什么 | 预估 |
 |---|---|---|
+| `RUN_EVAL = True` | **只评测**：从 HF 已存的 GGUF 取输入，跑 S6 配对 NLL + S7 质量检查。不编译、不下载 BF16、不重做 S3、不重新量化；**默认纯 CPU** | ≈1 h（假设速率，非实测） |
 | `RUN_S2 = True` | 编译 llama.cpp（下载 36.6 MiB 源码 → cmake → 4 个二进制） | ≈28 分钟 |
 | `RUN_S3 = True` | 自动带上 S2，再生成 `imatrix.gguf`（下 8.11 GiB Q8_0 + wikitext，算完回收 Q8_0） | +≈10 分钟 |
 | `RUN_S4 = True` | 自动带上 S2+S3，再从**原始 BF16** 量化 IQ2_XS / IQ4_XS，并统计真实字节 | +≈30–60 分钟 |
 
-三个都 `False` 时只跑 S0/S1/S9（环境检查 + 冒烟 + 报告），**不联网、不下载任何东西**。
+全部 `False` 时只跑 S0/S1/S9（环境检查 + 冒烟 + 报告），**不联网、不下载任何东西**。
 打开任一开关前请确认右侧 `Settings → Internet = On`。
+
+`RUN_EVAL = True` 需要 HF 私有仓库的 token（`HF_TOKEN` 环境变量 / Kaggle secret /
+本机 `huggingface-cli login` 的缓存，三者任一）。**不要把 token 写进 notebook。**
+它也**不会**顺手打开 GPU —— GPU 会消耗额度，要你自己显式改 `EVAL_ALLOW_GPU`。
 
 `RUN_S4 = True` 会在**任何编译、任何下载之前**先跑一次几秒的 `S4_PREFLIGHT`：
 只读核查 working / 工作区外暂存盘的挂载、容量、写权限，以及 BF16 有没有落点、
@@ -163,12 +169,13 @@ sparse fetch `research/kaggle/trlab/`（约 200 KB，1–3 秒），校验 `git 
 [{repo_url}]({repo_url}/tree/main/research/kaggle/trlab)，
 单元测试直接 import 它，不解析 notebook。
 
-S6–S8 与 SX 本版不启动；产物与 provenance 落在 `/kaggle/working/trlab/out/`。
+S8 / SX 本版不启动；产物与 provenance 落在 `/kaggle/working/trlab/out/`。
 """
 
 MD_SWITCHES = """## 开关
 
-默认全部 `False`。想跑哪一级就改哪一个；`RUN_S4` 会自动把 S2/S3 需要的东西都带上。"""
+默认全部 `False`。想跑哪一级就改哪一个：`RUN_EVAL` 只评测（不动模型），
+`RUN_S4` 会自动把 S2/S3 需要的东西都带上。"""
 
 MD_RUN = """## 执行
 
@@ -183,10 +190,17 @@ MD_RUN = """## 执行
 把 BF16 变成只读 Input，或清掉 working 里的旧产物）；明细落在
 `/kaggle/working/trlab/out/S4_PREFLIGHT.json`。
 
-S6–S8 与 SX 默认关闭。要跑就把最后一行改成
-`trlab.run(run_s4=True, S6_NLL=True)` —— 阶段名直接当关键字参数传。"""
+**只评测（`RUN_EVAL = True`）**：输入来自 HF 私有仓库里已存的三个 GGUF，
+不编译、不下载 15 GiB BF16、不重做 S3、不重新量化。缺 token 时会在下载前停下，
+并给出三条取 token 的路（环境变量 / Kaggle secret / `huggingface-cli login` 缓存）——
+**不要把 token 写进 notebook**。默认纯 CPU（每条 llama 命令都是 `-ngl 0`），
+不会消耗 GPU 额度；要上 GPU 必须自己显式把 `EVAL_ALLOW_GPU` 改成 `True`。
 
-SWITCH_CELL = """# 只需要改这一格。三个都 False = 不联网、不下载（只跑 S0/S1/S9）。
+S8 / SX 默认关闭。要跑就把最后一行改成
+`trlab.run(run_eval=True, S8_BF16_ANCHOR=True)` —— 阶段名直接当关键字参数传。"""
+
+SWITCH_CELL = """# 只需要改这一格。全部 False = 不联网、不下载（只跑 S0/S1/S9）。
+RUN_EVAL = False    # ← 只评测（从 HF 已存 GGUF 取输入，默认纯 CPU，不重量化）
 RUN_S2 = False
 RUN_S3 = False
 RUN_S4 = False      # ← 想量化 IQ2_XS / IQ4_XS 就改成 True

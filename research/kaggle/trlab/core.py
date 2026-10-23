@@ -489,10 +489,14 @@ def run_ppl(model_path, text_path, deadline, tag):
 
     run_cmd 已经在 rc != 0 时抛 CommandFailed，所以能走到解析这一步
     说明进程正常退出（P1-E）。
+
+    v1.1：**默认纯 CPU**。GPU 会消耗额度，只有 `CFG['EVAL_ALLOW_GPU']=True`
+    时才按显存算 `-ngl`。这条不能靠"显存够就自动用"来猜。
     """
     v = vram_gb()
-    usable = (v["total"] - 1.0) if v else 0.0
-    ngl = _fit_ngl(Path(model_path).stat().st_size, usable)
+    usable = (v["total"] - 1.0) if (v and CFG.get("EVAL_ALLOW_GPU")) else 0.0
+    ngl = _fit_ngl(Path(model_path).stat().st_size, usable,
+                   CFG.get("NGL_MARGIN_GB", 2.0))
     cmd = [llama_bin("llama-perplexity"),
            "-m", model_path, "-f", text_path,
            "-c", CFG["NLL_CTX"],

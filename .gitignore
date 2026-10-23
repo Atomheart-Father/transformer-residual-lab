@@ -51,3 +51,8 @@ results/smoke_18/
 
 # short-budget probes: the fit_*.json summary is the record, the weights are scratch
 **/fit/*_short.npz
+
+# local scratch (test temp roots, throwaway logs). The kaggle test suite pins
+# tempfile.tempdir here because some sandboxes refuse to probe /tmp.
+.tmpwork/
+research/kaggle/.trlab_tmp/

@@ -6,7 +6,7 @@
 
 from pathlib import Path
 
-NOTEBOOK_VERSION = "1.0.1"
+NOTEBOOK_VERSION = "1.1.0"
 
 
 
@@ -106,6 +106,25 @@ CALIB_PINNED = {
 
 
 
+# 评测语料：wikitext-2-raw **test**。与上面的 train split 严格分离（S6 会做
+# 内容级重叠断言，重叠非零直接拒绝）。sha256 取自 HF tree API 的 lfs.oid
+# （2026-10-22 查询），与 train 的取法一致。
+EVAL_PINNED = {
+    "repo": "Salesforce/wikitext",
+    "revision": "b08601e04326c79dfdd32d625aee71d232d685c3",
+    "path": "wikitext-2-raw-v1/test-00000-of-00001.parquet",
+    "url": ("https://huggingface.co/datasets/Salesforce/wikitext/resolve/"
+            "b08601e04326c79dfdd32d625aee71d232d685c3/"
+            "wikitext-2-raw-v1/test-00000-of-00001.parquet"),
+    "sha256": "5f1bea067869d04849c0f975a2b29c4ff47d867f484f5010ea5e861eab246d91",
+    "bytes": 732610,
+    "split": "test",
+    "config": "wikitext-2-raw-v1",
+    "etag_header": "x-linked-etag",
+}
+
+
+
 STAGES = {
     "S0_ENV":         True,    # 环境 / GPU / 磁盘检查（秒级）
     "S1_SMOKE":       True,    # 短时 smoke：合成 GGUF 往返 + 显存/磁盘微基准
@@ -139,10 +158,11 @@ STAGE_REQUIRES_OK = {
     "S2_BUILD":     ["S4_PREFLIGHT"],
     "S3_IMATRIX":   ["S2_BUILD", "S4_PREFLIGHT"],
     "S4_QUANT":     ["S2_BUILD", "S3_IMATRIX", "S4_PREFLIGHT"],
-    "S5_BYTES":   ["S4_QUANT"],
-    "S6_NLL":     ["S2_BUILD"],
-    "S7_QUALITY": ["S2_BUILD"],
-    "S5_BYTES":   ["S4_QUANT", "S4_PREFLIGHT"],
+    "S5_BYTES":     ["S4_QUANT", "S4_PREFLIGHT"],
+    # S6/S7 不再要求 S2 成功：v1.1 起它们从 HF 上已存的 GGUF 直接评测，
+    # 二进制缺失由阶段自己的预检说清（而不是被 S2 的旧错误拦住）。
+    "S6_NLL":       [],
+    "S7_QUALITY":   [],
 }
 
 
@@ -154,6 +174,10 @@ CFG = {
     "RUN_S2": False,
     "RUN_S3": False,
     "RUN_S4": False,
+    # v1.1：只评测，不量化。打开后只跑 S6/S7/S9 —— 从 HF 上已存的 GGUF 直接
+    # 取输入，**不编译、不下载 15 GiB BF16、不重做 S3、不重新量化**。
+    # 默认 False：一个字节都不联网。
+    "RUN_EVAL": False,
     # ---------- 模型 ----------
     "MODEL_ID":    "Qwen/Qwen3-8B",
     "PARAM_COUNT": 8.19e9,
@@ -233,6 +257,31 @@ CFG = {
     # 刻意估高不估低；S0_ENV 会给实测值。
     "S2_BUILD_DIR_EST_GB": 3.0,
 
+    # ---------- Hugging Face（v1.1：产物存 HF，代码/小记录存 GitHub）----------
+    # 已存好的真实量化产物（S4/S5 在 Kaggle 上跑出来的，commit 097e692）。
+    # **默认 Private**：所以下面所有下载都要 token；token 从环境/平台 secret/
+    # HF 官方缓存里找，绝不打印，也绝不要求写进 notebook / git / issue。
+    "HF_MODEL_REPO":     "Atomheart-Father/trlab-qwen3-8b-quant-pilot",
+    # 想钉死可填 commit sha（HF 的 commit 不可变）；"main" 更方便但会漂。
+    "HF_MODEL_REVISION": "main",
+    # 允许 S6/S7 从 HF 取 GGUF（RUN_EVAL=True 会自动打开）。
+    # 这不是"泄露数据"，是**读取输入**；默认 False 保证不联网。
+    "HF_FETCH_ARTIFACTS": False,
+    # 结果上传是单独 opt-in：默认 False = 一个字节都不外发。
+    "HF_UPLOAD_AFTER_RUN": False,
+    "HF_UPLOAD_REPO":     "",        # 留空则用 HF_MODEL_REPO
+    "HF_TIMEOUT_SEC":     60,
+
+    # ---------- S6/S7 评测（v1.1：从 HF 已存 GGUF 直接评测，不重量化）----------
+    # **默认不许上 GPU**：GPU 会消耗额度，必须显式打开才用。
+    # False 时 llama-perplexity / llama-cli 一律 -ngl 0（纯 CPU）。
+    "EVAL_ALLOW_GPU":     False,
+    # 纯 CPU 下的墙钟上限（秒）。估算超过它就 fail-closed 并给三个选项，
+    # 而不是跑到一半被阶段预算杀掉。
+    "EVAL_CPU_MAX_WALL_SEC": 5400,
+    # 评测前是否强制核对 GGUF 与 HF tree 的 lfs.oid（4.5 GiB 约 2–4 s/个）。
+    "EVAL_VERIFY_HASH":   True,
+
     # ---------- 预算（硬上限，超了主动抛异常而不是被 OOM kill） ----------
     "MAX_WALL_SEC":      8 * 3600,
     "MAX_VRAM_GB":       14.0,
@@ -245,11 +294,16 @@ CFG = {
         "S9_REPORT": 120, "SX_EXPLORE": 1800,
     },
 
-    # ---------- 实验规模（首版刻意保守） ----------
+    # ---------- 实验规模（pilot；v1.1 起按"4 核纯 CPU 跑得完"定默认） ----------
+    # 配对比较只要求**两个模型同设置**，不需要把 ctx 拉到 2048。默认
+    # 8 组 × 1 chunk × 512 ctx = 4k token/模型、共 8k token，4 核 CPU 上
+    # 估算 ≈0.9 h（假设 2.5 tok/s，**不是实测**；llama-perplexity 是批处理，
+    # 实际通常更快）。改大之前先看 trlab/artifacts.py 的 eval_cost_estimate：
+    # 旧的 8×4×2048 在纯 CPU 上估算 14.6 h，S6 会被阶段预算杀掉。
     "IMATRIX_CTX":           512,
     "IMATRIX_CHUNKS":        32,
-    "NLL_CTX":               2048,
-    "NLL_CHUNKS_PER_GROUP":  4,
+    "NLL_CTX":               512,
+    "NLL_CHUNKS_PER_GROUP":  1,
     "NLL_GROUPS":            8,      # pilot 级；正式 CI 需按独立文档重新设计
     "QUALITY_PROMPTS":       8,
     "QUALITY_N_PREDICT":     32,
@@ -307,8 +361,25 @@ def _apply_run_switches():
     （/kaggle/input 已挂 > working 外暂存盘 > working 装得下才下），
     这样既不会因为用户忘了配路径而失败，也不会盲目往 20 GB 的 working 里塞 15 GiB。
     """
+    if CFG["RUN_EVAL"]:
+        # v1.1：只评测。输入从 HF 上已存的量化 GGUF 取，**不碰** S2/S3/S4：
+        # 不编译（二进制缺失时 S6 自己的预检会说清）、不下载 BF16、不重量化。
+        STAGES["S6_NLL"] = True
+        STAGES["S7_QUALITY"] = True
+        CFG["HF_FETCH_ARTIFACTS"] = True
+        CFG["EVAL_ALLOW_GPU"] = False      # 绝不擅自上 GPU 消耗额度
+        if not (CFG["RUN_S2"] or CFG["RUN_S3"] or CFG["RUN_S4"]):
+            return {"run_eval": True, "run_s2": False, "run_s3": False,
+                    "run_s4": False,
+                    "stages": [k for k, v in STAGES.items() if v],
+                    "eval_models_from": f"hf:{CFG['HF_MODEL_REPO']}"
+                                        f"@{CFG['HF_MODEL_REVISION']}",
+                    "eval_corpus": f"{EVAL_PINNED['config']}/{EVAL_PINNED['split']}",
+                    "gpu": False}
+
     if not (CFG["RUN_S2"] or CFG["RUN_S3"] or CFG["RUN_S4"]):
-        return {"run_s2": False, "run_s3": False, "run_s4": False}
+        return {"run_s2": False, "run_s3": False, "run_s4": False,
+                "run_eval": False}
 
     if CFG["RUN_S4"]:
         _s4_common()
@@ -323,7 +394,7 @@ def _apply_run_switches():
         CFG["S4_AUTO_FETCH_BASE"] = True
         CFG["S4_RECLAIM_Q8_CACHE"] = True
         CFG["S3_DELETE_Q8_AFTER"] = True
-        return {"run_s2": True, "run_s3": True, "run_s4": True,
+        return {"run_s2": True, "run_s3": True, "run_s4": True, "run_eval": bool(CFG["RUN_EVAL"]),
                 "stages": [k for k, v in STAGES.items() if v],
                 "commit": CFG["LLAMA_COMMIT"],
                 "cuda_arch": CFG["CUDA_ARCH"],
@@ -334,7 +405,7 @@ def _apply_run_switches():
 
     if CFG["RUN_S3"]:
         _s4_common()
-        return {"run_s2": True, "run_s3": True, "run_s4": False,
+        return {"run_s2": True, "run_s3": True, "run_s4": False, "run_eval": bool(CFG["RUN_EVAL"]),
                 "stages": [k for k, v in STAGES.items() if v],
                 "commit": CFG["LLAMA_COMMIT"],
                 "cuda_arch": CFG["CUDA_ARCH"],
@@ -348,7 +419,7 @@ def _apply_run_switches():
     CFG["CUDA_NO_VMM"] = True  # Kaggle T4 上 CUDA::cuda_driver target 找不到（v0.3.1）
     CFG["BUILD_CUDA"] = True   # 三个工具都有 CPU 路径，nvcc 缺失时预检会直接提示
     CFG["BUILD_JOBS"] = 4      # Kaggle 只有 4 核
-    return {"run_s2": True, "run_s3": False, "run_s4": False,
+    return {"run_s2": True, "run_s3": False, "run_s4": False, "run_eval": bool(CFG["RUN_EVAL"]),
             "stages": [k for k, v in STAGES.items() if v],
             "commit": CFG["LLAMA_COMMIT"],
             "cuda_arch": CFG["CUDA_ARCH"]}

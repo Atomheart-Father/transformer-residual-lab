@@ -247,18 +247,25 @@ def _write_stamp(p, **kw):
 
 
 
-def _stream_blob(url, path, offset, hasher, deadline, tag, expect_bytes):
+def _stream_blob(url, path, offset, hasher, deadline, tag, expect_bytes,
+                 headers=None):
     """从 offset 处继续把 url 流式追加写进 path。
 
     返回 (http_status, written_now, total, etag)。任何网络异常都原样抛出，
     由调用方决定是保留 `.partial` 还是重来 —— 这里不擅自删文件。
+
+    `headers` 用于私有仓库的 Authorization（v1.0.2）。注意 HF 的 resolve URL
+    会 302 到带签名的 CDN 地址，那个地址**不需要**也不该带 Authorization；
+    调用方应先用 `hf.resolve_signed()` 换到签名地址再进来（见 trlab/hf.py）。
     """
     import urllib.request
 
-    headers = {"User-Agent": "trlab-kaggle/0.4"}
+    hdrs = {"User-Agent": "trlab-kaggle/0.4"}
+    if headers:
+        hdrs.update({k: v for k, v in headers.items() if v})
     if offset:
-        headers["Range"] = f"bytes={offset}-"
-    req = urllib.request.Request(url, headers=headers)
+        hdrs["Range"] = f"bytes={offset}-"
+    req = urllib.request.Request(url, headers=hdrs)
     with urllib.request.urlopen(req, timeout=60) as r:
         status = getattr(r, "status", None) or r.getcode()
         total = int(r.headers.get("Content-Length") or 0)
@@ -286,7 +293,7 @@ def _stream_blob(url, path, offset, hasher, deadline, tag, expect_bytes):
 
 
 
-def _fetch_pinned_blob(pin, dst, deadline, tag):
+def _fetch_pinned_blob(pin, dst, deadline, tag, fetch_url=None, auth_headers=None):
     """下载 pin 的单个文件到 dst：断点续传 + 完整性校验（v0.4 / D-4、D-5）。
 
     四条硬规则：
@@ -310,7 +317,7 @@ def _fetch_pinned_blob(pin, dst, deadline, tag):
     dst.parent.mkdir(parents=True, exist_ok=True)
     part = dst.with_name(dst.name + ".partial")
     side = dst.with_name(dst.name + ".partial.json")
-    expect_bytes, expect_sha = int(pin["bytes"]), pin["sha256"]
+    expect_bytes, expect_sha = int(pin["bytes"]), (pin.get("sha256") or None)
     t0 = time.time()
 
     def _save_sidecar(done, digest):
@@ -351,14 +358,16 @@ def _fetch_pinned_blob(pin, dst, deadline, tag):
 
     try:
         status, written, total, etag = _stream_blob(
-            pin["url"], part, offset, hasher, deadline, tag, expect_bytes)
+            fetch_url or pin["url"], part, offset, hasher, deadline, tag,
+            expect_bytes, headers=auth_headers)
         if offset and status != 206:
             # 服务器不支持/忽略了 Range：只能从头下，不能把 200 的全文接到半份后面
             log(f"{tag}: 对 Range 返回 {status} 而不是 206 → 从头下载")
             part.unlink()
             offset, hasher = 0, hashlib.sha256()
             status, written, total, etag = _stream_blob(
-                pin["url"], part, 0, hasher, deadline, tag, expect_bytes)
+                fetch_url or pin["url"], part, 0, hasher, deadline, tag,
+                expect_bytes, headers=auth_headers)
     except (GuardError, BudgetExceeded):
         _save_sidecar(_partial_size(part), hasher.hexdigest())
         raise
@@ -366,13 +375,17 @@ def _fetch_pinned_blob(pin, dst, deadline, tag):
             socket.timeout, OSError) as e:
         # 保留 .partial + sidecar：重跑会从这里续，不必把 8 GiB 重下一遍
         _save_sidecar(_partial_size(part), hasher.hexdigest())
+        if str(tag).startswith("S3"):
+            tail = (f"  → 若反复失败：检查 Settings → Internet 是否为 On；"
+                    f"或把 {S3_PINNED['repo']} 的 Q8_0 手动挂成 Input 并设 "
+                    f"CFG['IMATRIX_BASE'] 指向它。")
+        else:
+            tail = ("  → 若反复失败：检查网络 / Settings → Internet；"
+                    "私有 HF 仓库还要确认 token 仍然有效（重跑会从这里续传）。")
         raise GuardError(
             f"{tag}: 下载失败（{type(e).__name__}: {e}）。\n"
             f"  已保留断点 {part}（{_partial_size(part) / 2**30:.2f} GiB），"
-            f"重跑本 notebook 会从这里续传，不用重新下满 8 GiB。\n"
-            f"  → 若反复失败：检查 Settings → Internet 是否为 On；"
-            f"或把 {S3_PINNED['repo']} 的 Q8_0 手动挂成 Input 并设 "
-            f"CFG['IMATRIX_BASE'] 指向它。")
+            f"重跑会从这里续传，不用从零开始。\n" + tail)
 
     got = part.stat().st_size
     digest = hasher.hexdigest()
@@ -390,7 +403,7 @@ def _fetch_pinned_blob(pin, dst, deadline, tag):
             f"{tag}: 下载得到 {got} B，预登记 {expect_bytes} B，差 "
             f"{expect_bytes - got} B。已保留断点，重跑会续传。")
 
-    if etag and etag != expect_sha:
+    if etag and expect_sha and etag != expect_sha:
         part.unlink()
         side.unlink(missing_ok=True)
         raise GuardError(
@@ -398,7 +411,7 @@ def _fetch_pinned_blob(pin, dst, deadline, tag):
             f"  预期 {expect_sha}\n  实际 {etag}\n"
             "上游文件被替换过，拒绝继续。")
 
-    if digest != expect_sha:
+    if expect_sha and digest != expect_sha:
         part.unlink()
         side.unlink(missing_ok=True)
         raise GuardError(
