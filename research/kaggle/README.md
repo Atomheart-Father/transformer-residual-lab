@@ -113,8 +113,8 @@ S2/S3/S4/S5 会一条龙跑完。**唯一的例外**：BF16 有 15.26 GiB，与�
 | `S3_IMATRIX` | 关（`RUN_S3`/`RUN_S4=True` 时自动开） | S2 + imatrix base + 校准语料，**全部由 S3 自己取**；已有可信 imatrix 时整段跳过 | 3600 s | `imatrix.gguf` + sha256 + provenance sidecar | 校准信息是否对等 |
 | `S4_QUANT` | 关（`RUN_S4=True` 时自动开） | S2 + S3 + 量化 base（**BF16，由 S4 自己取**） | 1800 s | IQ2_XS + IQ4_XS 两个 GGUF + provenance + 逐文件 bpw | 能否编码、字节多少 |
 | `S5_BYTES` | 关（`RUN_S4=True` 时自动开） | S4（或任意 GGUF） | 300 s | 逐张量类型字节、按 attn/ffn/embed 分类 | 哪些张量没被低位量化 |
-| `S6_NLL` | 关 | S2 + S5 + 评测语料 | 5400 s | 分组配对 NLL + bootstrap CI | 2.31 bpw 差多少 nats |
-| `S7_QUALITY` | 关 | S2 + S5 | 1800 s | 贪心续写一致性、repeat4 | 有没有整体崩塌 |
+| `S6_NLL` | 关（`RUN_EVAL=True` 时自动开） | 二进制 + **HF 上已存的 IQ2_XS/IQ4_XS**（v1.1 起不再要求本轮 S2/S5）+ 评测语料（wikitext **test**，自己取） | 5400 s | 分组配对 NLL + bootstrap CI | 2.31 bpw 差多少 nats |
+| `S7_QUALITY` | 关（`RUN_EVAL=True` 时自动开） | 同上（同 prompt / 同 seed / 同 n_predict） | 1800 s | 贪心续写一致性、repeat4 | 有没有整体崩塌 |
 | `S8_BF16_ANCHOR` | 关 | 高精度 GGUF + 足够显存 | 3600 s | 锚点 NLL 或明确的 skip 记录 | 锚点能不能上，`rho` 能不能算 |
 | `SX_EXPLORE` | 关 | 第三方 GGUF | 1800 s | 字节 + NLL，标 `provenance=third_party` | 这个文件本身如何（**不参与公平比较**） |
 | `S9_REPORT` | **开** | — | 120 s | `report.md` + `results.json` | 汇总 |
