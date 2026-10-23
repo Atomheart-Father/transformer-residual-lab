@@ -2,7 +2,7 @@
 
 `trlab_kaggle.ipynb` —— 一个**可直接上传到 Kaggle** 的独立 Notebook，用来在同一份 `Qwen/Qwen3-8B` 上产出 `IQ2_XS` 与 `IQ4_XS`，并比较**真实文件字节**、**配对 NLL**、**有限配对质量**。
 
-当前版本 **v1.2.1**（可丢弃 GPU worker 策略 + 编译前自动轻量预检门）。**v1.2.1 的一句话**：`RUN_EVAL=True` 在 S0/S1 之后、28 分钟 S2 编译**之前**，会自动跑一次 1 分钟级轻量预检（Range 0-0 探两个 GGUF、真下 2 KB sidecar、真跑语料 clean holdout；不编译、不下 7 GiB、不需要 GPU），只有 `ok=True` 才进 S2，不过就地停并写 `PREFLIGHT_EVAL.json` + `FAILURE.json`，不伪装成实验完成（见第九之十四）。**v1.1.1 的一句话**：模型与 provenance 已在 HF 持久保存，所以 **Kaggle 只是一台免费、可随时关机的算力机器** —— 首跑失败就直接关掉 Session，本地修代码 → commit → 新 Session 重跑，输入不用重下。据此改了三处行为：**① 评测默认用 GPU**（Kaggle 上开的就是 GPU Session，不该让 8B 在 4 核 CPU 上磨）；**② 一次只装一个模型**，跑完释放再装下一个；**③ 每个阶段跑完就把小结果出站到 HF 并远端复核**（白名单 5 个文件，不传模型/日志/secrets），失败则写 `FAILURE.json` 并明确列出"哪些结果尚未持久化"。
+当前版本 **v1.2.2**（可丢弃 GPU worker 策略 + 编译前自动轻量预检门）。**v1.2.2 的一句话**：v1.2.1 的预检门在真机首跑炸在自己的**报告函数**上（`artifacts.py` 漏 `import json`、`OUT` 也没 import，后者还被 `except: pass` 静默吞掉 → `PREFLIGHT_EVAL.json` 没落盘）——两处都补上，且预检**自身**抛异常也走终止路径（FAILURE.json + `ok=False`），不再裸抛 traceback（见第九之十五）。**v1.2.1 的一句话**：`RUN_EVAL=True` 在 S0/S1 之后、28 分钟 S2 编译**之前**，会自动跑一次 1 分钟级轻量预检（Range 0-0 探两个 GGUF、真下 2 KB sidecar、真跑语料 clean holdout；不编译、不下 7 GiB、不需要 GPU），只有 `ok=True` 才进 S2，不过就地停并写 `PREFLIGHT_EVAL.json` + `FAILURE.json`，不伪装成实验完成（见第九之十四）。**v1.1.1 的一句话**：模型与 provenance 已在 HF 持久保存，所以 **Kaggle 只是一台免费、可随时关机的算力机器** —— 首跑失败就直接关掉 Session，本地修代码 → commit → 新 Session 重跑，输入不用重下。据此改了三处行为：**① 评测默认用 GPU**（Kaggle 上开的就是 GPU Session，不该让 8B 在 4 核 CPU 上磨）；**② 一次只装一个模型**，跑完释放再装下一个；**③ 每个阶段跑完就把小结果出站到 HF 并远端复核**（白名单 5 个文件，不传模型/日志/secrets），失败则写 `FAILURE.json` 并明确列出"哪些结果尚未持久化"。
 
 **v1.1.0 的一句话**：S4/S5 的真实量化产物已经备份在 Hugging Face 私有仓库 `Atomheart-Father/trlab-qwen3-8b-quant-pilot`（commit `097e692`），所以 S6/S7 **不再需要重新下载 15 GiB BF16、不再需要重做 S3、不再需要重新量化**——它们直接从 HF 上那三个 GGUF 取输入。分支原则：**模型与 sidecar 存 HF，代码与小型 JSON/report 存 GitHub，云算力只是可替换的执行端**。同时修掉一个 P0 回归（S3 的 `_write_stamp() got multiple values for keyword argument 'bytes'`，见第九之九）。（该版本发布时 S6/S7 尚未在真实 Kaggle 上跑过；**此后 S7_QUALITY 已真实跑通过一次**，S6_NLL 仍零真实数据 —— 以第九之十四第 4 节的时点表述为准。）
 
@@ -946,7 +946,7 @@ CPU 不可行时 fail closed、预检在缺二进制时说唯一一步、
 `RUN_EVAL` 开关作用域、`run_ppl` 默认 `-ngl 0`、S6 从 HF 端到端、
 评测语料是 test split（不是 train）、`_ensure_eval_txt` 全流程。
 
-当前结果：**174/174 通过，约 60 秒**（v1.2.0 是 171 项、v1.1.3 是 155 项、v1.1.2 是 149 项、v1.1.1 是 144 项、v1.0.1 是 118 项；见第九之十～第九之十四）。
+当前结果：**176/176 通过，约 60 秒**（v1.2.1 是 174 项、v1.2.0 是 171 项、v1.1.3 是 155 项、v1.1.2 是 149 项、v1.1.1 是 144 项、v1.0.1 是 118 项；见第九之十～第九之十五）。
 
 
 ---
@@ -1370,6 +1370,42 @@ S0/S1 → 二进制探活（缺了只记日志）→ HF 授权门（1 次只读�
   S7_QUALITY=ok 是改写前的代码）。
 - 自动 S2 的真 CUDA 编译、带真 token 的 7.3 GB 下载/上传、私仓同源 200 + Bearer，
   仍未在真机发生。
+- 真机首跑（v1.2.1 notebook）暴露了预检**报告函数**的两个漏 import，46.4 秒时
+  炸在 `_write_preflight`（`NameError: name 'json' is not defined`）——已由
+  v1.2.2 修复，见第九之十五。**好消息**：那一轮预检的四项检查（授权、两个 GGUF
+  的 Range 探测、sidecar 实下、语料 clean holdout）在真机上全部真实通过。
+
+---
+
+## 九之十五、v1.2.2：预检门真机首跑热修——报告函数漏 import（2026-10-23）
+
+v1.2.1 notebook 真机首跑（`RUN_EVAL=True`，46.4 s）炸出一张只有帧没有结论的
+traceback：`artifacts.py` 的 `_write_preflight()` 里 `json.dumps` 抛
+`NameError: name 'json' is not defined`。同一函数里还埋着更隐蔽的一个：
+`write_json(OUT / "PREFLIGHT_EVAL.json", rep)` 的 `OUT` **也没 import**，
+而它被 `except Exception: pass` 包着 —— NameError 被静默吞掉，所以真机上
+`PREFLIGHT_EVAL.json` 根本没落盘，用户除了 traceback 什么证据都没有。
+
+| # |  bug | 为什么测试没抓住 | 修法 |
+|---|---|---|---|
+| 1 | `artifacts.py` 用 `json.dumps` 但没 `import json` | `lightweight_eval_preflight` 自 v1.2.0 起只挂在 CLI `--preflight-eval`，**没有任何测试端到端跑过它**（测试只覆盖了另一个 `eval_preflight`） | 补 `import json`；新增**真跑** `lightweight_eval_preflight` 的端到端回归（网络层全桩、语料用真文件让 `build_holdout` 真跑、断言 `PREFLIGHT_EVAL.json` 落盘且可解析） |
+| 2 | `artifacts.py` 用 `OUT` 但没 import；异常被 `except: pass` 吞掉 | 同上；且吞异常让"没落盘"完全无声 | 补 import `OUT`；全包运行时扫描确认无其它模块犯同样错 |
+| 3 | 预检**自身**抛异常 → 裸 traceback 冲出 `run()` | v1.2.1 只处理了"checks 里某一项失败" | `_eval_preflight_gate()` 捕获一切异常，合成 `ok=False` 报告（`checks.preflight_itself`），走同一条终止路径：`FAILURE.json`（cause=`preflight_error`，next_step 明说"本工具的 bug，不是你的 Secrets"）+ 失败报告 |
+
+顺带修掉本版自引入的一个分类 bug：`_preflight_cause()` 用
+`checks.get(x) or {}` + `not ....get("ok")` 判断失败，**键不存在时也判失败**
+（空 dict 的 `.get("ok")` 是 None）——预检自身异常合成的报告被误判成
+`hf_other`。现在必须"键在、是 dict、且 ok 不为 True"才算失败。
+
+### 测试：174 → **176 项**
+
+| 测试 | 钉住什么 |
+|---|---|
+| `test_lightweight_eval_preflight_end_to_end_writes_json` | **真跑** `lightweight_eval_preflight` 到 `_write_preflight`：ok=True 且 `PREFLIGHT_EVAL.json` 落盘可解析（就是这条会抓住本次两个漏 import） |
+| `test_run_eval_preflight_exception_aborts_cleanly` | 预检抛 `NameError` → `ok=False`/`failed=[PREFLIGHT_EVAL]`/不编译/不评测/`cause=preflight_error`/next_step 不怪 Secrets |
+
+本机真实验证：`python -m trlab.run --preflight-eval`（无 token 场景）不再崩，
+`PREFLIGHT_EVAL.json` 正常落盘（`ok=False`、`why=HF 授权检查失败（no_token）`）。
 
 ---
 
@@ -1379,7 +1415,7 @@ S0/S1 → 二进制探活（缺了只记日志）→ HF 授权门（1 次只读�
 python3 research/kaggle/test_trlab.py
 ```
 
-不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。v1.0 起它**直接 import `trlab/` 包**（不再解析 notebook 字符串），在临时工作目录里补齐默认三阶段，然后跑 174 项断言。当前结果：**174/174 通过，约 60 秒**（v1.0.1 是 118 项 / 约 31 秒；多出来的时间主要是新增项里那几条要在干净子进程里单独 import 模块、以及 bootstrap 用本地 git 仓真跑 fetch）。
+不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。v1.0 起它**直接 import `trlab/` 包**（不再解析 notebook 字符串），在临时工作目录里补齐默认三阶段，然后跑 176 项断言。当前结果：**176/176 通过，约 60 秒**（v1.0.1 是 118 项 / 约 31 秒；多出来的时间主要是新增项里那几条要在干净子进程里单独 import 模块、以及 bootstrap 用本地 git 仓真跑 fetch）。
 
 v1.0 新增的 10 项架构回归（对应 Issue #5 的验收清单）：
 

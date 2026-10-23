@@ -14,7 +14,7 @@
 **不重量化、不下载 BF16、不重做 S3。**
 """
 
-from .config import CFG, EVAL_PINNED, FORMATS, MDLS, WORK
+from .config import CFG, EVAL_PINNED, FORMATS, MDLS, OUT, WORK
 from .errors import GuardError
 from .core import _read_json, log, vram_gb, write_json
 from .fetch import _disk_precheck, _fetch_pinned_blob, _read_stamp, _write_stamp
@@ -24,6 +24,7 @@ from .stages_imatrix import _parquet_to_txt
 from .stages_quant import _ram_precheck
 from . import hf
 
+import json
 import os
 from pathlib import Path
 

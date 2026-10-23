@@ -5517,6 +5517,115 @@ def test_run_eval_preflight_corpus_overlap_aborts_before_compile(ns):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ---------------------------------------------------------------- v1.2.2：预检自身必须 fail-closed
+# 真实首跑（v1.2.1）现场：预检四项检查全过，却炸在报告函数
+# `_write_preflight` 的 `json.dumps` —— artifacts.py 从未 import json。
+# 裸 traceback 冲出 run()：没有 FAILURE.json、没有 PREFLIGHT_EVAL.json。
+# 修法 = 补 import + 预检自身异常也走终止路径 + 两条回归。
+
+
+def _stub_net_for_preflight(ns, tmp, patch, eval_txt, calib):
+    """把 `lightweight_eval_preflight` 的网络层全部桩掉，语料用真文件
+    （让 `build_holdout` 真跑），二进制给真路径。"""
+    entries = [{"path": f"qwen3-8b-{f}.gguf", "size": 2360000000,
+                "sha256": "a" * 64} for f in ("IQ2_XS", "IQ4_XS")]
+    entries += [{"path": f"qwen3-8b-{f}.gguf.provenance.json", "size": 2048,
+                 "sha256": None} for f in ("IQ2_XS", "IQ4_XS")]
+    patch("hf_token", lambda *a, **k: {"token": "hf_fake", "source": "env:HF_TOKEN"})
+    patch("check_access", lambda *a, **k: {"ok": True, "status": "ok",
+                                           "n_files": len(entries)})
+    patch("repo_files", lambda *a, **k: entries)
+    patch("probe_remote_file",
+          lambda repo, path, deadline=None, **k: {"ok": True, "path": path,
+                                                  "probe_status": 206})
+    patch("fetch_file", lambda repo, path, dst, deadline=None, **k:
+          {"bytes": 2048, "path": str(dst), "fetch_auth": "bearer_same_origin",
+           "sha256_verified": True})
+    patch("_ensure_eval_txt", lambda d: (eval_txt, {"origin": "stub"}))
+    patch("ensure_calib_for_isolation", lambda d: calib)
+    patch("llama_bin", lambda name: Path("/bin/echo"))
+    return entries
+
+
+def test_lightweight_eval_preflight_end_to_end_writes_json(ns):
+    """v1.2.2 回归（真机 NameError 的教训）：**真跑** `lightweight_eval_preflight`
+    到 `_write_preflight` —— 那里漏过 `import json`。网络层全桩、语料用真文件
+    （build_holdout 真跑）、二进制真路径；断言 ok=True 且 PREFLIGHT_EVAL.json
+    真的落盘且可解析。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_pfreal_"))
+    eval_txt = tmp / "eval.txt"
+    eval_txt.write_text(
+        ("a paragraph long enough to be counted as one line " * 2 + "\n\n") * 40,
+        encoding="utf-8")
+    calib = tmp / "calib.txt"
+    calib.write_text(
+        ("another paragraph, definitely different from eval " * 2 + "\n\n") * 40,
+        encoding="utf-8")
+    patch = _Patch(ns)
+    patch("OUT", tmp)
+    _stub_net_for_preflight(ns, tmp, patch, eval_txt, calib)
+    try:
+        rep = ns["lightweight_eval_preflight"](time.time() + 60)
+        assert rep["ok"] is True, rep
+        assert rep["checks"]["hf_access"]["ok"] is True
+        assert all(v["ok"] for v in rep["checks"]["gguf_probe"].values()), rep
+        assert all(v["ok"] for v in rep["checks"]["sidecar_download"].values()), rep
+        assert rep["checks"]["corpus"]["ok"] is True, rep["checks"]["corpus"]
+        assert rep["checks"]["binaries"]["ok"] is True, rep
+        fp = tmp / "PREFLIGHT_EVAL.json"
+        assert fp.exists(), "预检必须把报告落盘（_write_preflight 真跑过）"
+        doc = json.loads(fp.read_text(encoding="utf-8"))
+        assert doc["ok"] is True and doc["stage"] == "PREFLIGHT_EVAL", doc
+    finally:
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_run_eval_preflight_exception_aborts_cleanly(ns):
+    """v1.2.2 回归：预检**自身**抛异常 → 走终止路径（FAILURE.json +
+    PREFLIGHT_EVAL.json + ok=False），不许裸 traceback 冲出 run()。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_pfraise_"))
+    _real_clear = ns["clear_access_cache"]
+    _real_clear()
+    stages_snap = dict(ns["STAGES"])
+    state_snap = dict(ns["STATE"])
+    patch = _Patch(ns)
+    patch("OUT", tmp)
+    patch("hf_token", lambda *a, **k: {"token": "hf_fake", "source": "env:HF_TOKEN"})
+    patch("repo_files", lambda *a, **k: [{"path": "a.gguf", "size": 1, "sha256": None}])
+
+    def boom(deadline, formats=None):
+        raise NameError("name 'json' is not defined")   # 真机现场的原样错误
+    patch("lightweight_eval_preflight", boom)
+    patch("llama_bin", lambda name: Path("/bin/echo"))
+    fake, calls = _fake_runner(ns)
+    patch("run_stage", fake)
+    old = {k: ns["CFG"][k] for k in ("RUN_S2", "RUN_S3", "RUN_S4", "RUN_EVAL")}
+    try:
+        out = ns["run"](run_eval=True)
+        assert out["ok"] is False, out
+        assert out["failed"] == ["PREFLIGHT_EVAL"], out
+        assert "S2_BUILD" not in calls, f"预检自身异常也不许编译：{calls}"
+        assert "S6_NLL" not in calls and "S7_QUALITY" not in calls, calls
+        assert "S9_REPORT" in calls, "失败也要出一份报告"
+        doc = json.loads((tmp / "FAILURE.json").read_text(encoding="utf-8"))
+        assert doc["stage"] == "PREFLIGHT_EVAL", doc
+        assert doc["cause"] == "preflight_error", doc
+        assert "Issue #5" in doc["next_step"], doc["next_step"]
+        assert "不是你的 Secrets" in doc["next_step"], doc["next_step"]
+        pf = json.loads((tmp / "PREFLIGHT_EVAL.json").read_text(encoding="utf-8"))
+        assert pf["ok"] is False, pf
+        assert pf["checks"]["preflight_itself"]["ok"] is False, pf
+        assert "json" in pf["checks"]["preflight_itself"]["why"], pf
+    finally:
+        _real_clear()
+        ns["CFG"].update(old)
+        ns["STAGES"].clear(); ns["STAGES"].update(stages_snap)
+        ns["STATE"].clear(); ns["STATE"].update(state_snap)
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ---------------------------------------------------------------- v1.2.0 系统性审计
 # S6/S7 稳定化：隔离取证与 clean holdout、HF 下载链路、来源归属、
 # 解析与证据等级、run_id/FAILURE 隔离、mini end-to-end。
@@ -6531,6 +6640,8 @@ TESTS = [
     test_run_eval_auto_preflight_blocks_s2_compile,
     test_run_eval_auto_preflight_ok_skips_compile_when_binaries_present,
     test_run_eval_preflight_corpus_overlap_aborts_before_compile,
+    test_lightweight_eval_preflight_end_to_end_writes_json,
+    test_run_eval_preflight_exception_aborts_cleanly,
     # v1.2.0 系统性审计：隔离/holdout、HF 下载链路、来源归属、解析与证据等级
     test_resolve_url_model_repo_has_no_models_prefix,
     test_normalize_expect_schema_is_fail_closed,

@@ -298,11 +298,32 @@ def _eval_preflight_gate(plan=None):
     进入 S2；缺二进制只 warn（S2 会自动补编，这正是预检的设计语义）。
 
     语料只有几 MB 且有 stamp 缓存：预检下过之后 S6 直接复用，不会重下。
+
+    v1.2.2：预检**自身**抛异常也必须 fail-closed。真实首跑（v1.2.1）正是
+    `_write_preflight` 漏 `import json` 炸出 NameError —— 裸 traceback 冲出
+    `run()`，没有 FAILURE.json、没有 PREFLIGHT_EVAL.json，用户只看到一堆帧。
+    现在一律转成 `ok=False` 的报告，走同一条终止路径（见
+    `_abort_eval_preflight`）。
     """
     from .artifacts import lightweight_eval_preflight
     log("评测链路轻量预检（编译前；不编译、不下 7 GiB、不需要 GPU）："
         "GGUF Range 0-0 探测 + sidecar 实下 + 语料 clean holdout")
-    return lightweight_eval_preflight(time.time() + 300)
+    try:
+        return lightweight_eval_preflight(time.time() + 300)
+    except Exception as e:              # noqa: BLE001 - 预检自己出错也要fail-closed
+        rep = {"stage": "PREFLIGHT_EVAL", "ok": False, "repo": CFG["HF_MODEL_REPO"],
+               "revision": CFG["HF_MODEL_REVISION"], "warnings": [],
+               "why": "预检自身抛了异常（不是 checks 里的某一项失败）",
+               "checks": {"preflight_itself": {
+                   "ok": False,
+                   "why": f"{type(e).__name__}: {str(e)[:400]}"}}}
+        try:
+            write_json(OUT / "PREFLIGHT_EVAL.json", rep)
+        except Exception:
+            pass
+        log(f"!! 预检自身异常（{type(e).__name__}: {str(e)[:200]}）"
+            " —— 按失败处理，不裸抛 traceback")
+        return rep
 
 
 def _preflight_cause(rep):
@@ -312,11 +333,26 @@ def _preflight_cause(rep):
     Secrets），只补预检特有的几类：远端总长与 tree 不符、etag 与 oid 不符、
     sidecar 不在 tree 里、语料重叠超上限/剩余太少/取不到。
     """
+    # 注意：**键不存在 ≠ 失败**。v1.2.2 首版用 `checks.get(x) or {}` 判断，
+    # 空 dict 的 `.get("ok")` 是 None → `not None` 为 True，于是预检自身异常
+    # 合成的报告（只有 preflight_itself）被误判成 hf_access 失败。必须
+    # "键在、是 dict、且 ok 不为 True" 才算失败。
     checks = rep.get("checks") or {}
-    acc = checks.get("hf_access") or {}
-    if not acc.get("ok"):
+    acc = checks.get("hf_access")
+    if isinstance(acc, dict) and not acc.get("ok"):
         status = str(acc.get("status") or "error")
         return _CAUSE_BY_AUTH.get(status, "hf_other"), _next_step_for_auth(status)
+    # v1.2.2：预检自身抛异常（本工具的 bug，如漏 import）。HTTP 类原因优先
+    # 按状态码分（网络断了不该说成"我们的 bug"），剩下才归 preflight_error。
+    itself = checks.get("preflight_itself")
+    if isinstance(itself, dict) and not itself.get("ok"):
+        c, s = _classify("PREFLIGHT_EVAL", str(itself.get("why") or ""))
+        if c != "other":
+            return c, s
+        return ("preflight_error",
+                "预检自身抛了异常（**本工具的 bug**，不是你的 Secrets/网络）："
+                "把 `PREFLIGHT_EVAL.json` 与 `FAILURE.json` 贴到 Issue #5；"
+                "换最新 pinned notebook 重跑即可，token 不用动。")
     for _f, p in sorted((checks.get("gguf_probe") or {}).items()):
         if isinstance(p, dict) and p.get("ok"):
             continue
@@ -343,8 +379,8 @@ def _preflight_cause(rep):
                     "provenance sidecar 不在 HF tree 里：fairness 会退到 "
                     "hf_sidecar_declared 都算不上。补跑上传（S4 产物 + sidecar）后再评测。")
         return _classify("PREFLIGHT_EVAL", why)
-    corpus = checks.get("corpus") or {}
-    if not corpus.get("ok"):
+    corpus = checks.get("corpus")
+    if isinstance(corpus, dict) and not corpus.get("ok"):
         why = str(corpus.get("why") or "")
         if "共享前 200 字符" in why or "超过上限" in why:
             return ("corpus_overlap",
@@ -367,7 +403,8 @@ def _preflight_fail_lines(rep):
     """预检报告 → 人类可读的失败清单（每个检查项一行，截断）。"""
     checks = rep.get("checks") or {}
     lines = []
-    for name in ("hf_access", "gguf_probe", "sidecar_download", "corpus"):
+    for name in ("preflight_itself", "hf_access", "gguf_probe",
+                 "sidecar_download", "corpus"):
         v = checks.get(name)
         if not isinstance(v, dict):
             continue

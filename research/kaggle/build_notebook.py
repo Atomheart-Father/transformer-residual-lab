@@ -25,6 +25,11 @@
   GGUF + 真下 2 KB sidecar + 真跑 clean holdout，约 1 分钟，不编译、不下
   7 GiB）：只有 `ok=True` 才进 S2；不过就地停，写 `PREFLIGHT_EVAL.json` 与
   `FAILURE.json` 并出失败报告，**不伪装成实验完成**；缺二进制只 warn。
+* v1.2.2：真机首跑（v1.2.1）炸在预检的**报告函数** —— `artifacts.py` 漏
+  `import json`、且 `OUT` 也没 import（`write_json(OUT/…)` 的 NameError 被
+  `except: pass` 静默吞掉，`PREFLIGHT_EVAL.json` 根本没落盘）。两处都补上；
+  预检**自身**抛异常也改为走终止路径（FAILURE.json + ok=False），不再裸抛
+  traceback；新增端到端跑真 `lightweight_eval_preflight` 的回归测试。
 
 用法：
     python3 build_notebook.py                 # 钉当前 HEAD（要求工作区干净）
@@ -187,7 +192,8 @@ S0/S1 之后、自动编译 S2 之前，会自动探两个 GGUF（`Range: bytes=
 holdout。任何一步不过就**就地停下**（不编译、不下载 7 GiB）：原始明细在
 `out/PREFLIGHT_EVAL.json`，`out/FAILURE.json` 只给一条下一步，报告顶部写
 "本次运行失败" —— 不会用一份看起来正常的报告掩盖过去。缺二进制只是提示
-（随后自动只编 S2），不是停下来的理由。
+（随后自动只编 S2），不是停下来的理由。**v1.2.2**：预检自身出错（本工具的
+bug）也走同一条终止路径，`PREFLIGHT_EVAL.json` 保证落盘，不再裸抛 traceback。
 
 **v1.2.0：S6 不再"见 1 行文本重叠就整轮归零"**。校准集（wikitext **train** 全文）
 与评测集（**test**）里出现相同句子，不等于 imatrix 实际看过评测数据 ——
