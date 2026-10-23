@@ -127,7 +127,13 @@ def stage_s0_env(deadline):
         warn.append(f"可用显存约 {info['vram_usable_gb_est']:.1f} GiB，"
                     "装不下 8B f16（15.25 GiB 权重 + KV）。S8 会拒绝执行。")
     if not any(x.get("gguf_count") for x in inv if isinstance(x, dict)):
-        warn.append("/kaggle/input 下没有找到 .gguf。S3-S7 需要你手动挂载 base GGUF。")
+        # v1.1.3：RUN_EVAL 的输入来自 HF 私有仓库，这条老提示会自相矛盾。
+        if CFG.get("RUN_EVAL"):
+            warn.append("/kaggle/input 下没有 .gguf —— **本次不需要**：`RUN_EVAL=True` "
+                        "的 IQ2_XS / IQ4_XS 从 HF 私有仓库取（凭据门会先验一次）。")
+        else:
+            warn.append("/kaggle/input 下没有找到 .gguf。S3-S4 需要你手动挂载 base GGUF"
+                        "（S5-S7 的输入来自 S4 产物或 HF）。")
     if tools["cmake"] is None:
         warn.append("没有 cmake，S2_BUILD 无法执行。")
     info["warnings"] = warn

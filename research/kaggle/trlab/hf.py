@@ -19,12 +19,13 @@
 """
 
 from .config import CFG
-from .errors import GuardError
+from .errors import GuardError, HFHttpError
 from .core import _read_json, log, write_json
 from .fetch import _fetch_pinned_blob, sha256_of
 
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,10 +33,22 @@ from pathlib import Path
 HF_BASE = "https://huggingface.co"
 TOKEN_ENV_VARS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACEHUB_API_TOKEN")
 
+# tree API 的分页上限。**不能和 expand=true 同时用**（Hub 会 400，实测见 repo_files）。
+_TREE_PAGE_LIMIT = 1000
+# HTTP 错误正文最多读这么多字节，够看清 "Invalid limit ..." 这类原因，又不至于把
+# 一大段 HTML 写进日志。
+_ERROR_BODY_MAX = 2048
+
 # check_access 的进程内缓存：key = (repo, revision, 有没有 token, token 来源)。
 # 只缓存"能不能读"，不缓存任何文件内容，也不缓存 token 本身。
 _ACCESS_CACHE = {}
 _TOKEN_FIELDS = ("token", "value", "secret")
+
+# HTTP 状态码 → check_access 的 status 词。**唯一分类来源**，不靠字符串匹配。
+_STATUS_BY_HTTP = {400: "bad_request", 401: "unauthorized", 403: "unauthorized",
+                   404: "not_found", 429: "rate_limited",
+                   500: "rate_limited", 502: "rate_limited",
+                   503: "rate_limited", 504: "rate_limited"}
 
 
 # ---------------------------------------------------------------- 凭据
@@ -149,6 +162,9 @@ def _http_get(url, headers=None, timeout=None, follow=True, read_body=True):
 
     `read_body=False` 用于 resolve（只要 302 的 Location）：否则一个 200 的
     4.5 GiB 响应会被整个读进内存。
+
+    **HTTP 错误也会带回正文**（v1.1.3）：只读前 2 KiB，且先抹掉 token。
+    否则 400 只能报一句"HTTP 400"，无法判断是参数错还是权限错。
     """
     import socket
     import urllib.error
@@ -163,7 +179,11 @@ def _http_get(url, headers=None, timeout=None, follow=True, read_body=True):
         with opener.open(req, timeout=timeout or CFG.get("HF_TIMEOUT_SEC", 60)) as r:
             return r.status, dict(r.headers), (r.read() if read_body else b"")
     except urllib.error.HTTPError as e:
-        return e.code, dict(e.headers or {}), b""
+        try:
+            raw = e.read()[:_ERROR_BODY_MAX]
+        except Exception:
+            raw = b""
+        return e.code, dict(e.headers or {}), _sanitize_body(raw, headers)
     except (urllib.error.URLError, socket.timeout, OSError) as e:
         raise GuardError(
             f"连不上 Hugging Face（{type(e).__name__}: {e}）。\n"
@@ -173,16 +193,64 @@ def _http_get(url, headers=None, timeout=None, follow=True, read_body=True):
             "     `models/` 目录里，S6/S7 会优先用本地文件。")
 
 
-def _api_error(status, repo, what):
+def _sanitize_body(raw, headers=None):
+    """错误正文落盘前：抹 token、抹签名 URL 的查询串、压成一行。"""
+    try:
+        s = raw.decode("utf-8", "replace")
+    except Exception:
+        return b""
+    tok = ""
+    for k, v in (headers or {}).items():
+        if str(k).lower() == "authorization":
+            tok = str(v).split()[-1]
+    s = redact(s, tok)
+    s = re.sub(r"(https?://[^\s\"']+?)[?&](?:[^\s\"']*)", r"\1?<redacted-query>", s)
+    s = " ".join(s.split())
+    return s[:_ERROR_BODY_MAX].encode("utf-8")
+
+
+def _api_error(status, repo, what, body=b"", token=None):
+    """把 HTTP 状态码翻成人话。分类必须来自状态码，不靠猜。"""
+    detail = ""
+    if body:
+        try:
+            detail = redact(body.decode("utf-8", "replace"), token).strip()
+        except Exception:
+            detail = ""
+    detail = " ".join(detail.split())[:300]
+    tail = f"\n  · 服务器原话：`{detail}`" if detail else ""
+    if status == 400:
+        return HFHttpError(
+            status,
+            f"{what} 返回 **HTTP 400** —— 请求参数被 Hub API 拒绝，"
+            "这**不是** token / 权限问题，也不是你的 Secrets 配错了。"
+            f"{tail}\n"
+            "  → 这是本工具的问题（v1.1.2 的 tree URL 用了 `expand=true` + "
+            "`limit=1000`，Hub 只允许 expand 时 ≤50）。v1.1.3 已改成"
+            "`recursive=1&limit=1000`（不带 expand）。\n"
+            "  → 如果你看到这一条，说明跑的 notebook 还是旧版：换最新 pinned "
+            "notebook 重跑即可，**不要**重建 token。",
+            detail=detail)
     if status in (401, 403):
-        return GuardError(f"{what} 被拒绝（HTTP {status}）。\n" + _no_token_hint(repo))
+        return HFHttpError(
+            status,
+            f"{what} 被拒绝（HTTP {status}）。{tail}\n" + _no_token_hint(repo),
+            detail=detail)
     if status == 404:
-        return GuardError(
-            f"{what} 返回 404：仓库或文件不存在。\n"
-            f"  · 私有仓库在**没有 token** 时也返回 404（不是 403），所以先确认 token；\n"
+        return HFHttpError(
+            status,
+            f"{what} 返回 404：仓库或 revision 不存在。{tail}\n"
+            f"  · 私有仓库在**没有 token** 时通常返回 401（不是 404），所以先确认 token；\n"
             f"  · 确认 repo id 拼写：{repo}；\n"
-            f"  · 确认 revision/文件名在 tree 里存在（`python -m trlab --check-hf` 会列出来）。")
-    return GuardError(f"{what} 失败（HTTP {status}）。")
+            f"  · 确认 revision/文件名在 tree 里存在（`python -m trlab --check-hf` 会列出来）。",
+            detail=detail)
+    if status in (429, 500, 502, 503, 504):
+        return HFHttpError(
+            status,
+            f"{what} 暂时失败（HTTP {status}）：Hub 侧限流或故障。{tail}\n"
+            "  → 等几十秒重跑；这不是配置问题，不用改 token。",
+            detail=detail)
+    return HFHttpError(status, f"{what} 失败（HTTP {status}）。{tail}", detail=detail)
 
 
 # ---------------------------------------------------------------- tree / 元数据
@@ -193,22 +261,34 @@ def repo_files(repo, revision="main", token=None, dataset=False, max_pages=20):
     `sha256` 只有 LFS 文件才有（= `lfs.oid` = 内容 sha256）；非 LFS 小文件
     HF 只给 git blob sha1，这里**不**冒充 sha256，标 is_lfs=False 让调用方
     只按 size 校验。
+
+    **URL 参数是实测钉住的（v1.1.3）**：`expand=true` 与 `limit=1000` 同时出现
+    会被 Hub 以 HTTP 400 拒绝（正文 `Invalid limit for index tree pagination`）。
+    2026-10-23 对 `openai-community/gpt2` 与 `hf-internal-testing/tiny-random-gpt2`
+    做过 A/B：
+      · `recursive=1&expand=true&limit=1000` → **400**
+      · `recursive=1&limit=1000`            → 200，且**仍然带 `lfs.oid`/`size`/`pointerSize`**
+      · `recursive=1&expand=true&limit=50`  → 200（但正文 28 KB vs 5 KB，expand 不需要）
+    所以这里**不传 expand**：既拿到内容 sha256，又不触发 400。
     """
     kind = "datasets/" if dataset else "models/"
     url = (f"{HF_BASE}/api/{kind}{repo}/tree/{revision}"
-           f"?recursive=1&expand=true&limit=1000")
+           f"?recursive=1&limit={_TREE_PAGE_LIMIT}")
     out, pages = [], 0
     while url and pages < max_pages:
         pages += 1
         st, hdrs, body = _http_get(url, headers=_auth_headers(token))
         if st != 200:
-            raise _api_error(st, repo, f"列 {repo}@{revision} 的文件")
+            raise _api_error(st, repo, f"列 {repo}@{revision} 的文件", body, token)
         try:
             entries = json.loads(body.decode("utf-8") or "[]")
         except ValueError as e:
             raise GuardError(f"tree API 返回的不是 JSON（{e}）—— 上游可能改了接口")
+        if not isinstance(entries, list):
+            raise GuardError(
+                f"tree API 返回的不是数组（{type(entries).__name__}）—— 上游可能改了接口")
         for e in entries:
-            if e.get("type") != "file":
+            if not isinstance(e, dict) or e.get("type") != "file":
                 continue
             lfs = e.get("lfs") or {}
             out.append({"path": e["path"], "size": int(e.get("size") or 0),
@@ -228,7 +308,7 @@ def repo_sha(repo, revision="main", token=None, dataset=False):
     st, _hdrs, body = _http_get(f"{HF_BASE}/api/{kind}{repo}",
                                headers=_auth_headers(token))
     if st != 200:
-        raise _api_error(st, repo, f"读 {repo} 的元数据")
+        raise _api_error(st, repo, f"读 {repo} 的元数据", body, token)
     try:
         return json.loads(body.decode("utf-8")).get("sha")
     except ValueError:
@@ -458,11 +538,15 @@ def check_access(repo=None, revision="main", token=None, use_cache=True):
     一次 HTTP 请求，1 秒级，结果按 (repo, rev, 有没有 token) 缓存。
 
     不检查写权限（上传才需要）；不打印 token；不会替用户改仓库可见性。
-    返回 `status`：
+    返回 `status`（**按 HTTP 状态码分类，不靠字符串猜**）：
       · `ok`            —— 能读，继续
       · `no_token`      —— 本 Session 根本没凭据（**不用发请求就能判定**）
-      · `unauthorized`  —— 有 token 但被拒（401/403：无效、过期、没权限）
-      · `error`         —— 网络/其他问题
+      · `bad_request`   —— 400：**请求参数问题（本工具的 bug）**，与 token 无关
+      · `unauthorized`  —— 401/403：token 无效、过期或对该 repo 没权限
+      · `not_found`     —— 404：repo/revision 不存在
+      · `rate_limited`  —— 429/5xx：Hub 侧限流或故障，等一会重跑
+      · `network`       —— 连不上（DNS/超时/断网/Internet=Off）
+      · `error`         —— 其它
     """
     repo = repo or CFG.get("HF_MODEL_REPO") or ""
     tk = hf_token() if token is None else {"token": token, "source": "arg"}
@@ -480,12 +564,16 @@ def check_access(repo=None, revision="main", token=None, use_cache=True):
         try:
             files = repo_files(repo, revision, tk["token"])
             out.update(ok=True, status="ok", n_files=len(files))
+        except HFHttpError as e:
+            out.update(ok=False, status=_STATUS_BY_HTTP.get(e.status, "error"),
+                       http_status=e.status,
+                       error=redact(e, tk["token"]),
+                       hint=(_no_token_hint(repo)
+                             if e.status in (401, 403) else None))
         except GuardError as e:
             msg = redact(e, tk["token"])
-            unauth = any(s in msg for s in ("401", "403", "需要 Hugging Face token"))
-            out.update(ok=False, status=("unauthorized" if unauth else "error"),
-                       error=msg,
-                       hint=(_no_token_hint(repo) if unauth else None))
+            net = "连不上 Hugging Face" in msg
+            out.update(ok=False, status=("network" if net else "error"), error=msg)
     if use_cache:
         _ACCESS_CACHE[key] = out
     return out
@@ -511,8 +599,14 @@ def status(repo=None, revision="main", token=None):
         out["sha"] = repo_sha(repo, revision, tk["token"])
         out["files"] = [{"path": f["path"], "bytes": f["size"],
                          "lfs_sha256": bool(f["sha256"])} for f in files]
+    except HFHttpError as e:
+        out["ok"] = False
+        out["http_status"] = e.status
+        out["status"] = _STATUS_BY_HTTP.get(e.status, "error")
+        out["error"] = redact(e, tk["token"])
     except GuardError as e:
         out["ok"] = False
+        out["status"] = "network" if "连不上 Hugging Face" in str(e) else "error"
         out["error"] = redact(e, tk["token"])
     return out
 

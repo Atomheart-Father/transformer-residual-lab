@@ -45,15 +45,62 @@ def _run_id():
     return _RUN_ID
 
 
+# check_access 的 status → FAILURE.json 的 cause 代码。
+# 分开的理由：400 是**我们自己的请求参数**错了，401/403 才是凭据问题。
+# v1.1.2 真实首跑把 400 归成 hf_unauthorized，让用户去重建 token —— 错误分类。
+_CAUSE_BY_AUTH = {
+    "no_token": "hf_no_token",
+    "unauthorized": "hf_unauthorized",
+    "bad_request": "hf_bad_request",
+    "not_found": "hf_not_found",
+    "rate_limited": "hf_rate_limited",
+    "network": "hf_network",
+}
+
+_SECRETS_STEP = ("在 Kaggle 里做**一次**配置：`Add-ons → Secrets` 新建 `HF_TOKEN`"
+                 "（Fine-grained token，对该 HF repo 勾 Read + Write），"
+                 "然后在本 notebook 上 **attach** 它，再 `Run all`。"
+                 "不要把 token 写进 notebook / git / issue。")
+
+
+def _next_step_for_auth(status):
+    """按 check_access 的 status 给**一条**下一步 —— 400 不许再怪用户 Secrets。"""
+    if status in ("no_token", "unauthorized"):
+        return _SECRETS_STEP
+    if status == "bad_request":
+        return ("**这是本工具请求参数的问题，不是你的 Secrets**（HTTP 400 来自 tree API）。"
+                "换最新 pinned notebook 重跑即可，**不要**重建 token；"
+                "若新版仍报 400，把 `FAILURE.json` 贴到 Issue #5。")
+    if status == "not_found":
+        return ("HF 说仓库/revision 不存在（404）：核对 `CFG['HF_MODEL_REPO']` 与 revision；"
+                "私仓要先确认这个 token 真的能看到该仓库。")
+    if status == "rate_limited":
+        return "Hub 侧限流或临时故障（429/5xx）：等 30–60 秒重跑，不用改任何配置。"
+    if status == "network":
+        return ("连不上 Hugging Face：先确认 `Settings → Internet = On`，"
+                "再确认不是 Kaggle 出口被拦；这不涉及 token。")
+    return "看 `FAILURE.json` 里的服务器原话与 traceback 尾。"
+
+
 def _classify(stage, err):
-    """错误 → (cause 代码, 一条下一步)。cause 用来在摘要里去重合并。"""
+    """错误 → (cause 代码, 一条下一步)。cause 用来在摘要里去重合并。
+
+    顺序很重要：400 的消息里也出现 "token" 字样（"这不是 token 问题"），
+    所以**必须**先判 400，否则又会误分类成凭据问题。
+    """
     e = str(err or "")
     low = e.lower()
+    if "HTTP 400" in e:
+        return "hf_bad_request", _next_step_for_auth("bad_request")
+    if "HTTP 404" in e:
+        return "hf_not_found", _next_step_for_auth("not_found")
+    if "连不上 Hugging Face" in e:
+        return "hf_network", _next_step_for_auth("network")
+    if "HTTP 429" in e or "HTTP 50" in e:
+        return "hf_rate_limited", _next_step_for_auth("rate_limited")
     if "token" in low or "401" in e or "403" in e:
         code = "hf_unauthorized" if ("401" in e or "403" in e) else "hf_no_token"
-        return code, ("配 HF token：Kaggle `Add-ons → Secrets` 加 `HF_TOKEN` 并"
-                      "**attach 到本 notebook**（上传要 Write 权限）；本机用 "
-                      "`huggingface-cli login`。不要把 token 写进 notebook。")
+        return code, _SECRETS_STEP
     if "llama-perplexity" in e or "llama-cli" in e:
         return "binaries_missing", (
             "缺 llama.cpp 二进制：v1.1.2 起 `RUN_EVAL=True` 会**自动只编 S2**"
@@ -168,7 +215,8 @@ def _auth_gate(plan=None):
         log(f"HF 授权检查通过：{a['repo']}@{a['revision']}"
             f"（{a.get('n_files')} 个文件，凭据来源 {a.get('token_source')}）")
     else:
-        log(f"!! HF 授权检查失败（{a.get('status')}）：{str(a.get('error'))[:200]}")
+        _h = f"，HTTP {a['http_status']}" if a.get("http_status") else ""
+        log(f"!! HF 授权检查失败（{a.get('status')}{_h}）：{str(a.get('error'))[:300]}")
     return a
 
 
@@ -192,26 +240,33 @@ def _autobuild_binaries(plan):
 
 
 def _abort_eval(plan, auth, upload_state=None):
-    """凭据不通就地停：写 FAILURE.json（含"缺二进制"这条并存的根因）+ 出报告。"""
+    """凭据门不通就地停：写 FAILURE.json（含"缺二进制"这条并存的根因）+ 出报告。
+
+    **分类按 `auth['status']`（来自 HTTP 状态码），不按字符串猜。**
+    v1.1.2 把 HTTP 400（tree API 参数错）归成 `hf_unauthorized`，等于让用户
+    去重建一个本来就正确的 token —— 这条是错的，v1.1.3 分开。
+    """
+    status = str(auth.get("status") or "error")
+    cause = _CAUSE_BY_AUTH.get(status, "hf_other")
     extra = []
     miss = _missing_eval_binaries()
     if miss:
         extra.append("binaries_missing")
-    step = ("在 Kaggle 里做**一次**配置：`Add-ons → Secrets` 新建 `HF_TOKEN`"
-            "（Fine-grained token，对该 HF repo 勾 Read + Write），"
-            "然后在本 notebook 上 **attach** 它，再 `Run all`。"
-            "不要把 token 写进 notebook / git / issue。")
+    step = _next_step_for_auth(status)
+    http = auth.get("http_status")
     doc = _record_failure("HF_AUTH",
-                          error=(f"HF 授权检查失败（{auth.get('status')}）"
-                                 + (f"：{str(auth.get('error'))[:300]}"
+                          error=(f"HF 授权检查失败（{status}"
+                                 + (f"，HTTP {http}" if http else "") + "）"
+                                 + (f"：{str(auth.get('error'))[:600]}"
                                     if auth.get("error") else "")),
                           plan=plan, upload_state=upload_state,
-                          cause=("hf_no_token" if auth.get("status") == "no_token"
-                                 else "hf_unauthorized"),
-                          next_step=step, extra_causes=extra)
+                          cause=cause, next_step=step, extra_causes=extra)
     if extra:
         print("  另外：本 Session 也缺 llama.cpp 二进制 —— 你**不需要**单独开 S2，"
-              "配好 token 后重跑 RUN_EVAL 会自动只编 S2。")
+              "凭据通了之后重跑 RUN_EVAL 会自动只编 S2。")
+    if cause == "hf_bad_request":
+        print("  ！！注意：HTTP 400 是**本工具的请求参数问题**，不是你的 Secrets ——"
+              " 不要重建 token。")
     # 仍然出一份报告（0.03 s），但报告顶部会写明"本次运行失败"
     try:
         run_stage("S9_REPORT", stage_s9_report)

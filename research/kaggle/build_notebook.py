@@ -13,6 +13,8 @@
 * v1.1.1：评测默认用 GPU（有就整模型卸载）、一次只装一个模型、每阶段小结果出站。
 * v1.1.2：`RUN_EVAL` 在新 Session 里**自动只编 S2**（缺二进制时）、HF 授权检查
   排在编译之前（没 token 就 3 秒内停）、失败写 `FAILURE.json` 且最早根因不被覆写。
+* v1.1.3：修 tree API 的 HTTP 400（`expand=true` + `limit=1000` 被 Hub 拒），
+  错误正文留证并脱敏，失败分类按状态码（400 ≠ 凭据问题）。
 
 用法：
     python3 build_notebook.py                 # 钉当前 HEAD（要求工作区干净）
@@ -212,6 +214,8 @@ MD_RUN = """## 执行
 再开第二个开关。缺 token 时会在**编译之前**停下，`out/FAILURE.json` 同时给
 "没 token"与"缺二进制"两条根因，`next_step` 只写一件事：去 `Add-ons → Secrets`
 加 `HF_TOKEN` 并 attach，再 `Run all` —— **不要把 token 写进 notebook**。
+如果看到的是 **HTTP 400**，那是本工具请求参数的问题（tree API），
+**不是你的 token**，换最新 notebook 重跑即可，不要重建 token。
 **有 GPU 就用 GPU**（`-ngl 99`，装不下才退 CPU 并把原因写进 `device_by_fmt`）；
 一次只装一个模型，跑完释放再装下一个。
 每个阶段的小结果会自动出站到 HF（5 个 JSON/MD）并做远端复核；失败时这一格

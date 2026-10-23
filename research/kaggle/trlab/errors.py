@@ -10,6 +10,20 @@ class GuardError(RuntimeError):
     """前置条件不满足（路径缺失、二进制缺失、开关未打开）。"""
 
 
+class HFHttpError(GuardError):
+    """HF API 返回非 200。带 `status` 与脱敏后的服务器原话。
+
+    为什么要类型而不是靠字符串猜状态码：v1.1.2 真实首跑把 **HTTP 400**
+    （tree API 参数不合法）误分类成"token 没 attach"，让用户去重建 token。
+    分类必须来自状态码本身。
+    """
+
+    def __init__(self, status, message, detail=""):
+        self.status = int(status)
+        self.detail = detail or ""
+        super().__init__(message)
+
+
 
 class CommandFailed(RuntimeError):
     def __init__(self, cmd, rc, tail, log_path):

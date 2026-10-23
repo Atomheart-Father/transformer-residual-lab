@@ -5181,6 +5181,153 @@ def test_upload_without_token_never_claims_verified(ns):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ---------------------------------------------------------------- v1.1.3：tree API 400
+
+def test_tree_url_never_mixes_expand_with_big_limit(ns):
+    """`expand=true` + `limit=1000` 会被 Hub 以 HTTP 400 拒绝（实测），URL 里不许有 expand。
+
+    实测证据（2026-10-23，公开仓库 openai-community/gpt2）：
+      expand=true&limit=1000 → 400 `Invalid limit for index tree pagination`
+      recursive=1&limit=1000 → 200，且仍然带 lfs.oid / size / pointerSize
+    """
+    seen = []
+    patch = _Patch(ns)
+
+    def fake_get(url, headers=None, **kw):
+        seen.append(url)
+        return 200, {}, b"[]"
+    patch("_http_get", fake_get)
+    try:
+        ns["repo_files"]("r/x")
+        u = seen[0]
+        assert "expand" not in u, f"expand 与 limit>50 不能同时出现：{u}"
+        assert "recursive=1" in u and "limit=1000" in u, u
+    finally:
+        patch.undo()
+
+
+def test_http_error_body_is_kept_redacted_and_bounded(ns):
+    """HTTP 错误正文要留下（否则 400 不可诊断），但必须抹 token / 签名查询串并限长。"""
+    raw = (b'{"error":"Invalid limit for index tree pagination",'
+           b'"url":"https://cdn.hf/x.gguf?token=hf_SECRET&sig=deadbeef"}')
+    out = ns["_sanitize_body"](raw + b" pad" * 2000,
+                              {"Authorization": "Bearer hf_SECRET"})
+    s = out.decode("utf-8")
+    assert "Invalid limit" in s, "服务器原话必须留下，否则 400 无法诊断"
+    assert "hf_SECRET" not in s, "token 不能进错误正文"
+    assert "sig=deadbeef" not in s, "签名查询串不能进错误正文"
+    assert len(out) <= 2048, len(out)
+
+    e = ns["_api_error"](400, "r/x", "列 r/x@main 的文件",
+                         b'{"error":"Invalid limit for index tree pagination"}')
+    msg = str(e)
+    assert isinstance(e, ns["HFHttpError"]) and e.status == 400
+    assert "HTTP 400" in msg and "Invalid limit" in msg, msg
+    assert "不是** token / 权限问题" in msg or "不是** token" in msg, msg
+
+
+def test_check_access_400_is_request_bug_not_token(ns):
+    """400 → status=bad_request（请求参数问题），不能给"去配 token"的 hint。"""
+    patch = _Patch(ns)
+
+    def boom(*a, **k):
+        raise ns["HFHttpError"](400, "列 r/x@main 的文件 返回 **HTTP 400**",
+                                "Invalid limit for index tree pagination")
+    patch("repo_files", boom)
+    try:
+        a = ns["check_access"]("r/x", token="hf_fake", use_cache=False)
+        assert a["ok"] is False
+        assert a["status"] == "bad_request", a
+        assert a["http_status"] == 400
+        assert a["hint"] is None, "400 不许引导用户去配 token"
+        assert a["token_present"] is True
+    finally:
+        patch.undo()
+
+
+def test_auth_status_maps_to_distinct_causes(ns):
+    """400/401/404/限流/网络 必须是**不同**的 cause，不能一律 hf_unauthorized。"""
+    patch = _Patch(ns)
+
+    def raise_for(status):
+        def boom(*a, **k):
+            raise ns["HFHttpError"](status, f"boom HTTP {status}", "detail")
+        return boom
+    cases = {400: "hf_bad_request", 401: "hf_unauthorized", 403: "hf_unauthorized",
+             404: "hf_not_found", 429: "hf_rate_limited", 503: "hf_rate_limited"}
+    try:
+        for status, want in cases.items():
+            patch("repo_files", raise_for(status))
+            a = ns["check_access"]("r/x", token="hf_fake", use_cache=False)
+            assert a["status"] == ns["_STATUS_BY_HTTP"].get(status, "error"), a
+            assert ns["_CAUSE_BY_AUTH"].get(a["status"], "hf_other") == want, \
+                (status, a["status"], want)
+
+        def net(*a, **k):
+            raise ns["GuardError"]("连不上 Hugging Face（URLError: timed out）。")
+        patch("repo_files", net)
+        a = ns["check_access"]("r/x", token="hf_fake", use_cache=False)
+        assert a["status"] == "network", a
+    finally:
+        patch.undo()
+
+
+def test_eval_http_400_not_blamed_on_user_secrets(ns):
+    """真机那种现场：有 token、tree API 400 → 不许说"去配 token/重建 token"，也不许编译。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_400_"))
+    patch = _Patch(ns)
+    patch("OUT", tmp)
+    patch("hf_token", lambda *a, **k: {"token": "hf_fake", "source": "env:HF_TOKEN"})
+
+    def boom(*a, **k):
+        raise ns["HFHttpError"](400, "列 r/x@main 的文件 返回 **HTTP 400**",
+                                "Invalid limit for index tree pagination")
+    patch("repo_files", boom)
+    ns["clear_access_cache"]()      # 全套测试共用一个 ns，缓存必须清，否则命中上一条 ok
+
+    def no_bin(name):
+        raise ns["GuardError"](f"找不到 {name}")
+    patch("llama_bin", no_bin)
+    fake, calls = _fake_runner(ns)
+    patch("run_stage", fake)
+    old = {k: ns["CFG"][k] for k in ("RUN_S2", "RUN_S3", "RUN_S4", "RUN_EVAL")}
+    try:
+        out = ns["run"](run_eval=True)
+        assert out["ok"] is False
+        assert out["causes"][0] == "hf_bad_request", out["causes"]
+        assert "S2_BUILD" not in calls, f"400 时不该开始编译：{calls}"
+        doc = json.loads((tmp / "FAILURE.json").read_text(encoding="utf-8"))
+        assert doc["cause"] == "hf_bad_request", doc
+        assert "不是你的 Secrets" in doc["next_step"], doc["next_step"]
+        assert "不要" in doc["next_step"] and "重建 token" in doc["next_step"]
+        assert "hf_unauthorized" not in doc["causes"], doc["causes"]
+    finally:
+        ns["CFG"].update(old)
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_s0_warning_not_misleading_under_run_eval(ns):
+    """RUN_EVAL 的输入来自 HF，S0 不许再说"S3-S7 需要你手动挂载 base GGUF"。"""
+    old = ns["CFG"]["RUN_EVAL"]
+    dl = time.time() + 120
+    try:
+        ns["CFG"]["RUN_EVAL"] = True
+        info = ns["stage_s0_env"](dl)
+        ws = " ".join(info.get("warnings") or [])
+        assert "手动挂载" not in ws, ws
+        if "没有 .gguf" in ws or "没有找到 .gguf" in ws:
+            assert "本次不需要" in ws, ws
+
+        ns["CFG"]["RUN_EVAL"] = False
+        info2 = ns["stage_s0_env"](dl)
+        ws2 = " ".join(info2.get("warnings") or [])
+        if ws2:
+            assert "手动挂载" in ws2 or "没有找到 .gguf" not in ws2, ws2
+    finally:
+        ns["CFG"]["RUN_EVAL"] = old
+
+
 # ---------------------------------------------------------------- runner
 
 TESTS = [
@@ -5339,6 +5486,13 @@ TESTS = [
     test_eval_s2_failure_skips_s6_s7,
     test_failure_json_first_cause_not_overwritten,
     test_upload_without_token_never_claims_verified,
+    # v1.1.3：tree API 400 与错误分类（不许再把 400 说成"没 attach token"）
+    test_tree_url_never_mixes_expand_with_big_limit,
+    test_http_error_body_is_kept_redacted_and_bounded,
+    test_check_access_400_is_request_bug_not_token,
+    test_auth_status_maps_to_distinct_causes,
+    test_eval_http_400_not_blamed_on_user_secrets,
+    test_s0_warning_not_misleading_under_run_eval,
 ]
 
 

@@ -81,12 +81,12 @@ S2/S3/S4/S5 会一条龙跑完。**唯一的例外**：BF16 有 15.26 GiB，与�
 
 **只想编 llama.cpp、先不碰模型**：把 `RUN_S2 = False` 改成 `RUN_S2 = True`，`Internet = On`，`Run all`。约 15–30 分钟（含编译，**估算值**）。
 
-**只想评测、不再量化**（v1.1.2，**最少操作**）：把开关格里的 `RUN_EVAL = False` 改成 `RUN_EVAL = True`，`Settings → Accelerator = GPU T4 ×2`、`Internet = On`，把 HF token 放进 `Add-ons → Secrets`（名字 `HF_TOKEN`，勾选 attach），`Run all`。它会：
+**只想评测、不再量化**（v1.1.3，**最少操作**）：把开关格里的 `RUN_EVAL = False` 改成 `RUN_EVAL = True`，`Settings → Accelerator = GPU T4 ×2`、`Internet = On`，把 HF token 放进 `Add-ons → Secrets`（名字 `HF_TOKEN`，勾选 attach），`Run all`。它会：
 
 1. 从 HF 私有仓库 `Atomheart-Father/trlab-qwen3-8b-quant-pilot` 取 `IQ2_XS` / `IQ4_XS` / `imatrix.gguf` 三个已存产物（**不下载 15 GiB BF16、不重做 S3、不重新量化**；本 Session 缺 `llama-perplexity`/`llama-cli` 时**自动只编 S2**，不下载模型）；
 2. 取 pinned 的 wikitext-2-raw **test** parquet（732,610 B）当评测语料（与 S3 用的 **train** 校准集严格分离，S6 会做内容级重叠断言）；
 3. 跑 S6 配对 NLL + S7 质量检查 + S9 报告。**默认用 GPU**（`EVAL_ALLOW_GPU=True`，有显存就 `-ngl 99`；装不下才退 CPU，并把原因写进 `device_by_fmt`）；**一次只装一个模型**，每个格式跑完就释放；
-4. **每个阶段跑完就把小结果出站**（`results/v1.1.2/<run_id>/` 下的 `S6_NLL.json` / `S7_QUALITY.json` / `EVAL_SUMMARY.json` / `report.md` / `results.json`），并做远端复核；同时写一份几百字节的 `EVAL_SUMMARY.json` 供直接贴到聊天里。
+4. **每个阶段跑完就把小结果出站**（`results/v1.1.3/<run_id>/` 下的 `S6_NLL.json` / `S7_QUALITY.json` / `EVAL_SUMMARY.json` / `report.md` / `results.json`），并做远端复核；同时写一份几百字节的 `EVAL_SUMMARY.json` 供直接贴到聊天里。
 
 **`RUN_EVAL=True` 自带小结果回传**（只这 5 个白名单文件，不传模型、不传日志、不传 secrets）。想彻底不外发：`--set HF_UPLOAD_AFTER_RUN=false`，或者 CLI 里不加 `--upload` 并把它关掉 —— 但那样结果会随 Session 一起消失。
 
@@ -100,7 +100,7 @@ S2/S3/S4/S5 会一条龙跑完。**唯一的例外**：BF16 有 15.26 GiB，与�
 | Kaggle secret | `Add-ons → Secrets` 里加一个名为 `HF_TOKEN` 的 secret，notebook 会通过 `kaggle_secrets` 读（**推荐**，只勾选 attach 到这一个 notebook） |
 | HF 官方缓存 | 本机 `huggingface-cli login` 之后，`~/.cache/huggingface/token` 会被自动复用 |
 
-三者都找不到时，**凭据门会在编译之前**就把运行停住（v1.1.2：3 秒内，不发下载请求、不开始编译），`--check-hf` 与 S6 的预检也会明确说"没有 token"并给出这三条路，**不会**打印 token、**不会**擅自把仓库改 Public。
+三者都找不到时，**凭据门会在编译之前**就把运行停住（v1.1.2 起：3 秒内，不发下载请求、不开始编译），`--check-hf` 与 S6 的预检也会明确说"没有 token"并给出这三条路，**不会**打印 token、**不会**擅自把仓库改 Public。
 
 **失败了怎么办**：阶段会写 `out/FAILURE.json` —— 顶层是最早那条根因，`causes` 是去重后的根因清单（例如 `["hf_no_token","binaries_missing"]`），`all` 按时间累积，后面的失败**不会**覆盖最早的。同时打印"你可以直接关掉 Session"。**不需要** Save Version、不需要抢救工作区 —— HF 上的输入是长期源，GitHub 上是代码，重跑只花一次下载时间。若 `RUN_EVAL=True` 但 S6/S7 没产出数据，`run()` 会返回 `ok=False`，报告顶部写 `## ⚠ 本次运行失败`。
 
@@ -946,7 +946,7 @@ CPU 不可行时 fail closed、预检在缺二进制时说唯一一步、
 `RUN_EVAL` 开关作用域、`run_ppl` 默认 `-ngl 0`、S6 从 HF 端到端、
 评测语料是 test split（不是 train）、`_ensure_eval_txt` 全流程。
 
-当前结果：**149/149 通过，约 45 秒**（v1.1.1 是 144 项、v1.0.1 是 118 项；见第九之十 / 第九之十一）。
+当前结果：**155/155 通过，约 50 秒**（v1.1.2 是 149 项、v1.1.1 是 144 项、v1.0.1 是 118 项；见第九之十～第九之十二）。
 
 
 ---
@@ -1147,13 +1147,96 @@ token 不打印、不进 notebook/git/issue；私仓可见性是**仓库所有�
 
 ---
 
+## 九之十二、v1.1.3：tree API 的 HTTP 400（不是"没 attach token"）
+
+**真实证据**（2026-10-23 01:58:40Z，Kaggle T4×2，v1.1.2）：`S0/S1=ok`、
+`HF_AUTH` 失败但状态是 **HTTP 400**（不是 401/403），而 `run()` 却把
+`causes` 写成 `["hf_unauthorized", "binaries_missing"]` —— 等于让用户去重建一个
+本来就正确的 token。
+
+**根因（已实测确认，不是猜）**：`repo_files()` 的 tree URL 同时用了
+`expand=true` 与 `limit=1000`，Hub 直接拒绝：
+
+```text
+GET /api/models/openai-community/gpt2/tree/main?recursive=1&expand=true&limit=1000
+→ 400 {"error":"✖ Invalid limit for index tree pagination"}
+```
+
+2026-10-23 对 `openai-community/gpt2` 与 `hf-internal-testing/tiny-random-gpt2`
+做的 A/B（只读、无 token）：
+
+| 查询串 | 状态 | 文件数 | 带 `lfs.oid` | 备注 |
+|---|---|---|---|---|
+| `recursive=1&expand=true&limit=1000` | **400** | — | — | 旧版，正是真机那次 |
+| `recursive=1&limit=1000` | **200** | 26 | **11/11 LFS 都有** | **采用这个** |
+| `recursive=true&limit=1000` | 200 | 26 | 11/11 | 等价 |
+| `recursive=1&expand=true&limit=50` | 200 | 26 | 11/11 | 可用但正文 28 KB vs 5 KB，expand 不需要 |
+
+关键结论：**不传 `expand` 也照样有 `lfs.oid`（= 内容 sha256）**，所以内容级校验
+没有降级 —— 这一点是实测出来的，不是推断。
+
+### 1. 修了什么
+
+- `repo_files()`：`?recursive=1&limit=1000`，**不传 expand**。分页（`Link: rel="next"`）保留。
+- `_http_get()`：HTTP 错误也读正文（前 2 KiB），先抹 token、抹签名查询串，再压成一行。
+  以前 `return e.code, dict(e.headers), b""` 把服务器原话丢了，400 只能报"HTTP 400"。
+- `_api_error()`：400 / 401 / 403 / 404 / 429+5xx 各自一句人话 + `服务器原话：...`，
+  并抛 `HFHttpError(status, msg, detail)` —— **分类来自状态码，不靠字符串猜**。
+- `check_access()` 的 `status` 扩成
+  `ok / no_token / bad_request / unauthorized / not_found / rate_limited / network / error`，
+  映射表 `_STATUS_BY_HTTP` 是唯一来源。
+- `run._CAUSE_BY_AUTH`：`bad_request → hf_bad_request`，`not_found → hf_not_found`，
+  `rate_limited → hf_rate_limited`，`network → hf_network`。
+  `_next_step_for_auth()` 按状态给**一条**下一步；400 的原文是
+  "**这是本工具请求参数的问题，不是你的 Secrets**……**不要**重建 token"。
+- `_classify()` 先判 `HTTP 400` 再判 token —— 因为 400 的说明里也出现 "token" 字样，
+  顺序错了就会又误分类。
+- S0 的老提示 "/kaggle/input 下没有 .gguf，S3-S7 需要你手动挂载" 在 `RUN_EVAL=True`
+  时改为"**本次不需要**，IQ2_XS/IQ4_XS 从 HF 私有仓库取"。
+
+### 2. 真机验证（本机 macOS，真 HTTP）
+
+| 场景 | 结果 |
+|---|---|
+| `repo_files("openai-community/gpt2")`（修后 URL，匿名） | **200**，26 个文件，11 个 LFS **全部带 `sha256`**（内容 sha256 未降级） |
+| 私仓 + 无 token | `status=no_token`，**不发请求** |
+| 私仓 + 假 token | `status=unauthorized`、`http_status=401`，且能看到服务器原话 `{"error":"Invalid username or password."}` |
+| `run(run_eval=True)` + 假 token | 3.0 s 结束，`causes=["hf_unauthorized","binaries_missing"]`，`S2_BUILD=None`（**没开始编译**） |
+
+顺带确认的两个语义（都实测）：
+- 私有仓库**没有 token 时返回 401**，不是 404（以前文档里写"私仓无 token 会 404"，错，已改）。
+- 不存在的 repo 也返回 **401**（不是 404）；只有**坏的 revision** 才是 404
+  （`{"error":"Invalid rev id: ..."}`）。所以 404 的含义是"revision/repo 路径不对"。
+
+### 3. 测试
+
+149 → **155 项**（CPU、不联网、约 50 秒），新增 6 项：
+
+| 测试 | 钉住什么 |
+|---|---|
+| `test_tree_url_never_mixes_expand_with_big_limit` | URL 里不许出现 `expand`，必须是 `recursive=1&limit=1000` |
+| `test_http_error_body_is_kept_redacted_and_bounded` | 错误正文要留下、抹 token/签名查询串、≤2 KiB；`_api_error(400)` 是 `HFHttpError` |
+| `test_check_access_400_is_request_bug_not_token` | 400 → `bad_request`，且 `hint is None`（不许引导配 token） |
+| `test_auth_status_maps_to_distinct_causes` | 400/401/403/404/429/503/网络 → 各自不同的 cause |
+| `test_eval_http_400_not_blamed_on_user_secrets` | 真机现场复刻：`cause=hf_bad_request`、next_step 说"不是你的 Secrets"、**不编译** |
+| `test_s0_warning_not_misleading_under_run_eval` | `RUN_EVAL=True` 时 S0 不再说"手动挂载 base GGUF" |
+
+### 4. 仍未验证
+
+- **S6/S7 依然没在真实 Kaggle 跑通过**；能力结论**仍然零数据**。
+- **带真 token 的私仓 tree 读取没在本机跑过**（本机没有 token）—— 但修后的 URL 与
+  认证逻辑同一条路径，公开仓库已实测 200。
+- 自动只编 S2 的真 CUDA 编译、7.3 GB 下载与上传，仍未发生。
+
+---
+
 ## 十、怎么跑测试
 
 ```bash
 python3 research/kaggle/test_trlab.py
 ```
 
-不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。v1.0 起它**直接 import `trlab/` 包**（不再解析 notebook 字符串），在临时工作目录里补齐默认三阶段，然后跑 149 项断言。当前结果：**149/149 通过，约 45 秒**（v1.0.1 是 118 项 / 约 31 秒；多出来的时间主要是新增项里那几条要在干净子进程里单独 import 模块、以及 bootstrap 用本地 git 仓真跑 fetch）。
+不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。v1.0 起它**直接 import `trlab/` 包**（不再解析 notebook 字符串），在临时工作目录里补齐默认三阶段，然后跑 155 项断言。当前结果：**155/155 通过，约 50 秒**（v1.0.1 是 118 项 / 约 31 秒；多出来的时间主要是新增项里那几条要在干净子进程里单独 import 模块、以及 bootstrap 用本地 git 仓真跑 fetch）。
 
 v1.0 新增的 10 项架构回归（对应 Issue #5 的验收清单）：
 
@@ -1312,7 +1395,7 @@ v1.0 新增的 10 项架构回归（对应 Issue #5 的验收清单）：
 31. **S4 的 CPU 耗时与峰值 RAM 未实测**。`llama-quantize` 是 CPU 路径（15.26 GiB 走内存不走显存），输入 mmap 但 `--max-buffer-size` 默认 8192 MiB 是实打实要占的。`_ram_precheck()` 只警告不拦；真的 exit 137 时按提示调小 `S4_RAM_MARGIN_GB` 或加 `--max-buffer-size`。
 32. **暂存盘路线不跨 Session**。下到暂存盘的 BF16 会话结束就没了，下次要重下；只读 Input 路线才是一次操作永久复用。这是两条路线的本质差别，报告里会记 `quant_base_origin`。
 33. **provenance 级核验弱于文件级**。三项证据（sha256 / 来源 repo+revision / 张量结构）互相独立，且"同仓库同 revision ⇒ 同一次转换"比"形状一致"强，但它仍然不是逐张量比形状。S9 报告会显式声明这一条的效力范围（`imatrix_base_consistency_level`）。
-34. **S6/S7 尚未在真实 Kaggle 上跑通**（v1.1.2）。149 项测试全是 CPU/mock；`test_s6_end_to_end_from_hf` 用的是假 HF 服务器桩。真实首跑（v1.1.1）在评测前就因"缺二进制 + 私仓无 token"停住，只留下 11 秒的失败现场。**任何"NLL 差值 / 质量差异"目前都不存在**，报告里那两节会写 "S6/S7 not yet evaluated" 或直接标"失败"。
+34. **S6/S7 尚未在真实 Kaggle 上跑通**（v1.1.3）。155 项测试全是 CPU/mock；`test_s6_end_to_end_from_hf` 用的是假 HF 服务器桩。真实首跑（v1.1.1）在评测前就因"缺二进制 + 私仓无 token"停住，只留下 11 秒的失败现场。**任何"NLL 差值 / 质量差异"目前都不存在**，报告里那两节会写 "S6/S7 not yet evaluated" 或直接标"失败"。
    - 附带：**自动只编 S2 与凭据门只在 mock + 本机 macOS 上走过**。真实 Kaggle 的 CUDA 编译（`CUDA_ARCH=75`、`BUILD_JOBS=4`）与"带 token 的 2.7 / 4.56 GiB 下载"都还没发生，所以 `binaries_missing → 自动 S2 → S6` 这条链在真机上属于**未验证路径**。
 35. **HF 的真实下载只验到 401 路径**。`python -m trlab --check-hf` 在无 token 时正确报 `token_present: false` + 401 并给三条取 token 的路；带 token 下载 2.7 / 4.56 GiB 的过程**未实测**（断点续传逻辑与 S3 的 Q8_0 下载共用同一份 `_fetch_pinned_blob`，那份是真机跑过的）。
 36. **评测成本是假设速率，不是实测吞吐**。`eval_cost_estimate()` 用 CPU 2.5 tok/s / GPU 30 tok/s 的**假设值**（`assumed_rate_note` 里写明），0.94 h / GPU 路径的小时数都不能当承诺。真实吞吐要在第一次跑完后看 `measured_throughput` 才有。
