@@ -556,7 +556,8 @@ def print_banner():
 
     print(f"S4–S8         : "
           + ("S4/S5 开，S6–S8 与 SX 全关" if CFG['RUN_S4'] else
-             ("全关（本版不量化、不下 BF16、不跑 8B）" if CFG['RUN_S3'] else "全关")))
+             ("S6/S7 开（只评测），S4/S5/S8/SX 关" if CFG['RUN_EVAL'] else
+              ("全关（本版不量化、不下 BF16、不跑 8B）" if CFG['RUN_S3'] else "全关"))))
 
     print(f"量化 base     : {CFG['BASE_GGUF'] or '(未设置)'}  kind={CFG['BASE_KIND'] or '?'}")
 
