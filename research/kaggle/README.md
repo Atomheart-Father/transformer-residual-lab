@@ -57,7 +57,7 @@ sidecar fairness、成本估算、`eval_preflight`）、`trlab/__main__.py`
 
 ## 三、上手：一个开关 + Run All
 
-1. Kaggle → `File` → `Import Notebook` → 上传 `trlab_kaggle.ipynb`（7.3 KB）
+1. Kaggle → `File` → `Import Notebook` → 上传 `trlab_kaggle.ipynb`（约 11 KB）
 2. 右侧 `Settings`：`Accelerator` = **GPU T4 ×2**（Notebook 只用第 0 张，第二张不会自动用上）；`Internet` = **Off**（默认不需要联网）
 3. 直接 `Run All`。第二个代码格会自己从公开仓库取执行包（约 200 KB、1–3 秒，校验 commit 后 import），然后只跑 `S0_ENV` / `S1_SMOKE` / `S9_REPORT`，约 2–4 分钟，**不碰任何大文件**。
 
