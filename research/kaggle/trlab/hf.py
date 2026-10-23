@@ -105,7 +105,8 @@ def _no_token_hint(repo):
         "    1. 环境变量：`export HF_TOKEN=hf_...`（Kaggle 上就是 Add-ons → Secrets，\n"
         "       名字用 HF_TOKEN，勾选 attach 到本 notebook）；\n"
         "    2. 本机 `huggingface-cli login` 一次，之后读官方缓存；\n"
-        "    3. 或者把仓库改成 Public —— 那样匿名就能下，代码不用改。\n"
+        "    3. 或者由你把仓库改成 Public —— 那样匿名就能下，代码不用改。\n"
+        "       （可见性是仓库所有者的决定；本代码**不会**替你改。）\n"
         "  → 权限只需要 read（下载）/ write（上传）这一项，细粒度 token 就够。")
 
 
