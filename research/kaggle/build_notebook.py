@@ -11,6 +11,8 @@
 * 产物确定性：同样的 trlab/ 源码 → 同样的 notebook（zip 用固定时间戳 + 排序）。
 * v1.1.0：开关格多了 `RUN_EVAL`（只评测：从 HF 已存 GGUF 取输入）。
 * v1.1.1：评测默认用 GPU（有就整模型卸载）、一次只装一个模型、每阶段小结果出站。
+* v1.1.2：`RUN_EVAL` 在新 Session 里**自动只编 S2**（缺二进制时）、HF 授权检查
+  排在编译之前（没 token 就 3 秒内停）、失败写 `FAILURE.json` 且最早根因不被覆写。
 
 用法：
     python3 build_notebook.py                 # 钉当前 HEAD（要求工作区干净）
@@ -147,7 +149,7 @@ MD_TITLE = """# transformer-residual-lab · Kaggle 低位宽量化验证台（v{
 
 | 开关 | 会做什么 | 预估 |
 |---|---|---|
-| `RUN_EVAL = True` | **只评测**：从 HF 已存的 GGUF 取输入，跑 S6 配对 NLL + S7 质量检查。不编译、不下载 BF16、不重做 S3、不重新量化；**有 GPU 就用 GPU**，一次只装一个模型 | GPU 上分钟级（假设速率，非实测） |
+| `RUN_EVAL = True` | **只评测**：从 HF 已存的 GGUF 取输入，跑 S6 配对 NLL + S7 质量检查。不下载 BF16、不重做 S3、不重新量化；**缺 `llama-perplexity`/`llama-cli` 时自动只编 S2**（不下载模型）；**有 GPU 就用 GPU**，一次只装一个模型 | GPU 上分钟级（假设速率，非实测）；需补编时 +≈28 分钟 |
 | `RUN_S2 = True` | 编译 llama.cpp（下载 36.6 MiB 源码 → cmake → 4 个二进制） | ≈28 分钟 |
 | `RUN_S3 = True` | 自动带上 S2，再生成 `imatrix.gguf`（下 8.11 GiB Q8_0 + wikitext，算完回收 Q8_0） | +≈10 分钟 |
 | `RUN_S4 = True` | 自动带上 S2+S3，再从**原始 BF16** 量化 IQ2_XS / IQ4_XS，并统计真实字节 | +≈30–60 分钟 |
@@ -157,11 +159,20 @@ MD_TITLE = """# transformer-residual-lab · Kaggle 低位宽量化验证台（v{
 
 `RUN_EVAL = True` 需要 HF 私有仓库的 token（`HF_TOKEN` 环境变量 / Kaggle secret /
 本机 `huggingface-cli login` 的缓存，三者任一）。**不要把 token 写进 notebook。**
+Kaggle 上要在 `Add-ons → Secrets` 新建 `HF_TOKEN` 并**勾选 attach 到本 notebook**；
+配一次就够。没有 token 时它会在**编译之前**停下（3 秒内），`out/FAILURE.json` 会同时
+列出"没 token"和"缺二进制"两条根因，不用去翻日志。
 它会把每个阶段的小结果（5 个 JSON/MD，不含模型、不含日志）出站到 HF 并远端复核；
 想彻底不外发就 `--set HF_UPLOAD_AFTER_RUN=false`。
 
+**新 Session 不需要你额外开 S2**：`RUN_EVAL = True` 会先探活
+`llama-perplexity` / `llama-cli`，缺了就**自己只编 S2**（pinned 源码 36.6 MiB，
+不下载 Q8_0/BF16、不做 S3/S4、不重量化）；都在就直接进评测。
+
 **Kaggle 是可丢弃的算力机**：跑失败就直接关掉 Session，修代码 → commit → 新 Session
-重跑，输入不用重下。失败现场写在 `out/FAILURE.json`，不需要 Save Version 或抢救工作区。
+重跑，输入不用重下。失败现场写在 `out/FAILURE.json`（最早根因不会被后面的失败覆盖），
+不需要 Save Version 或抢救工作区。**S6/S7 没出数据时报告顶部会写"本次运行失败"**，
+不会用一份看起来正常的报告掩盖过去。
 
 `RUN_S4 = True` 会在**任何编译、任何下载之前**先跑一次几秒的 `S4_PREFLIGHT`：
 只读核查 working / 工作区外暂存盘的挂载、容量、写权限，以及 BF16 有没有落点、
@@ -179,8 +190,8 @@ S8 / SX 本版不启动；产物与 provenance 落在 `/kaggle/working/trlab/out
 
 MD_SWITCHES = """## 开关
 
-默认全部 `False`。想跑哪一级就改哪一个：`RUN_EVAL` 只评测（不动模型），
-`RUN_S4` 会自动把 S2/S3 需要的东西都带上。"""
+默认全部 `False`。想跑哪一级就改哪一个：`RUN_EVAL` 只评测（不动模型，
+缺二进制会自动只编 S2），`RUN_S4` 会自动把 S2/S3 需要的东西都带上。"""
 
 MD_RUN = """## 执行
 
@@ -196,18 +207,21 @@ MD_RUN = """## 执行
 `/kaggle/working/trlab/out/S4_PREFLIGHT.json`。
 
 **只评测（`RUN_EVAL = True`）**：输入来自 HF 私有仓库里已存的三个 GGUF，
-不编译、不下载 15 GiB BF16、不重做 S3、不重新量化。缺 token 时会在下载前停下，
-并给出三条取 token 的路（环境变量 / Kaggle secret / `huggingface-cli login` 缓存）——
-**不要把 token 写进 notebook**。**有 GPU 就用 GPU**（`-ngl 99`，装不下才退 CPU
-并把原因写进 `device_by_fmt`）；一次只装一个模型，跑完释放再装下一个。
+不下载 15 GiB BF16、不重做 S3、不重新量化；**本 Session 缺 `llama-perplexity` /
+`llama-cli` 时它会自动只编 S2**（pinned 源码 36.6 MiB，不下载模型），所以你不需要
+再开第二个开关。缺 token 时会在**编译之前**停下，`out/FAILURE.json` 同时给
+"没 token"与"缺二进制"两条根因，`next_step` 只写一件事：去 `Add-ons → Secrets`
+加 `HF_TOKEN` 并 attach，再 `Run all` —— **不要把 token 写进 notebook**。
+**有 GPU 就用 GPU**（`-ngl 99`，装不下才退 CPU 并把原因写进 `device_by_fmt`）；
+一次只装一个模型，跑完释放再装下一个。
 每个阶段的小结果会自动出站到 HF（5 个 JSON/MD）并做远端复核；失败时这一格
-不会假装成功，现场在 `out/FAILURE.json`。
+不会假装成功，现场在 `out/FAILURE.json`，报告顶部会写"本次运行失败"。
 
 S8 / SX 默认关闭。要跑就把最后一行改成
 `trlab.run(run_eval=True, S8_BF16_ANCHOR=True)` —— 阶段名直接当关键字参数传。"""
 
 SWITCH_CELL = """# 只需要改这一格。全部 False = 不联网、不下载（只跑 S0/S1/S9）。
-RUN_EVAL = False    # ← 只评测（从 HF 已存 GGUF 取输入，有 GPU 就用 GPU，不重量化）
+RUN_EVAL = False    # ← 只评测（从 HF 已存 GGUF 取输入；缺二进制会自动只编 S2；有 GPU 就用 GPU）
 RUN_S2 = False
 RUN_S3 = False
 RUN_S4 = False      # ← 想量化 IQ2_XS / IQ4_XS 就改成 True

@@ -5025,6 +5025,162 @@ def test_eval_summary_is_small_and_pasteable(ns):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ---------------------------------------------------------------- v1.1.2 新 Session 自愈
+
+def _fake_runner(ns, fail=(), calls=None):
+    """把 run_stage 换成记账桩：尊重 STAGES 开关，只记**真正执行**的阶段。"""
+    calls = [] if calls is None else calls
+    skipped = []
+    STATE = ns["STATE"]
+
+    def fake(name, fn):
+        if not ns["STAGES"].get(name, False):
+            skipped.append(name)
+            return None
+        calls.append(name)
+        if name in fail:
+            STATE[name] = {"status": "error", "error": f"{name} boom"}
+            return None
+        STATE[name] = {"status": "ok", "result": {"fake": True}}
+        return {"fake": True}
+    fake.skipped = skipped
+    return fake, calls
+
+
+def test_eval_new_session_no_token_reports_both_causes(ns):
+    """新 Kaggle：没二进制 + 没 token → 就地停（不编译），两条根因一起报。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_nos3_"))
+    patch = _Patch(ns)
+    patch("OUT", tmp)
+    patch("hf_token", lambda *a, **k: {"token": None, "source": None})
+
+    def no_bin(name):
+        raise ns["GuardError"](f"找不到 {name}")
+    patch("llama_bin", no_bin)
+    fake, calls = _fake_runner(ns)
+    patch("run_stage", fake)
+    old = {k: ns["CFG"][k] for k in ("RUN_S2", "RUN_S3", "RUN_S4", "RUN_EVAL")}
+    try:
+        out = ns["run"](run_eval=True)
+        assert out["ok"] is False, out
+        assert "hf_no_token" in out["causes"], out["causes"]
+        assert "binaries_missing" in out["causes"], out["causes"]
+        assert "S2_BUILD" not in calls, f"没 token 时不该开始编译：{calls}"
+        assert "S6_NLL" not in calls and "S7_QUALITY" not in calls
+        assert "S9_REPORT" in calls, "失败也要出一份报告（顶部写失败）"
+        doc = json.loads((tmp / "FAILURE.json").read_text(encoding="utf-8"))
+        assert doc["stage"] == "HF_AUTH" and doc["cause"] == "hf_no_token"
+        assert set(doc["causes"]) == {"hf_no_token", "binaries_missing"}
+        assert "attach" in doc["next_step"], doc["next_step"]
+    finally:
+        ns["CFG"].update(old)
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_eval_token_present_no_binaries_autobuilds_s2(ns):
+    """有 token、没二进制 → 自动**只编 S2**，然后继续 S6/S7；S3/S4 绝不被带上。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_auto_s2_"))
+    patch = _Patch(ns)
+    patch("OUT", tmp)
+    patch("hf_token", lambda *a, **k: {"token": "hf_fake", "source": "env:HF_TOKEN"})
+    patch("repo_files", lambda *a, **k: [{"path": "a.gguf", "size": 1, "sha256": None}])
+    patch("clear_access_cache", lambda: None)
+
+    def no_bin(name):
+        raise ns["GuardError"](f"找不到 {name}")
+    patch("llama_bin", no_bin)
+    patch("upload_after_run", lambda *a, **k: {"skipped": True})
+    fake, calls = _fake_runner(ns)
+    patch("run_stage", fake)
+    old = {k: ns["CFG"][k] for k in ("RUN_S2", "RUN_S3", "RUN_S4", "RUN_EVAL",
+                                     "HF_UPLOAD_AFTER_RUN")}
+    try:
+        out = ns["run"](run_eval=True)
+        assert out["ok"] is True, out
+        assert out["plan"].get("autobuild") == "S2_BUILD", out["plan"]
+        assert "缺" in out["plan"].get("autobuild_why", ""), out["plan"]
+        assert calls[:3] == ["S0_ENV", "S1_SMOKE", "S2_BUILD"], calls
+        assert "S3_IMATRIX" not in calls and "S4_QUANT" not in calls, calls
+        assert "S5_BYTES" not in calls, calls
+        assert calls.index("S6_NLL") > calls.index("S2_BUILD"), calls
+        assert "S7_QUALITY" in calls and calls[-1] == "S9_REPORT", calls
+    finally:
+        ns["CFG"].update(old)
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_eval_s2_failure_skips_s6_s7(ns):
+    """S2 失败 → S6/S7 不启动（不再报一次"找不到二进制"），run() 必须 ok=False。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_s2fail_"))
+    patch = _Patch(ns)
+    patch("OUT", tmp)
+    patch("hf_token", lambda *a, **k: {"token": "hf_fake", "source": "env:HF_TOKEN"})
+    patch("repo_files", lambda *a, **k: [])
+    patch("clear_access_cache", lambda: None)
+
+    def no_bin(name):
+        raise ns["GuardError"](f"找不到 {name}")
+    patch("llama_bin", no_bin)
+    fake, calls = _fake_runner(ns, fail=("S2_BUILD",))
+    patch("run_stage", fake)
+    old = {k: ns["CFG"][k] for k in ("RUN_S2", "RUN_S3", "RUN_S4", "RUN_EVAL")}
+    try:
+        out = ns["run"](run_eval=True)
+        assert out["ok"] is False, out
+        assert "S6_NLL" not in calls and "S7_QUALITY" not in calls, calls
+        assert "s2_build_failed" in out["causes"], out["causes"]
+        doc = json.loads((tmp / "FAILURE.json").read_text(encoding="utf-8"))
+        assert doc["stage"] == "S2_BUILD"
+    finally:
+        ns["CFG"].update(old)
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_failure_json_first_cause_not_overwritten(ns):
+    """S6 先失败、S7 再失败 → 顶层根因仍是 S6，`all` 里两条都在。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_first_"))
+    patch = _Patch(ns)
+    patch("OUT", tmp)
+    try:
+        ns["_record_failure"]("S6_NLL", error="GuardError: 列 repo 被拒绝（HTTP 401）")
+        doc = ns["_record_failure"]("S7_QUALITY", error="GuardError: 找不到 llama-cli")
+        assert doc["stage"] == "S6_NLL", "最早的根因不能被后续失败覆盖"
+        assert doc["cause"] == "hf_unauthorized"
+        assert [i["stage"] for i in doc["all"]] == ["S6_NLL", "S7_QUALITY"]
+        assert doc["causes"] == ["hf_unauthorized", "binaries_missing"], doc["causes"]
+        # 同一阶段重复记录不应重复追加
+        doc2 = ns["_record_failure"]("S6_NLL", error="又失败一次")
+        assert len(doc2["all"]) == 2, doc2["all"]
+    finally:
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_upload_without_token_never_claims_verified(ns):
+    """没有凭据时出站必须报 ok=False / not_persisted，不能出现 remote_verified=True。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_up_none_"))
+    (tmp / "S6_NLL.json").write_text("{}", encoding="utf-8")
+    patch = _Patch(ns)
+    patch("OUT", tmp)
+
+    def boom(files, **kw):
+        raise ns["GuardError"]("上传需要 token。\n" + ns["_no_token_hint"]("r/x"))
+    patch("upload_after_run", boom)
+    old = ns["CFG"]["HF_UPLOAD_AFTER_RUN"]
+    try:
+        ns["CFG"]["HF_UPLOAD_AFTER_RUN"] = True
+        r = ns["_upload_stage"]("S6_NLL")
+        assert r["ok"] is False and r["not_persisted"], r
+        assert r.get("remote_verified") is not True, "没有凭据不许声称远端已核验"
+    finally:
+        ns["CFG"]["HF_UPLOAD_AFTER_RUN"] = old
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ---------------------------------------------------------------- runner
 
 TESTS = [
@@ -5177,6 +5333,12 @@ TESTS = [
     test_upload_stage_respects_optin_and_reports_not_persisted,
     test_failure_json_has_stage_and_one_next_step,
     test_eval_summary_is_small_and_pasteable,
+    # v1.1.2 新 Session 自愈：凭据门 / 自动 S2 / 失败不掩盖
+    test_eval_new_session_no_token_reports_both_causes,
+    test_eval_token_present_no_binaries_autobuilds_s2,
+    test_eval_s2_failure_skips_s6_s7,
+    test_failure_json_first_cause_not_overwritten,
+    test_upload_without_token_never_claims_verified,
 ]
 
 

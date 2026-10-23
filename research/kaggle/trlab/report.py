@@ -174,6 +174,43 @@ def stage_s9_report(deadline):
     L.append(f"- Notebook 版本：v{NOTEBOOK_VERSION}")
     L.append(f"- 模型：`{CFG['MODEL_ID']}`（{CFG['PARAM_COUNT']/1e9:.2f} B 参数）\n")
 
+    # ---- 0 运行状态（v1.1.2：失败不许被"报告生成了"掩盖）----
+    _failed = [(k, v) for k, v in STATE.items()
+               if isinstance(v, dict) and v.get("status") == "error"]
+    _fail_doc = None
+    _fp = OUT / "FAILURE.json"
+    if _fp.exists():
+        try:
+            _fail_doc = json.loads(_fp.read_text(encoding="utf-8"))
+        except Exception:
+            _fail_doc = None
+    if _failed or _fail_doc:
+        L.append("## ⚠ 本次运行**失败**\n")
+        L.append("> 这份报告是**失败现场**，不是结果。下面所有\"未运行\"的段落都因为"
+                 "前面卡住了，**不要**把它们读成\"跑过但没有差异\"。\n")
+        if _fail_doc:
+            L.append(f"- 最早根因：`{_fail_doc.get('stage')}` / "
+                     f"`{_fail_doc.get('cause') or '未分类'}`")
+            _causes = _fail_doc.get("causes") or []
+            if _causes:
+                L.append(f"- 本次运行的根因清单（去重）：{', '.join(f'`{c}`' for c in _causes)}")
+            for _it in (_fail_doc.get("all") or []):
+                L.append(f"  - `{_it.get('stage')}`（`{_it.get('cause')}`）："
+                         f"{str(_it.get('error'))[:180]}")
+            if "binaries_missing" in _causes:
+                L.append("  - `binaries_missing` **不需要**单独开 S2：凭据通过后，"
+                         "`RUN_EVAL=True` 会自动只编 S2（pinned 源码 36.6 MiB，"
+                         "不下载模型、不做 S3/S4）。")
+            L.append(f"- 下一步：{_fail_doc.get('next_step')}")
+            L.append(f"- 明细：`{_fp}`（含每条失败与 traceback 尾）")
+        for _k, _v in _failed:
+            L.append(f"- `{_k}` = error：{str(_v.get('error'))[:200]}")
+        L.append("")
+    elif _get("S6_NLL") is None and _get("S7_QUALITY") is None and CFG.get("RUN_EVAL"):
+        L.append("## ⚠ 本次运行没有产出评测数据\n")
+        L.append("> `RUN_EVAL=True` 但 S6/S7 都没有结果。先看 "
+                 f"`{OUT / 'FAILURE.json'}`。\n")
+
     # ---- 1 环境 ----
     L.append("## 1. 环境\n")
     if env:
@@ -200,9 +237,25 @@ def stage_s9_report(deadline):
         L.append(f"- **S2 失败**：`{str(_s2rec.get('error'))[:400]}`")
         L.append(f"- 结果文件：`{OUT}/S2_BUILD.json`")
         L.append(f"- 日志：`{LOGS}/s2_cmake.log`、`{LOGS}/s2_build.log`")
-        L.append("- 其余阶段没有启动（`STAGES` 里是 False），所以报告里下面几节是空的。")
+        if CFG["RUN_EVAL"]:
+            L.append("- 工具链没建起来，S6/S7 **被主动跳过**（不是开关没开）；"
+                     "报告里评测几节为空是**这次失败的后果**，不是「没跑评测」。")
+        else:
+            L.append("- 其余阶段没有启动（`STAGES` 里是 False），所以报告里下面几节是空的。")
     else:
-        L.append("_S2_BUILD 未运行（`RUN_S2 = False`）。这一节为空不代表失败。_")
+        _auth_blocked = bool(_fail_doc) and any(
+            c in ("hf_no_token", "hf_unauthorized")
+            for c in (_fail_doc.get("causes") or []))
+        if _auth_blocked:
+            L.append("_本次在**编译之前**就被凭据门拦下了（见上方运行状态），"
+                     "所以没有编译。这不是工具链问题。_")
+        elif CFG["RUN_S2"]:
+            L.append("_S2_BUILD 已启用但本次没有产出结果 —— 这属于异常，请检查 S2 日志。_")
+        elif CFG["RUN_EVAL"]:
+            L.append("_`RUN_EVAL = True` 且 `llama-perplexity` / `llama-cli` 本 Session "
+                     "**已经就绪**，不需要编译（缺了才会自动只编 S2）。这一节为空不代表失败。_")
+        else:
+            L.append("_S2_BUILD 未运行（`RUN_S2 = False`）。这一节为空不代表失败。_")
     L.append("")
 
     # ---- 3 smoke ----
@@ -350,8 +403,16 @@ def stage_s9_report(deadline):
             L.append(f"\n**结论效力**：{s6r['scope_note']}")
         L.append(f"\n统计口径限制：{s6r.get('statistics_note')}")
     else:
-        L.append("_S6_NLL 未运行 —— **S6/S7 not yet evaluated**（这两个量化对模型能力"
-                 "的影响目前没有任何实测结论）_")
+        _s6rec = STATE.get("S6_NLL") or {}
+        if _s6rec.get("status") == "error":
+            L.append(f"_S6_NLL **失败**：`{str(_s6rec.get('error'))[:300]}` —— "
+                     "没有 NLL 数据，任何能力结论都不成立。_")
+        elif CFG["RUN_EVAL"]:
+            L.append("_S6_NLL 未运行 —— 本次在评测开始前就停下了（见上方运行状态），"
+                     "**S6/S7 not yet evaluated**。_")
+        else:
+            L.append("_S6_NLL 未运行 —— **S6/S7 not yet evaluated**（这两个量化对模型能力"
+                     "的影响目前没有任何实测结论）_")
     L.append("")
 
     # ---- 7 质量 ----
@@ -367,7 +428,13 @@ def stage_s9_report(deadline):
         for lim in s7r["limits"]:
             L.append(f"- 限制：{lim}")
     else:
-        L.append("_S7_QUALITY 未运行 —— **S6/S7 not yet evaluated**_")
+        _s7rec = STATE.get("S7_QUALITY") or {}
+        if _s7rec.get("status") == "error":
+            L.append(f"_S7_QUALITY **失败**：`{str(_s7rec.get('error'))[:300]}`_")
+        elif CFG["RUN_EVAL"]:
+            L.append("_S7_QUALITY 未运行 —— 本次在评测开始前就停下了（见上方运行状态）。_")
+        else:
+            L.append("_S7_QUALITY 未运行 —— **S6/S7 not yet evaluated**_")
     L.append("")
 
     # ---- 8 锚点 ----

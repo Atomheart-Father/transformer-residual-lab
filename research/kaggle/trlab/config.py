@@ -6,7 +6,7 @@
 
 from pathlib import Path
 
-NOTEBOOK_VERSION = "1.1.1"
+NOTEBOOK_VERSION = "1.1.2"
 
 
 
@@ -421,6 +421,21 @@ def _apply_run_switches():
                 "imatrix_base": S3_PINNED["filename"],
                 "calib_source": CFG["CALIB_SOURCE"]}
 
+    _s2_only()
+    return {"run_s2": True, "run_s3": False, "run_s4": False, "run_eval": bool(CFG["RUN_EVAL"]),
+            "stages": [k for k, v in STAGES.items() if v],
+            "commit": CFG["LLAMA_COMMIT"],
+            "cuda_arch": CFG["CUDA_ARCH"]}
+
+
+
+def _s2_only():
+    """只编 S2：开 S2_BUILD + 填好编译参数，**不碰** S3/S4/S5。
+
+    v1.1.2：`RUN_EVAL=True` 在新 Kaggle Session 上找不到 `llama-perplexity` /
+    `llama-cli` 时，由 `run()` 调这个函数自动补编 —— 用户仍然只有一个开关。
+    这里只下载 36.6 MiB 的 pinned 源码并编译，**不下载任何模型、不重量化**。
+    """
     STAGES["S2_BUILD"] = True
     CFG["S2_AUTO_FETCH_SOURCE"] = True
     CFG["LLAMA_COMMIT"] = S2_PINNED["commit"]
@@ -428,10 +443,7 @@ def _apply_run_switches():
     CFG["CUDA_NO_VMM"] = True  # Kaggle T4 上 CUDA::cuda_driver target 找不到（v0.3.1）
     CFG["BUILD_CUDA"] = True   # 三个工具都有 CPU 路径，nvcc 缺失时预检会直接提示
     CFG["BUILD_JOBS"] = 4      # Kaggle 只有 4 核
-    return {"run_s2": True, "run_s3": False, "run_s4": False, "run_eval": bool(CFG["RUN_EVAL"]),
-            "stages": [k for k, v in STAGES.items() if v],
-            "commit": CFG["LLAMA_COMMIT"],
-            "cuda_arch": CFG["CUDA_ARCH"]}
+    return STAGES["S2_BUILD"]
 
 
 

@@ -430,7 +430,9 @@ S3 成功后 Q8_0 会被回收（8.11 GiB），所以 S4 **不再要求**读 ima
 **前提**：S4/S5 的产物已经备份在 HF 私有仓库 `Atomheart-Father/trlab-qwen3-8b-quant-pilot`
 （commit `097e692`），包含 `qwen3-8b-IQ2_XS.gguf`、`qwen3-8b-IQ4_XS.gguf`、
 `imatrix.gguf` 与三份 `*.provenance.json`。所以这一节**不需要 BF16、不需要 S3、
-不需要重新量化、不需要编译**。
+不需要重新量化**。编译是**按需自动**的：新 Session 里 `llama-perplexity` /
+`llama-cli` 不存在时，`RUN_EVAL=True` 会**自己只编 S2**（见 6.2.0 后的"两道门"），
+你不用额外开开关。
 
 ### 6.2.0 唯一操作开关
 
@@ -441,7 +443,25 @@ S3 成功后 Q8_0 会被回收（8.11 GiB），所以 S4 **不再要求**读 ima
 
 `RUN_EVAL=True` 会展开成：`S6_NLL` + `S7_QUALITY` + `S9_REPORT`，并自动置
 `HF_FETCH_ARTIFACTS=True`（允许从 HF 取输入）与 `HF_UPLOAD_AFTER_RUN=True`
-（每个阶段的小结果出站）。它**不会**打开 `RUN_S2/S3/S4`。
+（每个阶段的小结果出站）。它**不会**打开 `S3/S4/S5`；`S2_BUILD` 只在
+"二进制缺失"时被自动打开（v1.1.2，见下）。
+
+#### 两道门（v1.1.2 起，顺序是刻意的）
+
+```text
+S0/S1 → ① 二进制探活（本地、免费）→ ② HF 授权检查（1 次只读）
+      → ③ 缺二进制则自动只编 S2 → S6 → S7 → S9
+```
+
+| 门 | 何时 | 行为 |
+|---|---|---|
+| ① 探活 | 永远（不发网络） | 缺 `llama-perplexity`/`llama-cli` 只打一行日志，不报错 |
+| ② 授权 | 永远（编译前） | 无 token 连请求都不发（`status=no_token`）；不通就写 `FAILURE.json` + 出报告，**3 秒内停**，不会白等 28 分钟编译 |
+| ③ 自动 S2 | 仅当 ① 缺二进制 | `_s2_only()`：只开 `S2_BUILD` + pinned 源码 36.6 MiB，**不下载模型、不做 S3/S4、不重量化** |
+
+所以"新 Session + 只开 `RUN_EVAL` + `Run all`"现在**成立**了；v1.1.1 里它不成立
+（`eval_preflight()` 第 1 项就要求二进制存在）。S2 若失败，S6/S7 **主动跳过**
+（不是"开关没开"），`FAILURE.json` 记 `s2_build_failed`，报告里写明"这是失败的后果"。
 
 **默认用 GPU**：`EVAL_ALLOW_GPU=True`，检测到显存就 `-ngl 99`（整模型卸载）。
 装不下才退 CPU，并且**一定**在 `device_by_fmt` / `resources.device_why` 里写原因 ——
@@ -459,9 +479,19 @@ S3 成功后 Q8_0 会被回收（8.11 GiB），所以 S4 **不再要求**读 ima
 | Kaggle secret | 网页 `Add-ons → Secrets` → 新建 `HF_TOKEN` → 在该 notebook 上勾选 attach。代码用 `kaggle_secrets.UserSecretsClient` 读 |
 | HF 官方缓存 | 本机 `huggingface-cli login` 一次，之后 `~/.cache/huggingface/token` 会被复用 |
 
-三者都没有时，预检会停在下载之前，说"没有 token"并列出这三条路。
+三者都没有时，**凭据门在编译之前**就把运行停住（v1.1.2）：不发下载请求、不开始
+编译，`FAILURE.json` 里 `cause=hf_no_token`，`causes` 会同时列出
+`binaries_missing`（如果你这个 Session 也没二进制），`next_step` 直接写
+"`Add-ons → Secrets` 新建 `HF_TOKEN`……**attach** 它，再 `Run all`"。
+报告顶部会写 `## ⚠ 本次运行失败` + "这份报告是**失败现场**，不是结果"。
 **不要**把 token 贴进 notebook cell、git、或 Issue 评论里；代码本身也不会打印它
 （只打印 `token_source`，如 `env:HF_TOKEN`）。
+
+私仓可见性**不需要改**：只要 attach 了带 Read 权限的 token 就能读。代码不会替你
+把仓库改成 Public（可见性是仓库所有者的决定）；真要走匿名路线由你自己决定。
+
+一次配置之后就不用再管：同一个 Notebook 只要 token 还 attach 着，之后每次
+`Run all` 都直接过门。
 
 ### 6.2.2 会下载什么、多大
 
@@ -520,15 +550,24 @@ CPU 被拦时预检给三个选项，不是跑一半被杀：缩小 pilot / 开 
 
 ### 6.2.6 失败恢复
 
-先看 `out/FAILURE.json`：里面是阶段名 / 报错 / traceback 尾 / **一条**下一步。
-下面按报错对号入座。
+先看 `out/FAILURE.json`：**顶层永远是最早那条根因**（`stage` / `cause` / `error` /
+`next_step`），`causes` 是去重后的根因代码，`all` 按时间顺序列出全部失败 ——
+后面的阶段失败**不会**把最早根因覆盖掉（v1.1.2）。所以"缺二进制"和"私仓没认证"
+能在一屏里同时看到。
 
 | 现象 | 去哪看 | 处置 |
 |---|---|---|
-| `没有 HF token` + 三条路 | `FAILURE.json` / `out/S6_NLL.json` | 按 6.2.1 任选一条；**不要把 token 写进 notebook** |
-| `401 / 403` | 同上 | token 无效或没权限。`--check-hf` 可以只验 token 不下载 |
-| `找不到 llama-perplexity` | 同上 | 二进制不在。把 `RUN_S2=True` 一起跑（只编译，不下载模型、不重量化），或挂已有的 build 目录 |
+| `cause=hf_no_token` | `FAILURE.json` | 按 6.2.1 配一次 `HF_TOKEN` 并 **attach**，再 `Run all`。**不要把 token 写进 notebook** |
+| `cause=hf_unauthorized`（401/403） | 同上 | token 无效或对该 repo 没权限。`--check-hf` 可以只验授权不下载 |
+| `cause=binaries_missing` | 同上 | **你不需要单独开 S2**：v1.1.2 起 `RUN_EVAL=True` 会自动只编 S2。若它反复出现，看 `S2_BUILD` 的日志 |
+| `cause=s2_build_failed` | `out/S2_BUILD.json` + `logs/s2_*.log` | 编译本身失败，S6/S7 已主动跳过。按第七节修 S2 |
 | `估算 X h 超过上限` | `out/S6_NLL.json` 的 `cost_estimate` | 按 6.2.4 的三选一；最省事是开 GPU Session |
+| `sha256 与 HF 不符` | 同上 | 本地缓存坏了。删掉那个 GGUF 重跑（`.partial` 会续传，但哈希不符必须整个重来） |
+| 下载中断 | 日志里的 `.partial` 提示 | 直接重跑，`Range` 续传；输入指纹没变就会接着下 |
+| `probe_only` 时看到 `source: hf_pending` | `out/S6_NLL.json` | 正常：预检不拉 7 GB，真跑时才下载 |
+| 跑到一半 OOM | `logs/ppl_*.log` 尾部 | 降 `NLL_CTX`（512 → 256），或 `--set EVAL_ALLOW_GPU=false` 退 CPU |
+| 上传失败但评测成功 | `EVAL_SUMMARY.json` 的 `upload.not_persisted` | 结果仍在本地产物目录；可直接把 `EVAL_SUMMARY.json` 贴到聊天，或在同一 Session 里再跑 `--upload` |
+| 报告顶部出现 `## ⚠ 本次运行失败` | `report.md` 第 0 节 | 这就是失败现场（不是结果页）。`run()` 返回 `ok=False`，`failed` 列出阶段、`causes` 列出根因 |
 | `sha256 与 HF 不符` | 同上 | 本地缓存坏了。删掉那个 GGUF 重跑（`.partial` 会续传，但哈希不符必须整个重来） |
 | 下载中断 | 日志里的 `.partial` 提示 | 直接重跑，`Range` 续传；输入指纹没变就会接着下 |
 | `probe_only` 时看到 `source: hf_pending` | `out/S6_NLL.json` | 正常：预检不拉 7 GB，真跑时才下载 |
@@ -541,7 +580,7 @@ CPU 被拦时预检给三个选项，不是跑一半被杀：缩小 pilot / 开 
 
 | 阶段 | 出站文件 | HF 路径 |
 |---|---|---|
-| `S6_NLL` | `S6_NLL.json`、`EVAL_SUMMARY.json` | `results/v1.1.1/<run_id>/` |
+| `S6_NLL` | `S6_NLL.json`、`EVAL_SUMMARY.json` | `results/v1.1.2/<run_id>/` |
 | `S7_QUALITY` | `S7_QUALITY.json` | 同上 |
 | `S9_REPORT` | `report.md`、`results.json`、`S9_REPORT.json` | 同上 |
 
@@ -618,7 +657,8 @@ fairness_level、逐格式设备、吞吐、S7 的 identical_rate、upload 状�
 19. **v1.0 的引导格未在真实 Kaggle 上跑过**（本地已验证）：GitHub 匿名 sparse fetch、`rev-parse` 强校验、stamp 复用都在干净目录实测通过，但 Kaggle 镜像里 `git` 的版本与 `core.sparseCheckout` 支持情况、以及 Kaggle 出口到 github.com 的带宽/限流未实测。失败时的报错信息会说明原因，`--embed` 内嵌变体可绕过仓库依赖。
 20. **仓库转私有后匿名 fetch 会失效**。当前 GitHub 仓库是 public（用户 2026-10-22 设为公开）。若之后转回私有，用 `python3 build_notebook.py --embed` 生成内嵌执行包的版本，或在 Kaggle 环境里配好身份。
 21. **Kaggle 上重复 `Run All` 的 stamp 复用未实测**：同一 Session 内第二次执行应命中 `_trlab_src/.trlab_commit` 直接复用、不重新 fetch；这是本地验证过的逻辑，Kaggle 上的 `/kaggle/working` 持久化行为（第 7 条）会叠加影响。
-22. **S6/S7 从未在真实 Kaggle 上跑过**（v1.1.1）。144 项测试全是 CPU/mock，`test_s6_end_to_end_from_hf` 用的是假 HF 服务器桩。**所以"量化对 NLL / 质量的影响"目前没有数据**，报告那两节会写 "S6/S7 not yet evaluated"。
+22. **S6/S7 从未在真实 Kaggle 上跑通过**（v1.1.2）。149 项测试全是 CPU/mock，`test_s6_end_to_end_from_hf` 用的是假 HF 服务器桩。2026-10-23 的真实首跑在**评测开始前**就停了（缺二进制 + 私仓无 token），只留下 11 秒的失败现场。**所以"量化对 NLL / 质量的影响"目前没有数据**，报告那两节会写 "S6/S7 not yet evaluated" 或直接标"失败"。
+   - 附带：**自动只编 S2 与凭据门只在 mock + 本机 macOS 上走过**（v1.1.2）。真实 Kaggle 的 CUDA 编译（`CUDA_ARCH=75` / `BUILD_JOBS=4`）与"`RUN_EVAL` 自动开 S2"这条路径都**没有真机证据**；本机复现的是"无 token + 无二进制 → 3.1 s fail fast、两条根因、不开始编译"。
 23. **HF 真实下载只验到 401 路径**。`python -m trlab --check-hf` 在无 token 时正确报 `token_present: false` + 401 + 三条取 token 的路（真机 macOS 跑过）；**带 token 下载 2.7 / 4.56 GiB 未实测**。断点续传逻辑与 S3 的 Q8_0 下载共用同一份 `_fetch_pinned_blob`，那份是真机跑过的。
 24. **`hf_sidecar_declared` 级 fairness 未在真实 sidecar 上走过**。测试里是构造的；真实 sidecar 字段是否齐、跨 Session 会不会误判 `imatrix_base_consistent: false`，第一次真跑才知道。
 25. **往 HF 上传没有真的发生过**。v1.1.1 起 `RUN_EVAL=True` 会自动出站 5 个小文件，但真实上传只有 dry-run 与 mock 覆盖。上传时只做远端 size 对比（LFS 再比 sha256），不是逐文件内容复核。
@@ -670,6 +710,24 @@ fairness_level、逐格式设备、吞吐、S7 的 identical_rate、upload 状�
 7.3 GB 真实下载；真实 sidecar 的 fairness 判定；往 HF 的真实上传；真实 CPU 吞吐
 （0.94 h 是假设速率算的）。
 
+### 已在本地验证的部分（v1.1.2，2026-10-23，非 Kaggle）
+
+1. **149 项 CPU 回归全绿**（不联网、约 45 秒）：144 项旧 + 5 项 v1.1.2
+   （无 token 无二进制同时报两条根因 / 有 token 无二进制自动只开 S2 /
+   S2 失败则 S6/S7 不启动 / `FAILURE.json` 最早根因不被覆写 /
+   无凭据时绝不说 verified）。
+2. **"无 token + 无二进制"在真机 macOS 复现过**（`env -u HF_TOKEN`，干净工作目录）：
+   3.1 s 结束，`ok=false`、`failed=["HF_AUTH"]`、
+   `causes=["hf_no_token","binaries_missing"]`、`S2_BUILD: null`（**没有开始编译**）、
+   `S9_REPORT: ok`（报告顶部是 `## ⚠ 本次运行失败` + "这份报告是**失败现场**，不是结果"）。
+   `FAILURE.json` 的 `next_step` 直接写"`Add-ons → Secrets` 新建 `HF_TOKEN`……attach 它，再 `Run all`"。
+3. **报告空段不再自相矛盾**：`RUN_EVAL=True` 自动补编时第 2 节说"自动只编 S2"，
+   二进制已就绪时说"不需要编译"，被凭据门拦下时说"在编译之前就停了"；
+   S6/S7 段落区分"没运行"与"**失败**"。
+
+**v1.1.2 没验证的（如实标注）**：自动 S2 在真实 Kaggle 上的 CUDA 编译；
+带 token 的 7.3 GB 真实下载与真实上传；S6/S7 的端到端结果 —— 一条都还没有。
+
 ---
 
 ## 九、动态条件（不假定）
@@ -680,11 +738,15 @@ Kaggle 的每日 GPU 配额、单会话时长上限、并发会话数、存储�
 
 ## 十、下一步
 
-**如果你要的是"把 S6/S7 跑出来"（v1.1.1 的默认下一步）**：上传 `trlab_kaggle.ipynb` →
+**如果你要的是"把 S6/S7 跑出来"（v1.1.2 的默认下一步）**：上传 `trlab_kaggle.ipynb` →
 把 `RUN_EVAL = False` 改成 `RUN_EVAL = True` → 配好 HF token（6.2.1 三条路任选一条，
-**不要写进 notebook**）→ `Settings`：`Accelerator = GPU T4 ×2`、`Internet = On` →
-`Run all` → 对着 6.2.5 的清单核一遍 → 停下。不编译、不下载 BF16、不重做 S3、
-不重新量化；**默认用 GPU**，一次只装一个模型，每阶段结果自动出站。
+**不要写进 notebook**，Kaggle 上要 **attach** 到本 notebook）→ `Settings`：
+`Accelerator = GPU T4 ×2`、`Internet = On` → `Run all` → 对着 6.2.5 的清单核一遍 → 停下。
+
+新 Session 没有 `llama-perplexity` / `llama-cli` 时，它会**自己只编 S2**
+（pinned 源码 36.6 MiB，约 28 分钟），你**不用**再开第二个开关；二进制已存在就直接跳过。
+不下载 BF16、不重做 S3、不重新量化；**默认用 GPU**，一次只装一个模型，每阶段结果自动出站。
+token 没 attach 的话，它在**编译之前**就停下并写清两条根因，不会让你白等 28 分钟。
 
 **如果你要的是"把量化再做一遍"**：把 `RUN_S4 = False` 改成 `RUN_S4 = True` → `Settings → Internet = On` → `Run all` → 核对 5.4 与 6.6 两份清单 → 停下。
 

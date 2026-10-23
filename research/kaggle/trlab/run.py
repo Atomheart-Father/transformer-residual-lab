@@ -9,8 +9,10 @@ v1.1.1 的执行哲学（用户 2026-10-23 确认）：**Kaggle 是可丢弃的 
   3. 评测结束写一份几百字节的 `EVAL_SUMMARY.json`，方便直接贴到聊天里。
 """
 
-from .config import CFG, LOGS, NOTEBOOK_VERSION, OUT, STAGES, _apply_run_switches, print_banner
-from .paths import _s3_base_path
+from .config import (CFG, LOGS, NOTEBOOK_VERSION, OUT, STAGES, _apply_run_switches,
+                     _s2_only, print_banner)
+from .errors import GuardError
+from .paths import _s3_base_path, llama_bin
 from .core import STATE, _get, ensure_dirs, log, run_stage, write_json
 from .stages_env import stage_s0_env, stage_s1_smoke
 from .stages_build import stage_s2_build
@@ -43,55 +45,181 @@ def _run_id():
     return _RUN_ID
 
 
-def _next_step(stage, err):
-    """把常见错误翻译成"下一步做什么"。只给一步，不给一堆选项。"""
+def _classify(stage, err):
+    """错误 → (cause 代码, 一条下一步)。cause 用来在摘要里去重合并。"""
     e = str(err or "")
     low = e.lower()
     if "token" in low or "401" in e or "403" in e:
-        return ("配 HF token：环境变量 HF_TOKEN / Kaggle Add-ons → Secrets（名字 HF_TOKEN，"
-                "勾选 attach）/ 本机 `huggingface-cli login`。不要把 token 写进 notebook。")
+        code = "hf_unauthorized" if ("401" in e or "403" in e) else "hf_no_token"
+        return code, ("配 HF token：Kaggle `Add-ons → Secrets` 加 `HF_TOKEN` 并"
+                      "**attach 到本 notebook**（上传要 Write 权限）；本机用 "
+                      "`huggingface-cli login`。不要把 token 写进 notebook。")
     if "llama-perplexity" in e or "llama-cli" in e:
-        return ("缺 llama.cpp 二进制：把 RUN_S2 也设成 True 一起跑（只编译，不下载模型、"
-                "不重量化，约 28 分钟）。")
+        return "binaries_missing", (
+            "缺 llama.cpp 二进制：v1.1.2 起 `RUN_EVAL=True` 会**自动只编 S2**"
+            "（pinned 源码 36.6 MiB，不下载模型、不重量化）。若仍失败，看 S2_BUILD 的日志。")
+    if stage == "S2_BUILD":
+        return "s2_build_failed", "S2 编译失败：看 `logs/s2_build.log` 尾部那句话；修好后重跑。"
     if "超过" in e and "上限" in e:
-        return ("估算超上限：调小 NLL_GROUPS / NLL_CTX，或换 GPU Session"
-                "（代码默认就会用 GPU）。")
+        return "budget", ("估算超上限：调小 NLL_GROUPS / NLL_CTX，或开 GPU Session"
+                          "（代码默认就会用 GPU）。")
     if "sha256" in low or "lfs.oid" in low:
-        return "本地 GGUF 与 HF 上的哈希不一致：删掉那个文件重跑（会重新下载并校验）。"
+        return "hash_mismatch", "本地 GGUF 与 HF 上的哈希不一致：删掉那个文件重跑（会重新下载并校验）。"
     if "重叠" in e:
-        return "校准集与评测集重叠：这是语料配置问题，换 split，不要绕过断言。"
-    return (f"看 {OUT / (stage + '.json')} 里的 traceback；修好后在新 Session 重跑即可"
-            "（HF 上的输入不用重下）。")
+        return "corpus_overlap", "校准集与评测集重叠：这是语料配置问题，换 split，不要绕过断言。"
+    return "other", (f"看 {OUT / (stage + '.json')} 里的 traceback；修好后在新 Session 重跑即可"
+                     "（HF 上的输入不用重下）。")
 
 
-def _write_failure(stage, plan=None, upload_state=None):
-    """阶段失败时写一份小 JSON —— 会话可以立刻丢掉，这份就是现场。"""
+def _record_failure(stage, error=None, traceback_tail=None, plan=None,
+                    upload_state=None, cause=None, next_step=None,
+                    extra_causes=None):
+    """写 `FAILURE.json`：**最早根因不被后续失败覆盖**（v1.1.2）。
+
+    结构：顶层 `stage/error/next_step` 永远是最早那一条；`all` 按时间顺序累积；
+    `causes` 是去重后的根因代码（例如 `["hf_no_token", "binaries_missing"]`），
+    这样"两条根因"在一屏里能看全，不用翻多个日志。
+    """
     rec = STATE.get(stage) or {}
-    if rec.get("status") != "error":
+    if error is None and rec.get("status") != "error":
         return None
+    err = str(error if error is not None else rec.get("error"))
+    if cause is None or next_step is None:
+        c, s = _classify(stage, err)
+        cause, next_step = (cause or c), (next_step or s)
+
+    item = {"stage": stage, "cause": cause, "error": err,
+            "traceback_tail": (traceback_tail if traceback_tail is not None
+                               else (rec.get("traceback") or "")[-1500:]),
+            "next_step": next_step,
+            "started": rec.get("started"), "elapsed_sec": rec.get("elapsed_sec")}
+
+    path = OUT / "FAILURE.json"
+    prev = {}
+    if path.exists():
+        try:
+            prev = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            prev = {}
+    items = list(prev.get("all") or [])
+    if not items and prev.get("stage"):        # 兼容 v1.1.1 的单条格式
+        items = [{"stage": prev["stage"], "cause": prev.get("cause"),
+                  "error": prev.get("error"), "next_step": prev.get("next_step")}]
+    if not any(i.get("stage") == stage for i in items):
+        items.append(item)
+
+    causes = []
+    for c in [i.get("cause") for i in items] + list(extra_causes or []):
+        if c and c not in causes:
+            causes.append(c)
+    first = items[0]
     doc = {
-        "stage": stage,
-        "run_id": _run_id(),
-        "notebook_version": NOTEBOOK_VERSION,
-        "started": rec.get("started"),
-        "elapsed_sec": rec.get("elapsed_sec"),
-        "error": rec.get("error"),
-        "traceback_tail": (rec.get("traceback") or "")[-1500:],
-        "next_step": _next_step(stage, rec.get("error")),
-        "plan": plan,
-        "upload": upload_state,
+        "stage": first.get("stage"), "cause": first.get("cause"),
+        "error": first.get("error"), "next_step": first.get("next_step"),
+        "traceback_tail": first.get("traceback_tail"),
+        "all": items, "causes": causes,
+        "run_id": _run_id(), "notebook_version": NOTEBOOK_VERSION,
+        "plan": plan, "upload": upload_state,
         "note": ("Kaggle 只是可丢弃的算力机：这份 JSON 和阶段 JSON 都在本地产物目录里。"
                  "修代码 → commit → 新 Session 重跑，输入不用重下（HF 是长期源）。"),
     }
-    write_json(OUT / "FAILURE.json", doc)
-    print("-" * 78)
-    print(f"{stage} 失败 —— 已经停在这里，不会带着残缺状态往下跑。")
-    print(f"  报错: {doc['error']}")
-    print(f"  下一步: {doc['next_step']}")
-    print(f"  现场: {OUT / 'FAILURE.json'}（含 traceback 尾）与 {OUT / (stage + '.json')}")
-    print("  你可以直接关掉 Session；修好代码后新 Session 重跑，HF 上的输入不用重下。")
-    print("-" * 78)
+    write_json(path, doc)
+
+    print("=" * 78)
+    print(f"运行失败 —— 最早根因：{first.get('stage')} / {first.get('cause')}")
+    for i in items:
+        print(f"  · [{i.get('cause')}] {i.get('stage')}: {str(i.get('error'))[:160]}")
+    print("  下一步（按顺序做）：")
+    for i in items:
+        print(f"    - {i.get('next_step')}")
+    print(f"  现场：{path}（含 traceback 尾）；阶段 JSON 在 {OUT}/")
+    print("  你可以直接关掉这个 Session；修好后新 Session 重跑，HF 上的输入不用重下。")
+    print("=" * 78)
     return doc
+
+
+def _write_failure(stage, plan=None, upload_state=None):
+    """兼容 v1.1.1 的调用点：阶段失败时记录（合并进 `all`）。"""
+    return _record_failure(stage, plan=plan, upload_state=upload_state)
+
+
+# ---------------------------------------------------------------- 评测前的两道门
+
+def _missing_eval_binaries():
+    """本地探活（不发网络请求）：评测真正需要的两个二进制缺哪个。"""
+    miss = []
+    for name in ("llama-perplexity", "llama-cli"):
+        try:
+            llama_bin(name)
+        except GuardError:
+            miss.append(name)
+    return miss
+
+
+def _auth_gate(plan=None):
+    """开跑前的 HF 授权检查（1 次只读请求；无 token 时连请求都不发）。
+
+    排在编译之前是刻意的：真实 Kaggle 上第一次 RUN_EVAL 就是因为没有 attach
+    `HF_TOKEN`，白等了 28 分钟编译才在下载时看到 401。
+    """
+    from .hf import check_access
+    a = check_access()
+    if a.get("ok"):
+        log(f"HF 授权检查通过：{a['repo']}@{a['revision']}"
+            f"（{a.get('n_files')} 个文件，凭据来源 {a.get('token_source')}）")
+    else:
+        log(f"!! HF 授权检查失败（{a.get('status')}）：{str(a.get('error'))[:200]}")
+    return a
+
+
+def _autobuild_binaries(plan):
+    """`RUN_EVAL=True` 但本 Session 没有二进制 → **自动只编 S2**。
+
+    用户仍然只有一个开关。这里只下载 36.6 MiB 的 pinned 源码并编译，
+    **不下载 Q8_0/BF16、不做 S3/S4、不重量化**。
+    """
+    miss = _missing_eval_binaries()
+    if not miss:
+        log("二进制就绪：llama-perplexity / llama-cli 都在（不编译）")
+        return plan
+    log(f"评测需要 {miss}，本 Session 没有 → 自动只编 S2"
+        "（pinned 源码 36.6 MiB；不下载模型、不做 S3/S4、不重量化）")
+    _s2_only()
+    plan = dict(plan)
+    plan.update(autobuild="S2_BUILD", autobuild_why=f"缺 {miss}", run_s2=True,
+                stages=[k for k, v in STAGES.items() if v])
+    return plan
+
+
+def _abort_eval(plan, auth, upload_state=None):
+    """凭据不通就地停：写 FAILURE.json（含"缺二进制"这条并存的根因）+ 出报告。"""
+    extra = []
+    miss = _missing_eval_binaries()
+    if miss:
+        extra.append("binaries_missing")
+    step = ("在 Kaggle 里做**一次**配置：`Add-ons → Secrets` 新建 `HF_TOKEN`"
+            "（Fine-grained token，对该 HF repo 勾 Read + Write），"
+            "然后在本 notebook 上 **attach** 它，再 `Run all`。"
+            "不要把 token 写进 notebook / git / issue。")
+    doc = _record_failure("HF_AUTH",
+                          error=(f"HF 授权检查失败（{auth.get('status')}）"
+                                 + (f"：{str(auth.get('error'))[:300]}"
+                                    if auth.get("error") else "")),
+                          plan=plan, upload_state=upload_state,
+                          cause=("hf_no_token" if auth.get("status") == "no_token"
+                                 else "hf_unauthorized"),
+                          next_step=step, extra_causes=extra)
+    if extra:
+        print("  另外：本 Session 也缺 llama.cpp 二进制 —— 你**不需要**单独开 S2，"
+              "配好 token 后重跑 RUN_EVAL 会自动只编 S2。")
+    # 仍然出一份报告（0.03 s），但报告顶部会写明"本次运行失败"
+    try:
+        run_stage("S9_REPORT", stage_s9_report)
+    except Exception as e:
+        log(f"!! 失败后生成报告也失败了：{e}")
+    return {"ok": False, "failed": ["HF_AUTH"], "causes": doc.get("causes"),
+            "plan": plan,
+            "stages": {k: (STATE.get(k) or {}).get("status") for k in STAGES}}
 
 
 def _upload_stage(stage, force=False):
@@ -203,7 +331,14 @@ def run(run_s2=None, run_s3=None, run_s4=None, run_eval=None,
     不过就地在下载前停下。
 
     run_eval=True（v1.1）：只评测。从 HF 上已存的量化 GGUF 取输入，跑 S6/S7/S9，
-    **不编译、不下载 15 GiB BF16、不重做 S3、不重新量化**；默认纯 CPU。
+    **不下载 15 GiB BF16、不重做 S3、不重新量化**；有 GPU 就用 GPU。
+
+    v1.1.2 起，`run_eval=True` 在**新 Session** 上会自己补齐前置条件，用户仍然只有
+    一个开关：
+      1. 探活 `llama-perplexity` / `llama-cli`；缺了就**自动只编 S2**
+         （pinned 源码 36.6 MiB，不下载模型、不做 S3/S4）；
+      2. 编译之前先做一次 **HF 授权检查**（1 次只读请求；没 token 连请求都不发），
+         不通就地停并写 `FAILURE.json` —— 不让用户等 28 分钟才看到 401。
 
     upload=True：显式 opt-in，把本轮小结果（JSON/report）传到 HF。默认不传。
     """
@@ -250,15 +385,28 @@ def run(run_s2=None, run_s3=None, run_s4=None, run_eval=None,
 
     s1 = run_stage("S1_SMOKE", stage_s1_smoke)
 
+    # ---- v1.1.2 评测前的两道门：凭据（1 次只读请求）→ 二进制（本地探活）----
+    # 顺序刻意如此：凭据不通就别花 28 分钟编译；但"缺二进制"是免费信息，
+    # 所以先探活、一起报给用户（两条根因一屏看全）。
+    if CFG["RUN_EVAL"]:
+        _miss = _missing_eval_binaries()
+        if _miss:
+            log(f"二进制探活：缺 {_miss}（稍后会自动只编 S2）")
+        auth = _auth_gate(plan)
+        if not auth.get("ok"):
+            return _abort_eval(plan, auth)
+        plan = _autobuild_binaries(plan)
+
     s2 = run_stage("S2_BUILD", stage_s2_build)
 
+    s2_failed = (STATE.get("S2_BUILD") or {}).get("status") == "error"
     if s2:
         print("-" * 78)
         print("S2 摘要")
         for _line in _s2_report_lines(s2):
             print(_line)
         print("-" * 78)
-    elif (STATE.get("S2_BUILD") or {}).get("status") == "error":
+    elif s2_failed:
         print("-" * 78)
         print("S2 失败。上面那行 [S2_BUILD] FAIL 就是结论，细节在：")
         print(f"  {OUT / 'S2_BUILD.json'}")
@@ -312,7 +460,7 @@ def run(run_s2=None, run_s3=None, run_s4=None, run_eval=None,
     if s5:
         print("-" * 78)
         print("S5 摘要（真实文件字节，逐类型拆分）")
-        for name, d in s5["per_model"].items():
+        for name, d in (s5.get("per_model") or {}).items():
             if d.get("byte_breakdown_available"):
                 print(f"  {name:16s} {d['file_gb']:7.3f} GiB  "
                       f"bpw={d['bpw_effective']}  "
@@ -324,23 +472,35 @@ def run(run_s2=None, run_s3=None, run_s4=None, run_eval=None,
                   f"IQ2 少 {s5['ratios']['bytes_saved_pct']}%")
         print("-" * 78)
 
-    s6 = run_stage("S6_NLL", stage_s6_nll)
-    if (STATE.get("S6_NLL") or {}).get("status") == "error":
-        _write_failure("S6_NLL", plan)
-    elif s6:
-        # 阶段一完成就出站（小 JSON + 摘要），不等全部跑完 —— Session 随时可丢
-        _write_eval_summary(plan)
-        _up6 = _upload_stage("S6_NLL")
-        if s6:
-            s6["upload"] = _up6
+    # ---- S6/S7：S2（自动补编）没成功就不启动，否则只会再报一次"找不到二进制" ----
+    skip_eval = bool(CFG["RUN_EVAL"] and s2_failed)
+    if skip_eval:
+        _record_failure("S2_BUILD", plan=plan)
+        print("-" * 78)
+        print("S2 没成功 → S6/S7 不启动（否则只会再报一次『找不到 llama-perplexity』）。")
+        print("修好 S2 后重跑即可：模型不用重下，S3/S4 也不会被顺带触发。")
+        print("-" * 78)
 
-    s7 = run_stage("S7_QUALITY", stage_s7_quality)
-    if (STATE.get("S7_QUALITY") or {}).get("status") == "error":
-        _write_failure("S7_QUALITY", plan)
-    elif s7:
-        _up7 = _upload_stage("S7_QUALITY")
-        s7["upload"] = _up7
-        _write_eval_summary(plan, upload_state=_up7)
+    if skip_eval:
+        s6 = s7 = None
+    else:
+        s6 = run_stage("S6_NLL", stage_s6_nll)
+        if (STATE.get("S6_NLL") or {}).get("status") == "error":
+            _write_failure("S6_NLL", plan)
+        elif s6:
+            # 阶段一完成就出站（小 JSON + 摘要），不等全部跑完 —— Session 随时可丢
+            _write_eval_summary(plan)
+            _up6 = _upload_stage("S6_NLL")
+            if s6:
+                s6["upload"] = _up6
+
+        s7 = run_stage("S7_QUALITY", stage_s7_quality)
+        if (STATE.get("S7_QUALITY") or {}).get("status") == "error":
+            _write_failure("S7_QUALITY", plan)
+        elif s7:
+            _up7 = _upload_stage("S7_QUALITY")
+            s7["upload"] = _up7
+            _write_eval_summary(plan, upload_state=_up7)
 
     s8 = run_stage("S8_BF16_ANCHOR", stage_s8_bf16_anchor)
 
@@ -351,8 +511,30 @@ def run(run_s2=None, run_s3=None, run_s4=None, run_eval=None,
     if s9 or upload:
         _upload_stage("S9_REPORT", force=bool(upload))
 
-    return {"plan": plan,
-            "stages": {k: (STATE.get(k) or {}).get("status") for k in STAGES}}
+    # ---- 收尾：失败不许被"报告生成了"掩盖（v1.1.2）----
+    stages = {k: (STATE.get(k) or {}).get("status") for k in STAGES}
+    failed = [k for k, v in stages.items() if v == "error"]
+    causes = []
+    fp = OUT / "FAILURE.json"
+    if fp.exists():
+        try:
+            causes = list(json.loads(fp.read_text(encoding="utf-8")).get("causes") or [])
+        except Exception:
+            causes = []
+    ok = not failed
+    print("=" * 78)
+    if ok:
+        print("本次运行完成：所有已开启的阶段都成功。")
+        if CFG["RUN_EVAL"] and not _get("S6_NLL") and not _get("S7_QUALITY"):
+            print("!! 但 S6/S7 没有产出数据 —— 这不叫成功，检查开关与日志。")
+            ok = False
+    else:
+        print(f"本次运行**失败**：{failed}；根因 {causes or ['未分类']}")
+        print(f"  现场：{fp}；报告（含失败说明）：{OUT / 'report.md'}")
+        print("  修好后新 Session 重跑即可，HF 上的输入不用重下。")
+    print("=" * 78)
+    return {"ok": ok, "failed": failed, "causes": causes,
+            "plan": plan, "stages": stages}
 
 
 def main(argv=None):

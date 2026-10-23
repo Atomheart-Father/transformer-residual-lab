@@ -31,6 +31,10 @@ from pathlib import Path
 
 HF_BASE = "https://huggingface.co"
 TOKEN_ENV_VARS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACEHUB_API_TOKEN")
+
+# check_access 的进程内缓存：key = (repo, revision, 有没有 token, token 来源)。
+# 只缓存"能不能读"，不缓存任何文件内容，也不缓存 token 本身。
+_ACCESS_CACHE = {}
 _TOKEN_FIELDS = ("token", "value", "secret")
 
 
@@ -443,6 +447,53 @@ def verify_remote(repo, local_files, revision="main", token=None):
             "note": ("size 相等不等于内容逐字节相同；LFS 文件额外比了 lfs.oid"
                      "（= 内容 sha256）。非 LFS 文件 HF 只给 git blob sha1，"
                      "没有做内容哈希比对。")}
+
+
+def check_access(repo=None, revision="main", token=None, use_cache=True):
+    """**开跑前的凭据/授权快速检查**（v1.1.2）。
+
+    存在理由：真实 Kaggle 上第一次 RUN_EVAL 时，没有 attach `HF_TOKEN`，
+    而预检排在"28 分钟编译"之后 —— 用户白等半小时才看到 401。
+    这个函数只做一件事：能不能**读**这个仓库的 tree（下载的前提）。
+    一次 HTTP 请求，1 秒级，结果按 (repo, rev, 有没有 token) 缓存。
+
+    不检查写权限（上传才需要）；不打印 token；不会替用户改仓库可见性。
+    返回 `status`：
+      · `ok`            —— 能读，继续
+      · `no_token`      —— 本 Session 根本没凭据（**不用发请求就能判定**）
+      · `unauthorized`  —— 有 token 但被拒（401/403：无效、过期、没权限）
+      · `error`         —— 网络/其他问题
+    """
+    repo = repo or CFG.get("HF_MODEL_REPO") or ""
+    tk = hf_token() if token is None else {"token": token, "source": "arg"}
+    key = (repo, revision, bool(tk["token"]), tk["source"])
+    if use_cache and key in _ACCESS_CACHE:
+        return _ACCESS_CACHE[key]
+
+    out = {"repo": repo, "revision": revision,
+           "token_present": bool(tk["token"]), "token_source": tk["source"]}
+    if not repo:
+        out.update(ok=False, status="error", error="CFG['HF_MODEL_REPO'] 为空")
+    elif not tk["token"]:
+        out.update(ok=False, status="no_token", hint=_no_token_hint(repo))
+    else:
+        try:
+            files = repo_files(repo, revision, tk["token"])
+            out.update(ok=True, status="ok", n_files=len(files))
+        except GuardError as e:
+            msg = redact(e, tk["token"])
+            unauth = any(s in msg for s in ("401", "403", "需要 Hugging Face token"))
+            out.update(ok=False, status=("unauthorized" if unauth else "error"),
+                       error=msg,
+                       hint=(_no_token_hint(repo) if unauth else None))
+    if use_cache:
+        _ACCESS_CACHE[key] = out
+    return out
+
+
+def clear_access_cache():
+    """测试/重试用：清掉缓存，让下一次 check_access 真的发请求。"""
+    _ACCESS_CACHE.clear()
 
 
 def status(repo=None, revision="main", token=None):

@@ -81,12 +81,12 @@ S2/S3/S4/S5 会一条龙跑完。**唯一的例外**：BF16 有 15.26 GiB，与�
 
 **只想编 llama.cpp、先不碰模型**：把 `RUN_S2 = False` 改成 `RUN_S2 = True`，`Internet = On`，`Run all`。约 15–30 分钟（含编译，**估算值**）。
 
-**只想评测、不再量化**（v1.1.1，**最少操作**）：把开关格里的 `RUN_EVAL = False` 改成 `RUN_EVAL = True`，`Settings → Accelerator = GPU T4 ×2`、`Internet = On`，把 HF token 放进 `Add-ons → Secrets`（名字 `HF_TOKEN`，勾选 attach），`Run all`。它会：
+**只想评测、不再量化**（v1.1.2，**最少操作**）：把开关格里的 `RUN_EVAL = False` 改成 `RUN_EVAL = True`，`Settings → Accelerator = GPU T4 ×2`、`Internet = On`，把 HF token 放进 `Add-ons → Secrets`（名字 `HF_TOKEN`，勾选 attach），`Run all`。它会：
 
-1. 从 HF 私有仓库 `Atomheart-Father/trlab-qwen3-8b-quant-pilot` 取 `IQ2_XS` / `IQ4_XS` / `imatrix.gguf` 三个已存产物（**不下载 15 GiB BF16、不重做 S3、不重新量化、不编译**）；
+1. 从 HF 私有仓库 `Atomheart-Father/trlab-qwen3-8b-quant-pilot` 取 `IQ2_XS` / `IQ4_XS` / `imatrix.gguf` 三个已存产物（**不下载 15 GiB BF16、不重做 S3、不重新量化**；本 Session 缺 `llama-perplexity`/`llama-cli` 时**自动只编 S2**，不下载模型）；
 2. 取 pinned 的 wikitext-2-raw **test** parquet（732,610 B）当评测语料（与 S3 用的 **train** 校准集严格分离，S6 会做内容级重叠断言）；
 3. 跑 S6 配对 NLL + S7 质量检查 + S9 报告。**默认用 GPU**（`EVAL_ALLOW_GPU=True`，有显存就 `-ngl 99`；装不下才退 CPU，并把原因写进 `device_by_fmt`）；**一次只装一个模型**，每个格式跑完就释放；
-4. **每个阶段跑完就把小结果出站**（`results/v1.1.1/<run_id>/` 下的 `S6_NLL.json` / `S7_QUALITY.json` / `EVAL_SUMMARY.json` / `report.md` / `results.json`），并做远端复核；同时写一份几百字节的 `EVAL_SUMMARY.json` 供直接贴到聊天里。
+4. **每个阶段跑完就把小结果出站**（`results/v1.1.2/<run_id>/` 下的 `S6_NLL.json` / `S7_QUALITY.json` / `EVAL_SUMMARY.json` / `report.md` / `results.json`），并做远端复核；同时写一份几百字节的 `EVAL_SUMMARY.json` 供直接贴到聊天里。
 
 **`RUN_EVAL=True` 自带小结果回传**（只这 5 个白名单文件，不传模型、不传日志、不传 secrets）。想彻底不外发：`--set HF_UPLOAD_AFTER_RUN=false`，或者 CLI 里不加 `--upload` 并把它关掉 —— 但那样结果会随 Session 一起消失。
 
@@ -100,9 +100,9 @@ S2/S3/S4/S5 会一条龙跑完。**唯一的例外**：BF16 有 15.26 GiB，与�
 | Kaggle secret | `Add-ons → Secrets` 里加一个名为 `HF_TOKEN` 的 secret，notebook 会通过 `kaggle_secrets` 读（**推荐**，只勾选 attach 到这一个 notebook） |
 | HF 官方缓存 | 本机 `huggingface-cli login` 之后，`~/.cache/huggingface/token` 会被自动复用 |
 
-三者都找不到时，`--check-hf` 与 S6 的预检会明确说"没有 token"并给出这三条路，**不会**打印 token、**不会**擅自把仓库改 Public。
+三者都找不到时，**凭据门会在编译之前**就把运行停住（v1.1.2：3 秒内，不发下载请求、不开始编译），`--check-hf` 与 S6 的预检也会明确说"没有 token"并给出这三条路，**不会**打印 token、**不会**擅自把仓库改 Public。
 
-**失败了怎么办**：阶段会写 `out/FAILURE.json`（阶段名 / 报错 / traceback 尾 / **一条**下一步），并打印"你可以直接关掉 Session"。**不需要** Save Version、不需要抢救工作区 —— HF 上的输入是长期源，GitHub 上是代码，重跑只花一次下载时间。
+**失败了怎么办**：阶段会写 `out/FAILURE.json` —— 顶层是最早那条根因，`causes` 是去重后的根因清单（例如 `["hf_no_token","binaries_missing"]`），`all` 按时间累积，后面的失败**不会**覆盖最早的。同时打印"你可以直接关掉 Session"。**不需要** Save Version、不需要抢救工作区 —— HF 上的输入是长期源，GitHub 上是代码，重跑只花一次下载时间。若 `RUN_EVAL=True` 但 S6/S7 没产出数据，`run()` 会返回 `ok=False`，报告顶部写 `## ⚠ 本次运行失败`。
 
 **S8（BF16 锚点）与 SX（第三方量化探索）** 仍然默认关闭，打开方式是把执行格最后一行改成 `trlab.run(run_eval=True, S8_BF16_ANCHOR=True)` —— 阶段名直接当关键字参数传（见第十节 `test_overrides_route_stages_vs_cfg`）。S8 需要高精度 GGUF 当输入、SX 需要第三方 GGUF，都不在 HF 那个仓库里。
 
@@ -946,7 +946,7 @@ CPU 不可行时 fail closed、预检在缺二进制时说唯一一步、
 `RUN_EVAL` 开关作用域、`run_ppl` 默认 `-ngl 0`、S6 从 HF 端到端、
 评测语料是 test split（不是 train）、`_ensure_eval_txt` 全流程。
 
-当前结果：**139/139 通过，约 45 秒**（v1.1.1 之后是 **144 项**，见第九之十）。
+当前结果：**149/149 通过，约 45 秒**（v1.1.1 是 144 项、v1.0.1 是 118 项；见第九之十 / 第九之十一）。
 
 
 ---
@@ -1044,13 +1044,116 @@ v1.1.0 我把 `EVAL_ALLOW_GPU` 默认设成 `False`，理由是"GPU 消耗额度
 
 ---
 
+## 九之十一、v1.1.2：真实 Kaggle 首跑失败的两个 P0（热修）
+
+**真实环境证据**（2026-10-23，Kaggle T4×2 / 4 核 / 31 GiB，`RUN_EVAL=True` 全新
+Session 直接 Run All）：`S0_ENV=ok`、`S1_SMOKE=ok`、`S6_NLL=error`、
+`S7_QUALITY=error`、`S9_REPORT=ok`，全程约 **11 秒**，**没有产出任何 NLL 或质量
+数据**；HF 出站报"上传需要 token"。
+
+两条根因都是源码可证的，**不能全推给 token**：
+
+| # | 根因 | 证据 |
+|---|---|---|
+| 1 | **设计断裂**：`RUN_EVAL` 只开 S6/S7/S9、不跑 S2；但 `eval_preflight()` 第 1 项就要求 `llama-perplexity`/`llama-cli` 存在 | 新 Session 没有编译产物 → 直接 `GuardError`。v1.1.1 那句"只开 `RUN_EVAL` 从头 Run All"在真实环境**不成立** |
+| 2 | 私有 HF 仓库没有 attach `HF_TOKEN` | 老 S4 时 `getpass` 提供过 token ≠ 新 Notebook 有 Secret |
+
+### 1. 评测前的两道门（顺序是刻意的）
+
+```text
+S0/S1 → ① 二进制探活（本地、免费）→ ② HF 授权检查（1 次只读请求）
+      → ③ 缺二进制则自动只编 S2 → S6 → S7 → S9
+```
+
+- **探活在授权之前**，这样"缺二进制"和"私仓没认证"两条根因能**一起**报出来，
+  而不是修好一个再撞下一个。
+- **授权在编译之前**：真实首跑就是因为没 token，白等编译到下载才看到 401。
+  `hf.check_access()` 只读 repo tree；**没有 token 时连请求都不发**
+  （`status=no_token`）。结果进程内缓存（key 含 repo / revision / 有无 token /
+  token 来源），`clear_access_cache()` 可清。
+- 凭据不通 → 写 `FAILURE.json` + 立刻出报告，**3 秒内 fail fast**，不等 28 分钟。
+
+### 2. 自动只编 S2：用户仍然只有一个开关
+
+`_s2_only()` 从 `_apply_run_switches()` 的 S2 分支抽出来复用，只打开 `S2_BUILD`
++ `S2_AUTO_FETCH_SOURCE` / `LLAMA_COMMIT` / `CUDA_ARCH=75` / `CUDA_NO_VMM` /
+`BUILD_CUDA` / `BUILD_JOBS=4`，**不碰 S3/S4/S5**。也就是说自动补编只下载 36.6 MiB
+的 pinned 源码并编译，**不下载 Q8_0/BF16、不重量化、不跑 S3/S4**。
+plan 里会写 `autobuild="S2_BUILD"`、`autobuild_why="缺 ['llama-cli']"`，
+报告第 2 节也会说清楚是"自动补编"还是"已经就绪不需要编"。
+
+S2 失败时 `skip_eval=True` → S6/S7 **主动不启动**（不是"开关没开"），
+`FAILURE.json` 记 `s2_build_failed`，报告里评测几节写明"这是失败的后果"。
+
+### 3. `FAILURE.json`：最早根因不被覆写
+
+v1.1.1 的格式只有一条，S7 失败会把 S6 的根因盖掉。现在：
+
+```json
+{"stage": "HF_AUTH", "cause": "hf_no_token", "error": "...", "next_step": "...",
+ "causes": ["hf_no_token", "binaries_missing"],
+ "all": [{"stage": "HF_AUTH", "...": "..."}, {"stage": "S7_QUALITY", "...": "..."}]}
+```
+
+顶层 `stage/cause/error/next_step` **永远是 `all[0]`（最早那条）**；`all` 按时间
+累积（同阶段不重复追加）；`causes` 是去重后的根因代码，一屏能看全两条根因。
+`_classify()` 的 cause ∈ `hf_no_token` / `hf_unauthorized` / `binaries_missing` /
+`s2_build_failed` / `budget` / `hash_mismatch` / `corpus_overlap` / `other`。
+v1.1.1 的单条旧格式仍能读。
+
+### 4. 失败不再被 `ok` 掩盖
+
+`run()` 的返回值从"有没有抛异常"改成
+`{"ok": bool, "failed": [...], "causes": [...], "plan": ..., "stages": ...}`；
+并且 **`RUN_EVAL=True` 但 S6/S7 都没有产出数据时强制 `ok=False`** —— 这正是
+v1.1.1 首跑"11 秒、报告看着 ok、其实零数据"的那个坑。
+
+S9 报告顶部新增"0 运行状态"：有失败就写 `## ⚠ 本次运行失败` + "这份报告是
+**失败现场**，不是结果"，列出最早根因、去重 `causes`、逐条 `all`、`next_step`、
+`FAILURE.json` 路径；`binaries_missing` 会额外说明"**不需要**单独开 S2"。
+S6/S7 段落也区分"没运行"和"**失败**"，不再把 error 写成"未运行"。
+
+### 5. 一次配置，之后 Run All
+
+```text
+Kaggle → Add-ons → Secrets → 新建 HF_TOKEN
+  （Fine-grained token，对该 HF repo 勾 Read + Write）
+→ 在这个 notebook 上 attach 它 → Run all
+```
+
+token 不打印、不进 notebook/git/issue；私仓可见性是**仓库所有者**的决定，
+代码**不会**替用户改成 Public（只是把"你也可以改 Public"作为第三条路写出来）。
+
+### 6. 测试
+
+144 → **149 项**（CPU、不联网、约 45 秒），新增 5 项钉住这一轮：
+
+| 测试 | 钉住什么 |
+|---|---|
+| `test_eval_new_session_no_token_reports_both_causes` | 无 token + 无二进制 → 两条根因同时进 `causes`，且**不开编译** |
+| `test_eval_token_present_no_binaries_autobuilds_s2` | 有 token 无二进制 → 自动只开 S2，S3/S4/S5 仍关 |
+| `test_eval_s2_failure_skips_s6_s7` | S2 失败 → S6/S7 不启动、记 `s2_build_failed` |
+| `test_failure_json_first_cause_not_overwritten` | 后续失败不覆盖最早根因，`all` 累积 |
+| `test_upload_without_token_never_claims_verified` | 无凭据时只能说"尚未持久化"，不许写 verified |
+
+### 7. 这一版**仍未**验证的东西
+
+- **S6/S7 依然没在真实 Kaggle 跑通过**；"量化对 NLL / 能力的影响"仍然**零数据**。
+- **自动只编 S2 只在 mock + 本机 macOS 上走过**，真实 Kaggle 的 CUDA 编译路径未实测。
+- **带 token 的真实 HF 下载/上传仍未发生**；fairness 仍只能是 `hf_sidecar_declared`。
+- 本机复现（`env -u HF_TOKEN`、无二进制）：3.1 s 结束、`ok=false`、
+  `failed=["HF_AUTH"]`、`causes=["hf_no_token","binaries_missing"]`、
+  `S2_BUILD: null`（**没有开始编译**）、`S9_REPORT: ok`（报告顶部是失败横幅）。
+
+---
+
 ## 十、怎么跑测试
 
 ```bash
 python3 research/kaggle/test_trlab.py
 ```
 
-不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。v1.0 起它**直接 import `trlab/` 包**（不再解析 notebook 字符串），在临时工作目录里补齐默认三阶段，然后跑 139 项断言。当前结果：**139/139 通过，约 45 秒**（v1.0.1 是 118 项 / 约 31 秒；多出来的时间主要是新增的 19 项里那几条要在干净子进程里单独 import 模块、以及 bootstrap 用本地 git 仓真跑 fetch）。
+不需要 GPU、不需要 torch、不需要 llama.cpp、不联网、不下载。v1.0 起它**直接 import `trlab/` 包**（不再解析 notebook 字符串），在临时工作目录里补齐默认三阶段，然后跑 149 项断言。当前结果：**149/149 通过，约 45 秒**（v1.0.1 是 118 项 / 约 31 秒；多出来的时间主要是新增项里那几条要在干净子进程里单独 import 模块、以及 bootstrap 用本地 git 仓真跑 fetch）。
 
 v1.0 新增的 10 项架构回归（对应 Issue #5 的验收清单）：
 
@@ -1209,7 +1312,8 @@ v1.0 新增的 10 项架构回归（对应 Issue #5 的验收清单）：
 31. **S4 的 CPU 耗时与峰值 RAM 未实测**。`llama-quantize` 是 CPU 路径（15.26 GiB 走内存不走显存），输入 mmap 但 `--max-buffer-size` 默认 8192 MiB 是实打实要占的。`_ram_precheck()` 只警告不拦；真的 exit 137 时按提示调小 `S4_RAM_MARGIN_GB` 或加 `--max-buffer-size`。
 32. **暂存盘路线不跨 Session**。下到暂存盘的 BF16 会话结束就没了，下次要重下；只读 Input 路线才是一次操作永久复用。这是两条路线的本质差别，报告里会记 `quant_base_origin`。
 33. **provenance 级核验弱于文件级**。三项证据（sha256 / 来源 repo+revision / 张量结构）互相独立，且"同仓库同 revision ⇒ 同一次转换"比"形状一致"强，但它仍然不是逐张量比形状。S9 报告会显式声明这一条的效力范围（`imatrix_base_consistency_level`）。
-34. **S6/S7 尚未在真实 Kaggle 上跑过**（v1.1.1）。144 项测试全是 CPU/mock；`test_s6_end_to_end_from_hf` 用的是假 HF 服务器桩。**任何"NLL 差值 / 质量差异"目前都不存在**，报告里那两节会直接写 "S6/S7 not yet evaluated"。
+34. **S6/S7 尚未在真实 Kaggle 上跑通**（v1.1.2）。149 项测试全是 CPU/mock；`test_s6_end_to_end_from_hf` 用的是假 HF 服务器桩。真实首跑（v1.1.1）在评测前就因"缺二进制 + 私仓无 token"停住，只留下 11 秒的失败现场。**任何"NLL 差值 / 质量差异"目前都不存在**，报告里那两节会写 "S6/S7 not yet evaluated" 或直接标"失败"。
+   - 附带：**自动只编 S2 与凭据门只在 mock + 本机 macOS 上走过**。真实 Kaggle 的 CUDA 编译（`CUDA_ARCH=75`、`BUILD_JOBS=4`）与"带 token 的 2.7 / 4.56 GiB 下载"都还没发生，所以 `binaries_missing → 自动 S2 → S6` 这条链在真机上属于**未验证路径**。
 35. **HF 的真实下载只验到 401 路径**。`python -m trlab --check-hf` 在无 token 时正确报 `token_present: false` + 401 并给三条取 token 的路；带 token 下载 2.7 / 4.56 GiB 的过程**未实测**（断点续传逻辑与 S3 的 Q8_0 下载共用同一份 `_fetch_pinned_blob`，那份是真机跑过的）。
 36. **评测成本是假设速率，不是实测吞吐**。`eval_cost_estimate()` 用 CPU 2.5 tok/s / GPU 30 tok/s 的**假设值**（`assumed_rate_note` 里写明），0.94 h / GPU 路径的小时数都不能当承诺。真实吞吐要在第一次跑完后看 `measured_throughput` 才有。
 37. **`hf_sidecar_declared` 级 fairness 未在真实产物上走过**。测试里是构造的 sidecar；真实 sidecar 的字段是否齐、`imatrix_base_consistent` 在跨 Session 时会不会误判 `false`，都要第一次真跑才知道。凡是引用 HF 产物的结论都必须带这个前缀。
