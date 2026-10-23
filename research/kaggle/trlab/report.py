@@ -321,8 +321,20 @@ def stage_s9_report(deadline):
             mt = s6r["measured_throughput"]
             L.append(f"- 实测吞吐：{mt['tok_per_sec']} tok/s（{mt['elapsed_sec']} s，"
                      f"{mt['tokens']} token；只对同机器同设置可比）")
-        if prov.get("gpu") is False:
+        dev = s6r.get("device_by_fmt") or {}
+        if dev:
+            L.append("- 执行设备（逐格式判定，**一次只装一个模型**）：" + "；".join(
+                f"{f} = {d.get('device')}（`-ngl {d.get('ngl')}`，{d.get('why')}）"
+                for f, d in dev.items()))
+        elif prov.get("gpu") is False:
             L.append("- 执行设备：**纯 CPU**（`EVAL_ALLOW_GPU=False`，未消耗 GPU 额度）")
+        if s6r.get("upload"):
+            up = s6r["upload"]
+            if up.get("skipped"):
+                L.append(f"- 结果出站：**未上传**（{up.get('why')}）—— 结果只在本 Session 里")
+            else:
+                L.append(f"- 结果出站：HF 远端复核 `ok={up.get('remote_verified')}`"
+                         f"（commit {up.get('commit')}）")
         L.append("")
         L.append("| 格式 | 平均 NLL | 平均 PPL | NLL 标准差 |")
         L.append("|---|---|---|---|")

@@ -9,7 +9,8 @@
   （实测：197 KiB、1–3 秒、`git rev-parse HEAD` 强校验）。私有仓库不可匿名读，
   所以这条路要求仓库是 public 的；`--embed` 可生成不依赖仓库的自包含版本。
 * 产物确定性：同样的 trlab/ 源码 → 同样的 notebook（zip 用固定时间戳 + 排序）。
-* v1.1.0：开关格多了 `RUN_EVAL`（只评测：从 HF 已存 GGUF 取输入，默认纯 CPU）。
+* v1.1.0：开关格多了 `RUN_EVAL`（只评测：从 HF 已存 GGUF 取输入）。
+* v1.1.1：评测默认用 GPU（有就整模型卸载）、一次只装一个模型、每阶段小结果出站。
 
 用法：
     python3 build_notebook.py                 # 钉当前 HEAD（要求工作区干净）
@@ -146,7 +147,7 @@ MD_TITLE = """# transformer-residual-lab · Kaggle 低位宽量化验证台（v{
 
 | 开关 | 会做什么 | 预估 |
 |---|---|---|
-| `RUN_EVAL = True` | **只评测**：从 HF 已存的 GGUF 取输入，跑 S6 配对 NLL + S7 质量检查。不编译、不下载 BF16、不重做 S3、不重新量化；**默认纯 CPU** | ≈1 h（假设速率，非实测） |
+| `RUN_EVAL = True` | **只评测**：从 HF 已存的 GGUF 取输入，跑 S6 配对 NLL + S7 质量检查。不编译、不下载 BF16、不重做 S3、不重新量化；**有 GPU 就用 GPU**，一次只装一个模型 | GPU 上分钟级（假设速率，非实测） |
 | `RUN_S2 = True` | 编译 llama.cpp（下载 36.6 MiB 源码 → cmake → 4 个二进制） | ≈28 分钟 |
 | `RUN_S3 = True` | 自动带上 S2，再生成 `imatrix.gguf`（下 8.11 GiB Q8_0 + wikitext，算完回收 Q8_0） | +≈10 分钟 |
 | `RUN_S4 = True` | 自动带上 S2+S3，再从**原始 BF16** 量化 IQ2_XS / IQ4_XS，并统计真实字节 | +≈30–60 分钟 |
@@ -156,7 +157,11 @@ MD_TITLE = """# transformer-residual-lab · Kaggle 低位宽量化验证台（v{
 
 `RUN_EVAL = True` 需要 HF 私有仓库的 token（`HF_TOKEN` 环境变量 / Kaggle secret /
 本机 `huggingface-cli login` 的缓存，三者任一）。**不要把 token 写进 notebook。**
-它也**不会**顺手打开 GPU —— GPU 会消耗额度，要你自己显式改 `EVAL_ALLOW_GPU`。
+它会把每个阶段的小结果（5 个 JSON/MD，不含模型、不含日志）出站到 HF 并远端复核；
+想彻底不外发就 `--set HF_UPLOAD_AFTER_RUN=false`。
+
+**Kaggle 是可丢弃的算力机**：跑失败就直接关掉 Session，修代码 → commit → 新 Session
+重跑，输入不用重下。失败现场写在 `out/FAILURE.json`，不需要 Save Version 或抢救工作区。
 
 `RUN_S4 = True` 会在**任何编译、任何下载之前**先跑一次几秒的 `S4_PREFLIGHT`：
 只读核查 working / 工作区外暂存盘的挂载、容量、写权限，以及 BF16 有没有落点、
@@ -193,14 +198,16 @@ MD_RUN = """## 执行
 **只评测（`RUN_EVAL = True`）**：输入来自 HF 私有仓库里已存的三个 GGUF，
 不编译、不下载 15 GiB BF16、不重做 S3、不重新量化。缺 token 时会在下载前停下，
 并给出三条取 token 的路（环境变量 / Kaggle secret / `huggingface-cli login` 缓存）——
-**不要把 token 写进 notebook**。默认纯 CPU（每条 llama 命令都是 `-ngl 0`），
-不会消耗 GPU 额度；要上 GPU 必须自己显式把 `EVAL_ALLOW_GPU` 改成 `True`。
+**不要把 token 写进 notebook**。**有 GPU 就用 GPU**（`-ngl 99`，装不下才退 CPU
+并把原因写进 `device_by_fmt`）；一次只装一个模型，跑完释放再装下一个。
+每个阶段的小结果会自动出站到 HF（5 个 JSON/MD）并做远端复核；失败时这一格
+不会假装成功，现场在 `out/FAILURE.json`。
 
 S8 / SX 默认关闭。要跑就把最后一行改成
 `trlab.run(run_eval=True, S8_BF16_ANCHOR=True)` —— 阶段名直接当关键字参数传。"""
 
 SWITCH_CELL = """# 只需要改这一格。全部 False = 不联网、不下载（只跑 S0/S1/S9）。
-RUN_EVAL = False    # ← 只评测（从 HF 已存 GGUF 取输入，默认纯 CPU，不重量化）
+RUN_EVAL = False    # ← 只评测（从 HF 已存 GGUF 取输入，有 GPU 就用 GPU，不重量化）
 RUN_S2 = False
 RUN_S3 = False
 RUN_S4 = False      # ← 想量化 IQ2_XS / IQ4_XS 就改成 True

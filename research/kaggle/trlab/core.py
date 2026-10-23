@@ -490,8 +490,10 @@ def run_ppl(model_path, text_path, deadline, tag):
     run_cmd 已经在 rc != 0 时抛 CommandFailed，所以能走到解析这一步
     说明进程正常退出（P1-E）。
 
-    v1.1：**默认纯 CPU**。GPU 会消耗额度，只有 `CFG['EVAL_ALLOW_GPU']=True`
-    时才按显存算 `-ngl`。这条不能靠"显存够就自动用"来猜。
+    v1.1.1：**有 GPU 就用 GPU**（`EVAL_ALLOW_GPU` 默认 True）。按显存算 `-ngl`，
+    装不下才退 0；`EVAL_ALLOW_GPU=False` 时强制纯 CPU。
+    这条不能靠"显存够就偷偷用"来猜，也不能靠"显存不够就偷偷退 CPU"来糊过去 ——
+    阶段会把自己的判定写进结果（`device_by_fmt`）。
     """
     v = vram_gb()
     usable = (v["total"] - 1.0) if (v and CFG.get("EVAL_ALLOW_GPU")) else 0.0

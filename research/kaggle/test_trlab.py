@@ -4639,14 +4639,41 @@ def test_eval_cost_estimate_blocks_cpu_infeasible(ns):
                   ns["CFG"]["NLL_CTX"])
     assert default["fits_budget"] is True, default
     assert default["assumed_tok_per_sec"] == 2.5
+    assert default["device"] == "cpu", "没有显存时必须是 CPU"
     assert "不是实测" in default["assumed_rate_note"]
 
     old = est(2, 8, 4, 2048)
     assert old["fits_budget"] is False, old
     assert old["wall_est_hours"] > 10, old
 
-    gpu = est(2, 8, 4, 2048, allow_gpu=True)
-    assert gpu["gpu_allowed"] is True and gpu["wall_est_hours"] < old["wall_est_hours"]
+    # v1.1.1：给了显存且装得下 → 用 GPU 速率，且不再受 CPU 墙钟上限约束
+    gpu = est(2, 8, 4, 2048, allow_gpu=True, vram_total_gb=15.0,
+              biggest_model_bytes=5 * 2**30)
+    assert gpu["gpu_allowed"] is True and gpu["device"] == "gpu", gpu
+    assert gpu["wall_est_hours"] < old["wall_est_hours"], gpu
+    assert gpu["budget_applies"] is False and gpu["fits_budget"] is True, gpu
+
+
+def test_eval_device_never_silently_degrades(ns):
+    """有 GPU 但装不下 → 退 CPU，并且**必须**把原因写出来（不许静默降级）。"""
+    dev = ns["eval_device"]
+    CFG = ns["CFG"]
+    old = CFG["EVAL_ALLOW_GPU"]
+    try:
+        CFG["EVAL_ALLOW_GPU"] = True
+        ok = dev(15.0, 5 * 2**30)
+        assert ok["device"] == "gpu" and ok["ngl"] == 99, ok
+        big = dev(15.0, 60 * 2**30)
+        assert big["device"] == "cpu" and big["ngl"] == 0, big
+        assert "装不下" in big["why"] and "CPU" in big["why"], big
+        CFG["EVAL_ALLOW_GPU"] = False
+        forced = dev(15.0, 5 * 2**30)
+        assert forced["device"] == "cpu" and "强制" in forced["why"], forced
+        CFG["EVAL_ALLOW_GPU"] = True
+        nogpu = dev(None, 5 * 2**30)
+        assert nogpu["device"] == "cpu" and "没有检测到" in nogpu["why"], nogpu
+    finally:
+        CFG["EVAL_ALLOW_GPU"] = old
 
 
 def test_eval_preflight_fails_closed_without_binaries(ns):
@@ -4668,8 +4695,8 @@ def test_eval_preflight_fails_closed_without_binaries(ns):
         patch.undo()
 
 
-def test_eval_preflight_cpu_only_and_resources(ns):
-    """体检要报 RAM/显存，并且默认 gpu_allowed=False（不擅自消耗额度）。"""
+def test_eval_preflight_reports_device(ns):
+    """体检要报 RAM/显存/执行设备；默认有显存就用 GPU，强制 CPU 时说明理由。"""
     tmp = Path(tempfile.mkdtemp(prefix="trlab_pf_eval_"))
     eval_txt = tmp / "eval.txt"
     eval_txt.write_text(("a paragraph long enough to be counted as one line " * 2 + "\n\n") * 40,
@@ -4684,23 +4711,34 @@ def test_eval_preflight_cpu_only_and_resources(ns):
     patch("ensure_calib_for_isolation", lambda d: calib)
     patch("vram_gb", lambda: {"total": 15.0, "free": 14.0, "used": 1.0})
     patch("_ram_total_gb", lambda: 24.0)
+    old = ns["CFG"]["EVAL_ALLOW_GPU"]
     try:
         for fmt in ("IQ2_XS", "IQ4_XS"):
             (tmp / f"qwen3-8b-{fmt}.gguf").write_bytes(b"q" * 8)
         rep = ns["eval_preflight"](time.time() + 60)
         assert rep["binaries"] == "ok"
-        assert rep["resources"]["gpu_allowed"] is False, "默认不许上 GPU"
         assert rep["resources"]["ram_total_gb"] == 24.0
         assert rep["resources"]["vram_total_gb"] == 15.0
-        assert rep["cost"]["gpu_allowed"] is False
+        # v1.1.1：默认有 GPU 就用 GPU（装得下）
+        assert rep["resources"]["gpu_allowed"] is True
+        assert rep["resources"]["device"] == "gpu", rep["resources"]
+        assert rep["cost"]["device"] == "gpu"
         assert rep["calib_corpus"]["available"] is True
+        assert rep["hf"]["token_present"] in (True, False), "必须报凭据状态"
+
+        ns["CFG"]["EVAL_ALLOW_GPU"] = False
+        rep2 = ns["eval_preflight"](time.time() + 60)
+        assert rep2["resources"]["device"] == "cpu"
+        assert "强制" in rep2["resources"]["device_why"]
+        assert rep2["cost"]["budget_applies"] is True
     finally:
+        ns["CFG"]["EVAL_ALLOW_GPU"] = old
         patch.undo()
         shutil.rmtree(tmp, ignore_errors=True)
 
 
 def test_run_eval_switch_scope(ns):
-    """RUN_EVAL=True：只开 S6/S7，绝不带 S2/S3/S4，也不许上 GPU。"""
+    """RUN_EVAL=True：只开 S6/S7，绝不带 S2/S3/S4；有 GPU 就用，小结果回传。"""
     CFG, STAGES = ns["CFG"], ns["STAGES"]
     snap = (dict(CFG), dict(STAGES))
     try:
@@ -4717,15 +4755,19 @@ def test_run_eval_switch_scope(ns):
         assert STAGES["S4_QUANT"] is False, "评测模式绝不能顺带重量化"
         assert STAGES["S4_PREFLIGHT"] is False, "不编译不下载，预检也不必跑"
         assert CFG["HF_FETCH_ARTIFACTS"] is True
-        assert CFG["EVAL_ALLOW_GPU"] is False
+        # v1.1.1：GPU Session 不该跑 CPU；小结果要出站（否则随 Session 一起丢）
+        assert CFG["EVAL_ALLOW_GPU"] is True, "默认要有 GPU 就用 GPU"
+        assert CFG["HF_UPLOAD_AFTER_RUN"] is True, "RUN_EVAL 自带小结果回传"
+        assert plan["eval_device"] == "gpu_if_present"
+        assert plan["upload_results"] is True
         assert "hf:" in plan["eval_models_from"]
     finally:
         CFG.clear(); CFG.update(snap[0])
         STAGES.clear(); STAGES.update(snap[1])
 
 
-def test_run_ppl_cpu_by_default(ns):
-    """有 15 GiB 显存也必须 -ngl 0；只有 EVAL_ALLOW_GPU=True 才上 GPU。"""
+def test_run_ppl_uses_gpu_when_available(ns):
+    """有 15 GiB 显存 → -ngl 99；只有显式 EVAL_ALLOW_GPU=False 才 -ngl 0。"""
     CFG = ns["CFG"]
     tmp = Path(tempfile.mkdtemp(prefix="trlab_ppl_"))
     mp = tmp / "m.gguf"
@@ -4764,7 +4806,7 @@ def test_run_ppl_cpu_by_default(ns):
 
 
 def test_s6_end_to_end_from_hf(ns):
-    """S6 走 HF 输入：记录来源、声明级 fairness、纯 CPU，且不给"已核验"的假象。"""
+    """S6 走 HF 输入：记录来源、声明级 fairness、逐格式设备，不给"已核验"的假象。"""
     tmp = Path(tempfile.mkdtemp(prefix="trlab_s6_"))
     eval_txt = tmp / "eval.txt"
     eval_txt.write_text(("paragraph about the sea and the wind and the rain " * 2 + "\n\n") * 24,
@@ -4804,7 +4846,10 @@ def test_s6_end_to_end_from_hf(ns):
         assert out["fairness_level"] == "hf_sidecar_declared"
         assert out["isolation"]["ok"] is True, out["isolation"]
         assert out["provenance"]["inputs"]["IQ2_XS"]["source"] == "hf"
-        assert out["provenance"]["gpu"] is False
+        # v1.1.1：设备逐格式记录（有 15 GiB 显存且装得下 → gpu）
+        assert out["provenance"]["device"]["IQ2_XS"] == "gpu", out["provenance"]["device"]
+        assert out["device_by_fmt"]["IQ4_XS"]["ngl"] == 99
+        assert out["settings"]["one_model_at_a_time"] is True
         assert out["provenance"]["self_quantized"] is False, \
             "输入是 HF 上已存的产物，不是本次量化"
         assert out["measured_throughput"]["tok_per_sec"] > 0
@@ -4860,6 +4905,122 @@ def test_eval_txt_full_flow(ns):
         assert meta2["origin"] == "cache"
     finally:
         ns["CFG"]["EVAL_TXT"], ns["CFG"]["EVAL_SOURCE"] = old
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------- v1.1.1 可丢弃 worker
+
+def test_upload_whitelist_has_no_models_or_logs(ns):
+    """出站白名单只能是小的 JSON/MD：不能有 GGUF、不能有日志、不能有 secrets。"""
+    wl = ns["_UPLOAD_WHITELIST"]
+    names = [n for v in wl.values() for n in v]
+    assert names, "白名单不能为空"
+    assert len(names) == len(set(names)), f"重复项：{names}"
+    for n in names:
+        low = n.lower()
+        assert not low.endswith((".gguf", ".log", ".npy", ".npz", ".safetensors")), n
+        assert "token" not in low and "secret" not in low, n
+    # 阶段键必须是真实阶段名，否则出站永远不会发生
+    assert set(wl) <= set(ns["STAGES"]), set(wl) - set(ns["STAGES"])
+
+
+def test_upload_stage_respects_optin_and_reports_not_persisted(ns):
+    """未授权 → 跳过并**列出未持久化**；失败 → 记下来但不把阶段判成失败。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_up_"))
+    (tmp / "S6_NLL.json").write_text('{"ok":1}', encoding="utf-8")
+    (tmp / "EVAL_SUMMARY.json").write_text('{"v":1}', encoding="utf-8")
+    patch = _Patch(ns)
+    patch("OUT", tmp)
+    CFG = ns["CFG"]
+    old = CFG["HF_UPLOAD_AFTER_RUN"]
+    try:
+        CFG["HF_UPLOAD_AFTER_RUN"] = False
+        r = ns["_upload_stage"]("S6_NLL")
+        assert r["skipped"] is True, r
+        assert r["not_persisted"], "未上传时必须说清哪些结果没落地"
+
+        CFG["HF_UPLOAD_AFTER_RUN"] = True
+        seen = {}
+
+        def fake_upload(files, **kw):
+            seen["files"] = [b for _, b in files]
+            return {"repo": "r", "commit": "c", "uploaded": [{"path": b}
+                                                             for b in seen["files"]],
+                    "verify": {"ok": True}}
+        patch("upload_after_run", fake_upload)
+        r2 = ns["_upload_stage"]("S6_NLL")
+        assert r2["remote_verified"] is True and r2["not_persisted"] == [], r2
+        assert all(b.endswith(".json") for b in seen["files"]), seen
+        assert any("results/v" in b for b in seen["files"]), seen
+
+        def boom(files, **kw):
+            raise ns["GuardError"]("403 forbidden")
+        patch("upload_after_run", boom)
+        r3 = ns["_upload_stage"]("S6_NLL")      # 不许把异常抛给上层
+        assert r3["ok"] is False and r3["not_persisted"], r3
+    finally:
+        CFG["HF_UPLOAD_AFTER_RUN"] = old
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_failure_json_has_stage_and_one_next_step(ns):
+    """失败现场：阶段名 + 报错 + traceback 尾 + **一条**下一步。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_fail_"))
+    patch = _Patch(ns)
+    patch("OUT", tmp)
+    STATE = ns["STATE"]
+    try:
+        STATE["S6_NLL"] = {"status": "error", "started": "2026-10-23T00:00:00Z",
+                           "elapsed_sec": 1.5,
+                           "error": "GuardError: 列 repo 被拒绝（HTTP 401）",
+                           "traceback": "Traceback ...\nGuardError: 401"}
+        doc = ns["_write_failure"]("S6_NLL", {"run_eval": True})
+        assert doc["stage"] == "S6_NLL" and "401" in doc["error"]
+        assert "token" in doc["next_step"].lower(), doc["next_step"]
+        assert "Traceback" in doc["traceback_tail"]
+        saved = json.loads((tmp / "FAILURE.json").read_text(encoding="utf-8"))
+        assert saved["stage"] == "S6_NLL" and saved["plan"]["run_eval"] is True
+        assert "Session" in saved["note"], "必须说清会话可以直接丢"
+        # 没失败就不该写
+        STATE["S6_NLL"] = {"status": "ok"}
+        assert ns["_write_failure"]("S6_NLL") is None
+    finally:
+        STATE.pop("S6_NLL", None)
+        patch.undo()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_eval_summary_is_small_and_pasteable(ns):
+    """摘要必须小到能贴进聊天（<3 KB），且数字全部来自 S6/S7 的 JSON。"""
+    tmp = Path(tempfile.mkdtemp(prefix="trlab_sum_"))
+    s6 = {"fairness_level": "hf_sidecar_declared", "fairness_verified": False,
+          "device_by_fmt": {"IQ2_XS": {"device": "gpu", "ngl": 99, "why": "ok"}},
+          "provenance": {"inputs": {"IQ2_XS": {"source": "hf", "sha256_verified": True}}},
+          "eval_source": "wikitext-2-raw-v1/test", "eval_ctx": 512,
+          "groups": 8, "eval_chunks_per_group": 1,
+          "aggregate": {"IQ2_XS": {"mean_nll": 2.5}, "IQ4_XS": {"mean_nll": 2.2}},
+          "paired_delta_nll_iq2_minus_iq4": {"mean": 0.3, "ci95": [0.2, 0.4],
+                                             "n": 8, "char_weighted_mean": 0.31},
+          "verdict": "IQ2_XS 显著差于 IQ4_XS", "measured_throughput": {"tok_per_sec": 33.3}}
+    s7 = {"n_prompts": 8, "identical_rate": 0.25, "degenerate": {"IQ2_XS": 0.1}}
+    patch = _Patch(ns)
+    patch("OUT", tmp)
+    patch("_get", lambda name: {"S6_NLL": s6, "S7_QUALITY": s7}.get(name))
+    try:
+        sm = ns["_write_eval_summary"]({"run_eval": True})
+        p = tmp / "EVAL_SUMMARY.json"
+        assert p.exists()
+        assert p.stat().st_size < 3000, p.stat().st_size
+        saved = json.loads(p.read_text(encoding="utf-8"))
+        assert saved["fairness_level"] == "hf_sidecar_declared"
+        assert saved["delta_nll_iq2_minus_iq4"]["mean"] == 0.3
+        assert saved["nll"]["IQ2_XS"] == 2.5
+        assert saved["device"]["IQ2_XS"]["device"] == "gpu"
+        assert saved["s7"]["identical_rate"] == 0.25
+        assert sm["verdict"]
+    finally:
         patch.undo()
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -5004,12 +5165,18 @@ TESTS = [
     test_fairness_from_sidecars_is_declared_not_verified,
     test_eval_cost_estimate_blocks_cpu_infeasible,
     test_eval_preflight_fails_closed_without_binaries,
-    test_eval_preflight_cpu_only_and_resources,
+    test_eval_preflight_reports_device,
+    test_eval_device_never_silently_degrades,
     test_run_eval_switch_scope,
-    test_run_ppl_cpu_by_default,
+    test_run_ppl_uses_gpu_when_available,
     test_s6_end_to_end_from_hf,
     test_eval_corpus_is_test_split,
     test_eval_txt_full_flow,
+    # v1.1.1 可丢弃 worker：分阶段出站 / 失败现场 / 可粘贴摘要
+    test_upload_whitelist_has_no_models_or_logs,
+    test_upload_stage_respects_optin_and_reports_not_persisted,
+    test_failure_json_has_stage_and_one_next_step,
+    test_eval_summary_is_small_and_pasteable,
 ]
 
 

@@ -434,12 +434,22 @@ S3 成功后 Q8_0 会被回收（8.11 GiB），所以 S4 **不再要求**读 ima
 
 ### 6.2.0 唯一操作开关
 
-把开关格里的 `RUN_EVAL = False` 改成 `RUN_EVAL = True`，`Settings → Internet = On`，
-`Run all`。就这三步。
+把开关格里的 `RUN_EVAL = False` 改成 `RUN_EVAL = True`，右侧 `Settings`：
+`Accelerator = GPU T4 ×2`、`Internet = On`，把 HF token 放进
+`Add-ons → Secrets`（名字 `HF_TOKEN`，勾选 attach 到本 notebook），然后 `Run all`。
+就这四步，没有别的页面操作。
 
 `RUN_EVAL=True` 会展开成：`S6_NLL` + `S7_QUALITY` + `S9_REPORT`，并自动置
-`HF_FETCH_ARTIFACTS=True`。它**不会**打开 `RUN_S2/S3/S4`，也**不会**打开
-`EVAL_ALLOW_GPU` —— 后者必须你自己显式改，因为 GPU 会消耗额度。
+`HF_FETCH_ARTIFACTS=True`（允许从 HF 取输入）与 `HF_UPLOAD_AFTER_RUN=True`
+（每个阶段的小结果出站）。它**不会**打开 `RUN_S2/S3/S4`。
+
+**默认用 GPU**：`EVAL_ALLOW_GPU=True`，检测到显存就 `-ngl 99`（整模型卸载）。
+装不下才退 CPU，并且**一定**在 `device_by_fmt` / `resources.device_why` 里写原因 ——
+不允许静默降级。要强制纯 CPU 就 `--set EVAL_ALLOW_GPU=false`。
+
+**会话可丢**：这一节的前提是 Kaggle 只是可随时关机的算力机器。跑失败就直接
+关掉 Session，本地修代码 → commit → 新 Session 重跑。**不需要** Save Version、
+不需要抢救工作区、不需要 Add Input。HF 上的输入是长期源，重跑只花一次下载时间。
 
 ### 6.2.1 token：三条路，任选一条，别写进仓库
 
@@ -478,41 +488,71 @@ S3 成功后 Q8_0 会被回收（8.11 GiB），所以 S4 **不再要求**读 ima
 重叠非零直接拒绝。S6 单独跑时也会把 calib.txt 取来（6.35 MB）只为做这个断言，
 失败只 log 不致命。
 
-### 6.2.4 规模与成本（默认纯 CPU）
+### 6.2.4 规模、设备与成本
 
 `NLL_CTX=512`、`NLL_CHUNKS_PER_GROUP=1`、`NLL_GROUPS=8` → 8 组 × 1 chunk × 512 ctx
-≈ 4k token/模型、共 8k token。
+≈ 4k token/模型、共 8k token。**一次只装一个模型**：装 IQ2 → 跑完 → 释放 → 再装 IQ4。
 
-`eval_cost_estimate()` 用**假设速率**（CPU 2.5 tok/s / GPU 30 tok/s，字段
-`assumed_rate_note` 写明"不是实测"）估算墙钟：默认规模纯 CPU **≈0.94 h**；
-旧的 8×4×2048 是 **14.59 h**，会超过 `EVAL_CPU_MAX_WALL_SEC=5400` 而被拦。
-被拦时预检给三个选项，不是跑一半被杀：
+`eval_cost_estimate()` 用**假设速率**（GPU 30 tok/s / CPU 2.5 tok/s，字段
+`assumed_rate_note` 写明"不是实测"）估算墙钟，并按 `eval_device()` 选设备：
 
-1. 缩小 pilot（减 `NLL_GROUPS` / `NLL_CTX`）；
-2. 你**自己**显式 `EVAL_ALLOW_GPU=True`（会消耗额度，代码不替你决定）；
-3. 只跑 S7（`trlab.run(run_eval=True, S6_NLL=False)`）。
+| 设备 | 默认规模估算 | 是否受 `EVAL_CPU_MAX_WALL_SEC` 约束 |
+|---|---|---|
+| GPU（T4，装得下） | 分钟级 | **否**（`budget_applies=False`） |
+| CPU | ≈0.94 h | 是（5400 s；旧的 8×4×2048 是 14.59 h，会被拦） |
+
+CPU 被拦时预检给三个选项，不是跑一半被杀：缩小 pilot / 开 GPU Session
+（代码默认就会用）/ 只跑 S7。
 
 ### 6.2.5 6.2 人工核对清单
 
 - [ ] `S6_NLL.json` 的 `provenance.inputs` 三个文件都是 `source` 为 `hf`（或 `local`），
       且 `sha256_verified` 与你的预期一致
+- [ ] **先看设备**：`device_by_fmt` 每个格式是 `gpu` 还是 `cpu`，`why` 写的是什么。
+      是 `cpu` 而你以为在 GPU 上 → 说明装不下或没读到显存，别把慢当成模型慢
 - [ ] `fairness_level` 是 `hf_sidecar_declared`（不是 `s4_runtime`）。**引用结论时必须带这个前缀**
-- [ ] `settings.gpu == false`，日志里每条 llama 命令都是 `-ngl 0`
-- [ ] `measured_throughput` 有值 —— 它才是实测，报告里的 0.94 h 是假设
+- [ ] `settings.one_model_at_a_time` 为 `True`；日志里能看到"装入 / 释放"成对出现
+- [ ] `measured_throughput` 有值 —— 它才是实测，报告里的估算是假设
 - [ ] 报告第 6/7 节写的是数字，不是 "not yet evaluated"（写了就说明 S6/S7 没真跑）
 - [ ] `S7_QUALITY.json` 的 `settings` 与 S6 一致（同 prompt 数 / 同 n_predict / 同 seed）
+- [ ] `EVAL_SUMMARY.json` 已生成（<3 KB，可直接贴聊天），`upload` 里
+      `remote_verified` 为 `true`；若 `not_persisted` 非空，说明这些结果**还没落地**
 
 ### 6.2.6 失败恢复
 
+先看 `out/FAILURE.json`：里面是阶段名 / 报错 / traceback 尾 / **一条**下一步。
+下面按报错对号入座。
+
 | 现象 | 去哪看 | 处置 |
 |---|---|---|
-| `没有 HF token` + 三条路 | 预检输出 / `out/S6_NLL.json` | 按 6.2.1 任选一条；**不要把 token 写进 notebook** |
+| `没有 HF token` + 三条路 | `FAILURE.json` / `out/S6_NLL.json` | 按 6.2.1 任选一条；**不要把 token 写进 notebook** |
 | `401 / 403` | 同上 | token 无效或没权限。`--check-hf` 可以只验 token 不下载 |
-| `找不到 llama-perplexity` | `out/S6_NLL.json` | 二进制不在。要么先跑一次 `RUN_S2=True`（只编译，不下载模型、不重量化），要么把已有的 build 目录挂成 Input |
-| `估算 X h 超过上限` | `out/S6_NLL.json` 的 `cost_estimate` | 按 6.2.4 的三选一 |
-| `sha256 与 HF 不符` | 同上 | 本地缓存坏了。删掉那个 GGUF 重下（`.partial` 会续传，但哈希不符时必须整个重来） |
+| `找不到 llama-perplexity` | 同上 | 二进制不在。把 `RUN_S2=True` 一起跑（只编译，不下载模型、不重量化），或挂已有的 build 目录 |
+| `估算 X h 超过上限` | `out/S6_NLL.json` 的 `cost_estimate` | 按 6.2.4 的三选一；最省事是开 GPU Session |
+| `sha256 与 HF 不符` | 同上 | 本地缓存坏了。删掉那个 GGUF 重跑（`.partial` 会续传，但哈希不符必须整个重来） |
 | 下载中断 | 日志里的 `.partial` 提示 | 直接重跑，`Range` 续传；输入指纹没变就会接着下 |
 | `probe_only` 时看到 `source: hf_pending` | `out/S6_NLL.json` | 正常：预检不拉 7 GB，真跑时才下载 |
+| 跑到一半 OOM | `logs/ppl_*.log` 尾部 | 降 `NLL_CTX`（512 → 256），或 `--set EVAL_ALLOW_GPU=false` 退 CPU |
+| 上传失败但评测成功 | `EVAL_SUMMARY.json` 的 `upload.not_persisted` | 结果仍在本地产物目录；可直接把 `EVAL_SUMMARY.json` 贴到聊天，或在同一 Session 里再跑 `--upload` |
+
+### 6.2.7 结果落在哪（会话可丢的前提）
+
+每个阶段跑完就出站，不等全部跑完：
+
+| 阶段 | 出站文件 | HF 路径 |
+|---|---|---|
+| `S6_NLL` | `S6_NLL.json`、`EVAL_SUMMARY.json` | `results/v1.1.1/<run_id>/` |
+| `S7_QUALITY` | `S7_QUALITY.json` | 同上 |
+| `S9_REPORT` | `report.md`、`results.json`、`S9_REPORT.json` | 同上 |
+
+`<run_id>` 是 UTC 时间戳（如 `20261023T012345Z`），多轮不互相覆盖。
+**不传**：GGUF（模型资产，不是运行产物）、`logs/*.log`（可能带路径）、任何 token。
+传完立刻远端复核（size 必比、LFS 再比 `lfs.oid`）；失败会把文件名写进
+`not_persisted` 并打印"这些结果**尚未持久化**"。
+
+`EVAL_SUMMARY.json` 是几百字节的摘要（均值 NLL、配对差 + CI、verdict、
+fairness_level、逐格式设备、吞吐、S7 的 identical_rate、upload 状态、三条 limits），
+**设计上就是为了直接贴到聊天里**。
 
 ## 七、失败排查
 
@@ -578,11 +618,13 @@ S3 成功后 Q8_0 会被回收（8.11 GiB），所以 S4 **不再要求**读 ima
 19. **v1.0 的引导格未在真实 Kaggle 上跑过**（本地已验证）：GitHub 匿名 sparse fetch、`rev-parse` 强校验、stamp 复用都在干净目录实测通过，但 Kaggle 镜像里 `git` 的版本与 `core.sparseCheckout` 支持情况、以及 Kaggle 出口到 github.com 的带宽/限流未实测。失败时的报错信息会说明原因，`--embed` 内嵌变体可绕过仓库依赖。
 20. **仓库转私有后匿名 fetch 会失效**。当前 GitHub 仓库是 public（用户 2026-10-22 设为公开）。若之后转回私有，用 `python3 build_notebook.py --embed` 生成内嵌执行包的版本，或在 Kaggle 环境里配好身份。
 21. **Kaggle 上重复 `Run All` 的 stamp 复用未实测**：同一 Session 内第二次执行应命中 `_trlab_src/.trlab_commit` 直接复用、不重新 fetch；这是本地验证过的逻辑，Kaggle 上的 `/kaggle/working` 持久化行为（第 7 条）会叠加影响。
-22. **S6/S7 从未在真实 Kaggle 上跑过**（v1.1.0）。139 项测试全是 CPU/mock，`test_s6_end_to_end_from_hf` 用的是假 HF 服务器桩。**所以"量化对 NLL / 质量的影响"目前没有数据**，报告那两节会写 "S6/S7 not yet evaluated"。
+22. **S6/S7 从未在真实 Kaggle 上跑过**（v1.1.1）。144 项测试全是 CPU/mock，`test_s6_end_to_end_from_hf` 用的是假 HF 服务器桩。**所以"量化对 NLL / 质量的影响"目前没有数据**，报告那两节会写 "S6/S7 not yet evaluated"。
 23. **HF 真实下载只验到 401 路径**。`python -m trlab --check-hf` 在无 token 时正确报 `token_present: false` + 401 + 三条取 token 的路（真机 macOS 跑过）；**带 token 下载 2.7 / 4.56 GiB 未实测**。断点续传逻辑与 S3 的 Q8_0 下载共用同一份 `_fetch_pinned_blob`，那份是真机跑过的。
 24. **`hf_sidecar_declared` 级 fairness 未在真实 sidecar 上走过**。测试里是构造的；真实 sidecar 字段是否齐、跨 Session 会不会误判 `imatrix_base_consistent: false`，第一次真跑才知道。
-25. **往 HF 上传没有真的发生过**。`upload_after_run()` 在 `HF_UPLOAD_AFTER_RUN=False` 时直接跳过；只有 dry-run 与 mock 覆盖。上传时若真的执行，也只做远端 size 对比（LFS 再比 sha256），不是逐文件内容复核。
-26. **评测成本是假设速率**（CPU 2.5 tok/s / GPU 30 tok/s）。0.94 h 不能当承诺，真实数字要等 `measured_throughput`。
+25. **往 HF 上传没有真的发生过**。v1.1.1 起 `RUN_EVAL=True` 会自动出站 5 个小文件，但真实上传只有 dry-run 与 mock 覆盖。上传时只做远端 size 对比（LFS 再比 sha256），不是逐文件内容复核。
+26. **评测成本是假设速率**（GPU 30 / CPU 2.5 tok/s）。不能当承诺，真实数字要等 `measured_throughput`。
+27. **"默认用 GPU"不等于"一定在 GPU 上"**：读不到 CUDA 显存就是 CPU，只写 `device_why` 不报错。看结果先看 `device_by_fmt`。
+28. **`-ngl 99` 不是 OOM 免疫**：`NGL_MARGIN_GB=2.0` 是静态余量，KV cache + compute buffer 仍可能超。真 OOM 就降 ctx 或退 CPU。
 
 ### 已被真实 Kaggle 运行验证的部分（v0.3.0–v0.5.0，2026-10-21/22）
 
@@ -604,14 +646,16 @@ S3 成功后 Q8_0 会被回收（8.11 GiB），所以 S4 **不再要求**读 ima
 
 **没验证的（如实标注）**：Kaggle 上 `/kaggle/tmp` 是否存在、是否独立文件系统、空闲多少；预检的判定在真实 Kaggle 上会不会误判；S4 的真实 CPU 量化耗时与成功率。
 
-### 已在本地验证的部分（v1.1.0，2026-10-22/23，非 Kaggle）
+### 已在本地验证的部分（v1.1.0/1.1.1，2026-10-23，非 Kaggle）
 
 1. **S3 的 P0 回归已修并钉住**：`_write_stamp() got multiple values for keyword argument 'bytes'`。
    修法是把 `_parquet_to_txt()` 的返回键改成 `converted_bytes`、`_ensure_calib_txt()`
    改成显式 dict 合并 + 重名 `GuardError`（不再 `**` 摊字典）。
    回归是**跨函数全流程**的（假 pyarrow → 真转换 → 写 stamp → cache hit），
    另加一条 AST 静态不变量禁止"同一调用里既有 `bytes=` 又有 `**`"。
-2. **139 项 CPU 回归全绿**（不联网、约 45 秒）：118 项旧 + 2 项 S3 回归 + 19 项 v1.1
+2. **144 项 CPU 回归全绿**（不联网、约 45 秒）：118 项旧 + 2 项 S3 回归 + 19 项 v1.1
+   + 5 项 v1.1.1（设备不静默降级 / 预检报设备 / 白名单不含模型与日志 /
+   未授权时列出未持久化 / 失败现场 + 可粘贴摘要）
    （token 链 / 绝不打印 token / tree 分页 / 错误码可操作性 / 复用与 etag 双源守卫 /
    `verify_remote` 只声明真核过的 / 上传门槛与 opt-in / 缺 `huggingface_hub` 时拒绝
    `pip install -U` / 本地优先 / `probe_only` 绝不下载 / sidecar fairness 只能到
@@ -636,10 +680,11 @@ Kaggle 的每日 GPU 配额、单会话时长上限、并发会话数、存储�
 
 ## 十、下一步
 
-**如果你要的是"把 S6/S7 跑出来"（v1.1.0 的默认下一步）**：上传 `trlab_kaggle.ipynb` →
+**如果你要的是"把 S6/S7 跑出来"（v1.1.1 的默认下一步）**：上传 `trlab_kaggle.ipynb` →
 把 `RUN_EVAL = False` 改成 `RUN_EVAL = True` → 配好 HF token（6.2.1 三条路任选一条，
-**不要写进 notebook**）→ `Settings → Internet = On` → `Run all` → 对着 6.2.5 的清单核一遍 → 停下。
-不编译、不下载 BF16、不重做 S3、不重新量化；默认纯 CPU，不会消耗 GPU 额度。
+**不要写进 notebook**）→ `Settings`：`Accelerator = GPU T4 ×2`、`Internet = On` →
+`Run all` → 对着 6.2.5 的清单核一遍 → 停下。不编译、不下载 BF16、不重做 S3、
+不重新量化；**默认用 GPU**，一次只装一个模型，每阶段结果自动出站。
 
 **如果你要的是"把量化再做一遍"**：把 `RUN_S4 = False` 改成 `RUN_S4 = True` → `Settings → Internet = On` → `Run all` → 核对 5.4 与 6.6 两份清单 → 停下。
 

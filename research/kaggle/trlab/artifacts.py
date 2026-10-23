@@ -322,16 +322,45 @@ def _ram_total_gb():
             return None
 
 
+def eval_device(vram_total_gb=None, model_bytes=None):
+    """这次评测到底用 GPU 还是 CPU —— **有 GPU 就用 GPU**，装不下才退并说明理由。
+
+    v1.1.1 起默认 `EVAL_ALLOW_GPU=True`：Kaggle 上开的是 GPU Session，
+    让 8B 在 4 核 CPU 上慢慢跑是浪费算力。但"允许"不等于"假装有"：
+    没有 CUDA 显存、或单个模型装不下，就退 CPU，并把 `why` 写进结果 ——
+    不允许静默降级（静默降级会让"GPU 上跑了 3 小时"变成"其实一直在 CPU 上"）。
+    """
+    if not CFG.get("EVAL_ALLOW_GPU"):
+        return {"device": "cpu", "ngl": 0,
+                "why": "EVAL_ALLOW_GPU=False（显式强制纯 CPU）"}
+    if not vram_total_gb:
+        return {"device": "cpu", "ngl": 0,
+                "why": "没有检测到 CUDA 显存（不是 GPU Session，或 torch 不可用）"}
+    usable = vram_total_gb - 1.0
+    if model_bytes is None:
+        return {"device": "gpu", "ngl": 99,
+                "why": f"显存 {vram_total_gb:.2f} GiB，可用 {usable:.2f} GiB"}
+    need = model_bytes / 2**30 + float(CFG.get("NGL_MARGIN_GB", 2.0))
+    if need < usable:
+        return {"device": "gpu", "ngl": 99,
+                "why": f"权重+余量 {need:.2f} GiB < 可用 {usable:.2f} GiB"}
+    return {"device": "cpu", "ngl": 0,
+            "why": (f"装不下：权重+余量 {need:.2f} GiB > 可用 {usable:.2f} GiB —— "
+                    "这一档会退到 CPU，慢一个量级，结论里必须写清")}
+
+
 def eval_cost_estimate(n_models, groups, chunks, ctx, allow_gpu=False,
-                       vram_total_gb=None):
+                       vram_total_gb=None, biggest_model_bytes=None):
     """估算评测墙钟。**速率是假设值，不是实测** —— 记录里必须这么写。
 
     真实耗时只有跑过才知道；这个函数只用来在开跑前挡住"CPU 上必然超预算"
-    的配置，而不是承诺任何时间。
+    的配置，而不是承诺任何时间。设备判定与 `eval_device()` 一致：
+    有 GPU 且装得下 → 用 GPU 速率，否则 CPU 速率。
     """
     per_model_tokens = int(groups) * int(chunks) * int(ctx)
     total_tokens = per_model_tokens * int(n_models)
-    rate = ASSUMED_TOK_S_GPU if allow_gpu else ASSUMED_TOK_S_CPU
+    dev = eval_device(vram_total_gb if allow_gpu else None, biggest_model_bytes)
+    rate = ASSUMED_TOK_S_GPU if dev["device"] == "gpu" else ASSUMED_TOK_S_CPU
     overhead = PER_INVOCATION_OVERHEAD_SEC * int(groups) * int(n_models)
     wall = total_tokens / max(1e-6, rate) + overhead
     budget = float(CFG.get("EVAL_CPU_MAX_WALL_SEC", 5400))
@@ -339,6 +368,7 @@ def eval_cost_estimate(n_models, groups, chunks, ctx, allow_gpu=False,
         "models": int(n_models), "groups": int(groups), "chunks": int(chunks),
         "ctx": int(ctx), "tokens_per_model": per_model_tokens,
         "tokens_total": total_tokens,
+        "device": dev["device"], "device_why": dev["why"],
         "assumed_tok_per_sec": rate,
         "assumed_rate_note": ("假设值（CPU 2.5 / GPU 30 tok/s），**不是实测**。"
                               "llama-perplexity 是批处理（-b 512），实际通常显著快于"
@@ -346,7 +376,9 @@ def eval_cost_estimate(n_models, groups, chunks, ctx, allow_gpu=False,
         "wall_est_sec": round(wall, 1),
         "wall_est_hours": round(wall / 3600, 2),
         "budget_sec": budget,
-        "fits_budget": wall <= budget,
+        # 上限只对 CPU 有意义：GPU 速率与 CPU 差一个量级，拿同一个上限拦会误杀
+        "budget_applies": dev["device"] == "cpu",
+        "fits_budget": (wall <= budget) or (dev["device"] == "gpu"),
         "gpu_allowed": bool(allow_gpu),
         "vram_total_gb": vram_total_gb,
     }
@@ -362,6 +394,13 @@ def eval_preflight(deadline, formats=None, do_download=False):
     """
     formats = tuple(formats or FORMATS)
     report = {}
+
+    # ---- 0. HF 凭据 / 仓库（fail fast：token 不对就别浪费任何时间）----
+    tk = hf.hf_token()
+    report["hf"] = {"repo": CFG.get("HF_MODEL_REPO"),
+                    "revision": CFG.get("HF_MODEL_REVISION"),
+                    "token_present": bool(tk["token"]),
+                    "token_source": tk["source"]}
 
     # ---- 1. 二进制 ----
     missing = []
@@ -396,16 +435,23 @@ def eval_preflight(deadline, formats=None, do_download=False):
     report["disk"] = {"need_fetch_gb": round(to_fetch / 2**30, 2),
                       "models_gb": round(need_bytes / 2**30, 2)}
 
-    # ---- 4. RAM / 显存 ----
+    # ---- 4. RAM / 显存 / 执行设备 ----
     ram_gb = _ram_total_gb()
     v = vram_gb() or {}
     biggest = max(m["bytes"] for m in models.values()) / 2**30
+    dev = eval_device(v.get("total"), int(biggest * 2**30))
     report["resources"] = {
         "ram_total_gb": ram_gb,
         "vram_total_gb": v.get("total"),
         "biggest_model_gb": round(biggest, 2),
         "gpu_allowed": bool(CFG.get("EVAL_ALLOW_GPU")),
+        "device": dev["device"],
+        "device_why": dev["why"],
     }
+    if dev["device"] == "cpu" and CFG.get("EVAL_ALLOW_GPU") and v.get("total"):
+        # 有 GPU 但装不下：不是错误，但必须**大声**说，否则会变成"以为在用 GPU"
+        log(f"!! 有显存但装不下这个模型 → 退 CPU：{dev['why']}")
+    log(f"执行设备：{dev['device']}（{dev['why']}）")
     if ram_gb and biggest + 2.0 > ram_gb:
         raise GuardError(
             f"RAM 不够：最大模型 {biggest:.2f} GiB + 余量 2 GiB > 总 RAM {ram_gb:.2f} GiB。\n"
@@ -424,21 +470,22 @@ def eval_preflight(deadline, formats=None, do_download=False):
     cost = eval_cost_estimate(
         n_models=len(models), groups=CFG["NLL_GROUPS"],
         chunks=CFG["NLL_CHUNKS_PER_GROUP"], ctx=CFG["NLL_CTX"],
-        allow_gpu=CFG["EVAL_ALLOW_GPU"], vram_total_gb=v.get("total"))
+        allow_gpu=CFG["EVAL_ALLOW_GPU"], vram_total_gb=v.get("total"),
+        biggest_model_bytes=int(biggest * 2**30))
     report["cost"] = cost
     if not cost["fits_budget"]:
         raise GuardError(
-            f"按当前规模，纯 CPU 评测估算要 {cost['wall_est_hours']} 小时"
+            f"按当前规模，CPU 评测估算要 {cost['wall_est_hours']} 小时"
             f"（{cost['tokens_total']} token / {cost['assumed_tok_per_sec']} tok/s，"
             f"**假设速率不是实测**），超过 {cost['budget_sec'] / 3600:.1f} 小时上限。\n"
             "  → 三选一，别硬跑：\n"
             "    1. 缩小 pilot：CFG['NLL_GROUPS'] / CFG['NLL_CTX'] / "
             "CFG['NLL_CHUNKS_PER_GROUP'] 调小"
             "（配对比较只要两个模型同设置，不需要大 ctx）；\n"
-            "    2. 显式允许 GPU：CFG['EVAL_ALLOW_GPU']=True —— **会消耗 GPU 额度**，"
-            "由你决定，我不会自己开；\n"
+            "    2. 开 GPU Session（Kaggle 上 Settings → Accelerator），"
+            "代码默认就会用 GPU；或显式 CFG['EVAL_ALLOW_GPU']=True；\n"
             "    3. 换更快的机器，或只跑 S7（质量抽查，token 量小两个数量级）。")
     log(f"评测成本估算：{cost['tokens_total']} token，"
-        f"{cost['wall_est_hours']} h（假设 {cost['assumed_tok_per_sec']} tok/s，"
-        f"不是实测）；GPU={cost['gpu_allowed']}")
+        f"{cost['wall_est_hours']} h（设备 {cost['device']}，"
+        f"假设 {cost['assumed_tok_per_sec']} tok/s，不是实测）")
     return report

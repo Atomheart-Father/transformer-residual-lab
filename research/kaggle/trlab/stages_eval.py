@@ -2,7 +2,11 @@
 
 v1.1：S6/S7 的输入不再要求"本 Session 刚量化过"。本地 `models/` 有就用，
 没有就从 Hugging Face 上已存的量化 GGUF 取（`trlab/artifacts.py`），
-**不重量化、不下载 BF16、不重做 S3**。评测默认纯 CPU（`EVAL_ALLOW_GPU=False`）。
+**不重量化、不下载 BF16、不重做 S3**。
+
+v1.1.1：**默认有 GPU 就用 GPU**（Kaggle 上开的就是 GPU Session，不该在 4 核
+CPU 上磨 8B）。装不下才退 CPU，并把原因写进结果。**一次只装一个模型**：
+每个格式独立一轮，跑完就释放，绝不把两个量化同时压在显存/内存里。
 """
 
 from .config import CFG, EVAL_PINNED, FORMATS, LOGS, WORK
@@ -11,7 +15,7 @@ from .paths import _model_path, llama_bin
 from .gguf import gguf_scan
 from .core import _anchor_decision, _fit_ngl, _get, check_deadline, log, need, paired_bootstrap, run_cmd, run_ppl, split_eval, vram_gb
 from .imatrix import resolve_imatrix
-from .artifacts import (eval_preflight, fairness_from_sidecars,
+from .artifacts import (eval_device, eval_preflight, fairness_from_sidecars,
                         resolve_eval_models)
 
 import json, os, subprocess, time
@@ -19,15 +23,13 @@ from pathlib import Path
 
 
 def _eval_ngl(nbytes, vram_total_gb):
-    """评测要不要上 GPU —— **默认不**。
+    """这个模型该用多少 `-ngl`，以及为什么 —— 委托给 `artifacts.eval_device`。
 
-    `EVAL_ALLOW_GPU=False` 时一律 `-ngl 0`（纯 CPU）：GPU 会消耗额度，
-    必须由用户显式打开。这条不能靠"显存够就自动用"来猜。
+    v1.1.1：默认 `EVAL_ALLOW_GPU=True`，**有 GPU 就整模型卸载**（-ngl 99）。
+    只有三种情况会得到 0：显式强制 CPU、没有 CUDA 显存、单个模型装不下。
+    第三种会写进结果（`why`），不允许静默降级成"以为在 GPU 上跑"。
     """
-    if not CFG.get("EVAL_ALLOW_GPU"):
-        return 0
-    usable = (vram_total_gb - 1.0) if vram_total_gb else 0.0
-    return _fit_ngl(nbytes, usable, CFG["NGL_MARGIN_GB"])
+    return eval_device(vram_total_gb, nbytes)
 
 
 def _fairness_for_s6(models):
@@ -103,18 +105,31 @@ def stage_s6_nll(deadline):
         ", ".join(f"g{m['group']}({m['paras']}段/{m['chars']}字符)" for m in meta))
 
     per_model = {}
+    # 一次只装一个模型：每个格式算自己的 -ngl，跑完就释放（llama-perplexity
+    # 是独立进程，进程退出即释放，所以"两个模型同时在显存里"这件事不会发生）。
+    _v = vram_gb() or {}
+    dev_by_fmt = {fmt: _eval_ngl(rec["bytes"], _v.get("total"))
+                  for fmt, rec in models.items()}
+    for fmt, d in dev_by_fmt.items():
+        log(f"设备 {fmt}: {d['device']} -ngl {d['ngl']}（{d['why']}）")
     t_start = time.time()
     for fmt, rec in models.items():
         mp = Path(rec["path"])
         per_model[fmt] = []
+        _d = dev_by_fmt[fmt]
+        log(f"装入 {fmt}（{_d['device']} -ngl {_d['ngl']}，"
+            f"{rec['bytes'] / 2**30:.2f} GiB）；跑完释放再装下一个")
         for i, g in enumerate(groups):
             check_deadline(deadline, f"S6 {fmt} g{i}")
             r = run_ppl(mp, g, deadline, f"{fmt}_g{i}")
             r["group"] = i
             r["chars"] = meta[i]["chars"]
             r["model_source"] = rec.get("source")
+            r["device"] = _d["device"]
             per_model[fmt].append(r)
-            log(f"  {fmt} g{i}: PPL={r['ppl']:.4f} NLL={r['nll']:.4f}")
+            log(f"  {fmt} g{i}: PPL={r['ppl']:.4f} NLL={r['nll']:.4f} "
+                f"(ngl={r['ngl']})")
+        log(f"释放 {fmt}")
     elapsed = time.time() - t_start
 
     d = [per_model[FORMATS[0]][i]["nll"] - per_model[FORMATS[1]][i]["nll"]
@@ -159,6 +174,12 @@ def stage_s6_nll(deadline):
         "deltas": [round(x, 6) for x in d],
         "resources": pf.get("resources"),
         "cost_estimate": pf.get("cost"),
+        "device_by_fmt": {f: {"device": d["device"], "ngl": d["ngl"], "why": d["why"]}
+                          for f, d in dev_by_fmt.items()},
+        "settings": {"ctx": CFG["NLL_CTX"],
+                     "chunks_per_group": CFG["NLL_CHUNKS_PER_GROUP"],
+                     "groups": CFG["NLL_GROUPS"], "seed": CFG["SEED"],
+                     "batch": 512, "one_model_at_a_time": True},
         "measured_throughput": measured,
         "statistics_note": ("NLL_GROUPS 只用于 pilot 估计。bootstrap 的 n 是**组数**不是 token 数，"
                             "组间 token 数也不严格相等；正式 CI 应按独立文档重新设计。"),
@@ -176,7 +197,9 @@ def stage_s6_nll(deadline):
             "self_quantized": fair_level == "s4_runtime",
             "fair_comparison": fairness_verified,
             "fairness_level": fair_level,
-            "gpu": bool(CFG["EVAL_ALLOW_GPU"]),
+            # v1.1.1：设备是**逐格式**判定的（装不下会退 CPU），所以不能再写一个 bool
+            "device": {f: d["device"] for f, d in dev_by_fmt.items()},
+            "ngl": {f: d["ngl"] for f, d in dev_by_fmt.items()},
             "note": ("输入来自 " + ", ".join(sorted({r.get("source") or "?" for r in models.values()}))
                      + f"；公平性级别 {fair_level}。"
                      "同 base、同 imatrix、同 token 窗口；fair_comparison=False 表示"
@@ -191,6 +214,8 @@ def stage_s6_nll(deadline):
           f"char_weighted={stats['char_weighted_mean']:+.4f}  "
           f"CI95={stats['ci95']}  n={stats['n']}")
     print(f"公平性已核验: {fairness_verified}（级别 {fair_level}）")
+    print("执行设备: " + ", ".join(f"{f}={d['device']}(-ngl {d['ngl']})"
+                                  for f, d in dev_by_fmt.items()))
     print(f"实测吞吐: {measured['tok_per_sec']} tok/s（{elapsed:.0f} s，{tokens_done} token）")
     print("=" * 78)
 
@@ -266,16 +291,18 @@ def stage_s7_quality(deadline):
 
     prompts = QUALITY_PROMPTS_DEFAULT[:CFG["QUALITY_PROMPTS"]]
     v = vram_gb()
-    # 默认纯 CPU：GPU 会消耗额度，必须 EVAL_ALLOW_GPU=True 才用。
-    ngl_by_fmt = {fmt: _eval_ngl(rec["bytes"], (v or {}).get("total"))
+    # v1.1.1：有 GPU 就用 GPU（与 S6 同一套判定），装不下才退 CPU 并说明原因。
+    dev_by_fmt = {fmt: _eval_ngl(rec["bytes"], (v or {}).get("total"))
                   for fmt, rec in models.items()}
-    log(f"S7 -ngl: {ngl_by_fmt}（EVAL_ALLOW_GPU={CFG['EVAL_ALLOW_GPU']}）")
+    log(f"S7 设备: " + ", ".join(f"{f}={d['device']}(-ngl {d['ngl']}, {d['why']})"
+                                for f, d in dev_by_fmt.items()))
 
     per_model = {}
     for fmt, rec in models.items():
         mp = Path(rec["path"])
-        ngl = ngl_by_fmt[fmt]
+        ngl = dev_by_fmt[fmt]["ngl"]
         per_model[fmt] = []
+        log(f"装入 {fmt}（{dev_by_fmt[fmt]['device']} -ngl {ngl}）；跑完释放再装下一个")
         for i, pr in enumerate(prompts):
             check_deadline(deadline, f"S7 {fmt} p{i}")
             cmd = [cli, "-m", mp, "-p", pr, "-n", CFG["QUALITY_N_PREDICT"],
@@ -293,6 +320,7 @@ def stage_s7_quality(deadline):
             per_model[fmt].append({"prompt": pr, "text": body[:400],
                                    "repeat4": round(repeat_ratio(body), 4),
                                    "chars": len(body)})
+        log(f"释放 {fmt}")
 
     pairs = []
     fa, fb = FORMATS[0], FORMATS[1]
@@ -316,7 +344,10 @@ def stage_s7_quality(deadline):
                        for fmt, v2 in per_model.items()},
         "settings": {"temperature": 0, "seed": CFG["SEED"],
                      "n_predict": CFG["QUALITY_N_PREDICT"],
-                     "ngl": ngl_by_fmt, "gpu_allowed": bool(CFG["EVAL_ALLOW_GPU"])},
+                     "ngl": {f: d["ngl"] for f, d in dev_by_fmt.items()},
+                     "device": {f: d["device"] for f, d in dev_by_fmt.items()},
+                     "one_model_at_a_time": True,
+                     "gpu_allowed": bool(CFG["EVAL_ALLOW_GPU"])},
         "provenance": {
             "inputs": {f: {"path": r["path"], "source": r.get("source"),
                            "sha256_verified": r.get("sha256_verified")}

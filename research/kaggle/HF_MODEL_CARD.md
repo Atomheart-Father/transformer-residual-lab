@@ -31,6 +31,21 @@ README 内容草稿。它只陈述**已经发生过的事实**，不把未运行
 
 **权威字节数与 sha256 以各 `*.provenance.json` 为准**，不要在文档里手抄近似值。
 
+### 实验记录会放在哪（现在还没有）
+
+评测跑起来之后，每个阶段的小结果会自动落到
+`results/v1.1.1/<run_id>/`（`<run_id>` 是 UTC 时间戳）：
+
+| 文件 | 内容 |
+|---|---|
+| `EVAL_SUMMARY.json` | 几百字节的摘要：均值 NLL、配对差 + CI、verdict、设备、吞吐、fairness 级别 |
+| `S6_NLL.json` | 逐组 PPL/NLL、bootstrap、输入 provenance |
+| `S7_QUALITY.json` | 8 个 prompt 的续写一致性 / repeat4 |
+| `report.md` / `results.json` / `S9_REPORT.json` | 汇总报告 |
+
+**当前这几个文件都不存在** —— 因为 S6/S7 一次都没跑过。上传只覆盖这些小文件，
+不会往这里放 GGUF 的副本，也不会放日志或凭据。
+
 ## 怎么生成的（真实发生过的事）
 
 - 基座：`Qwen/Qwen3-8B` 的**原始 BF16**（`Q8_0` 只用来算 imatrix）。

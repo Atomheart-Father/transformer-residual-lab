@@ -6,7 +6,7 @@
 
 from pathlib import Path
 
-NOTEBOOK_VERSION = "1.1.0"
+NOTEBOOK_VERSION = "1.1.1"
 
 
 
@@ -177,6 +177,8 @@ CFG = {
     # v1.1：只评测，不量化。打开后只跑 S6/S7/S9 —— 从 HF 上已存的 GGUF 直接
     # 取输入，**不编译、不下载 15 GiB BF16、不重做 S3、不重新量化**。
     # 默认 False：一个字节都不联网。
+    # 打开后**自带小结果回传**（只 5 个白名单 JSON/MD，不传模型、不传日志）：
+    # Kaggle 是可丢弃的算力机，结果不落 HF 就随 Session 一起没了。
     "RUN_EVAL": False,
     # ---------- 模型 ----------
     "MODEL_ID":    "Qwen/Qwen3-8B",
@@ -273,11 +275,13 @@ CFG = {
     "HF_TIMEOUT_SEC":     60,
 
     # ---------- S6/S7 评测（v1.1：从 HF 已存 GGUF 直接评测，不重量化）----------
-    # **默认不许上 GPU**：GPU 会消耗额度，必须显式打开才用。
-    # False 时 llama-perplexity / llama-cli 一律 -ngl 0（纯 CPU）。
-    "EVAL_ALLOW_GPU":     False,
+    # **默认用 GPU（有就有效使用）**：Kaggle 上你开的就是 GPU Session，
+    # 让 8B 在 4 核 CPU 上慢慢跑是浪费。`EVAL_ALLOW_GPU=True` 且检测到显存时，
+    # 按显存算 `-ngl`（装不下才退 0 并**明确说为什么**）；没有 GPU 时才纯 CPU。
+    # 要强制纯 CPU（例如想省额度、或只想验证链路）：`--set EVAL_ALLOW_GPU=false`。
+    "EVAL_ALLOW_GPU":     True,
     # 纯 CPU 下的墙钟上限（秒）。估算超过它就 fail-closed 并给三个选项，
-    # 而不是跑到一半被阶段预算杀掉。
+    # 而不是跑到一半被阶段预算杀掉。GPU 路径不看这个上限（速率假设差一个量级）。
     "EVAL_CPU_MAX_WALL_SEC": 5400,
     # 评测前是否强制核对 GGUF 与 HF tree 的 lfs.oid（4.5 GiB 约 2–4 s/个）。
     "EVAL_VERIFY_HASH":   True,
@@ -367,7 +371,10 @@ def _apply_run_switches():
         STAGES["S6_NLL"] = True
         STAGES["S7_QUALITY"] = True
         CFG["HF_FETCH_ARTIFACTS"] = True
-        CFG["EVAL_ALLOW_GPU"] = False      # 绝不擅自上 GPU 消耗额度
+        # Kaggle 是可丢弃的算力机：小结果不回传就随 Session 一起没了。
+        # 只传白名单里的 5 个小文件（不传模型、不传日志、不传 secrets）。
+        # 想彻底不外发：--set HF_UPLOAD_AFTER_RUN=false。
+        CFG["HF_UPLOAD_AFTER_RUN"] = True
         if not (CFG["RUN_S2"] or CFG["RUN_S3"] or CFG["RUN_S4"]):
             return {"run_eval": True, "run_s2": False, "run_s3": False,
                     "run_s4": False,
@@ -375,7 +382,9 @@ def _apply_run_switches():
                     "eval_models_from": f"hf:{CFG['HF_MODEL_REPO']}"
                                         f"@{CFG['HF_MODEL_REVISION']}",
                     "eval_corpus": f"{EVAL_PINNED['config']}/{EVAL_PINNED['split']}",
-                    "gpu": False}
+                    "eval_device": ("gpu_if_present" if CFG["EVAL_ALLOW_GPU"]
+                                    else "cpu_forced"),
+                    "upload_results": bool(CFG["HF_UPLOAD_AFTER_RUN"])}
 
     if not (CFG["RUN_S2"] or CFG["RUN_S3"] or CFG["RUN_S4"]):
         return {"run_s2": False, "run_s3": False, "run_s4": False,
@@ -503,7 +512,7 @@ def print_banner():
 
     print(f"RUN_EVAL      : {CFG['RUN_EVAL']}"
           + ("（只评测 S6/S7/S9：输入取自 HF 已存 GGUF，不编译、不重量化、不下 BF16；"
-             f"{'允许 GPU' if CFG['EVAL_ALLOW_GPU'] else '纯 CPU（-ngl 0）'}）"
+             f"{'有 GPU 就用 GPU' if CFG['EVAL_ALLOW_GPU'] else '强制纯 CPU（-ngl 0）'}）"
              if CFG['RUN_EVAL'] else "（不评测）"))
 
     print(f"开启的阶段    : {[k for k, v in STAGES.items() if v]}")
@@ -542,7 +551,8 @@ def print_banner():
         print(f"评测规模      : ctx={CFG['NLL_CTX']} × {CFG['NLL_GROUPS']} 组"
               f" × {CFG['NLL_CHUNKS_PER_GROUP']} chunk"
               f"（约 {CFG['NLL_CTX']*CFG['NLL_GROUPS']*CFG['NLL_CHUNKS_PER_GROUP']/1000:.1f}k token/模型）")
-        print(f"上传结果      : {'允许（显式 opt-in）' if CFG['HF_UPLOAD_AFTER_RUN'] else '禁止（默认不外发）'}")
+        print(f"执行设备      : {'有 GPU 就整模型卸载（-ngl 99）；装不下才退 CPU 并说明原因' if CFG['EVAL_ALLOW_GPU'] else '强制纯 CPU'}")
+        print(f"结果回传      : {'开（只 5 个白名单 JSON/MD，不传模型/日志）' if CFG['HF_UPLOAD_AFTER_RUN'] else '关（结果只落本地，Session 结束即丢）'}")
 
     print(f"S4–S8         : "
           + ("S4/S5 开，S6–S8 与 SX 全关" if CFG['RUN_S4'] else

@@ -1,11 +1,17 @@
 """编排入口：run(**开关) 顺序执行各阶段并打印摘要。
 
-CLI: python -m trlab.run [--run-s2] [--run-s3] [--run-s4] [--set K=V]
+CLI: python -m trlab.run [--run-s2] [--run-s3] [--run-s4] [--run-eval] [--set K=V]
+
+v1.1.1 的执行哲学（用户 2026-10-23 确认）：**Kaggle 是可丢弃的 GPU worker**。
+所以这里只做三件事，不做跨 Session 状态管理、不做 Save Version 备援：
+  1. 每个阶段跑完就把它的小结果**出站**（HF，白名单 5 个文件）+ 远端复核；
+  2. 失败就 fail fast，写一份 `FAILURE.json`（阶段 / 报错 / traceback 尾 / 下一步）；
+  3. 评测结束写一份几百字节的 `EVAL_SUMMARY.json`，方便直接贴到聊天里。
 """
 
 from .config import CFG, LOGS, NOTEBOOK_VERSION, OUT, STAGES, _apply_run_switches, print_banner
 from .paths import _s3_base_path
-from .core import STATE, ensure_dirs, log, run_stage
+from .core import STATE, _get, ensure_dirs, log, run_stage, write_json
 from .stages_env import stage_s0_env, stage_s1_smoke
 from .stages_build import stage_s2_build
 from .stages_imatrix import stage_s3_imatrix
@@ -14,6 +20,161 @@ from .stages_eval import stage_s6_nll, stage_s7_quality, stage_s8_bf16_anchor, s
 from .report import _s2_report_lines, _s3_report_lines, _s4_report_lines, _s4_preflight_lines, stage_s9_report
 
 import argparse, json, sys
+from datetime import datetime, timezone
+
+
+# ---------------------------------------------------------------- 出站 / 失败记录
+
+# 只允许这 5 个小文件出站。模型、日志、secrets 一律不传。
+_UPLOAD_WHITELIST = {
+    "S6_NLL":     ("S6_NLL.json", "EVAL_SUMMARY.json"),
+    "S7_QUALITY": ("S7_QUALITY.json",),
+    "S9_REPORT":  ("report.md", "results.json", "S9_REPORT.json"),
+}
+
+_RUN_ID = None
+
+
+def _run_id():
+    """一次运行的标签，用来在 HF 上留历史（`results/v{ver}/{run_id}/`）。"""
+    global _RUN_ID
+    if _RUN_ID is None:
+        _RUN_ID = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return _RUN_ID
+
+
+def _next_step(stage, err):
+    """把常见错误翻译成"下一步做什么"。只给一步，不给一堆选项。"""
+    e = str(err or "")
+    low = e.lower()
+    if "token" in low or "401" in e or "403" in e:
+        return ("配 HF token：环境变量 HF_TOKEN / Kaggle Add-ons → Secrets（名字 HF_TOKEN，"
+                "勾选 attach）/ 本机 `huggingface-cli login`。不要把 token 写进 notebook。")
+    if "llama-perplexity" in e or "llama-cli" in e:
+        return ("缺 llama.cpp 二进制：把 RUN_S2 也设成 True 一起跑（只编译，不下载模型、"
+                "不重量化，约 28 分钟）。")
+    if "超过" in e and "上限" in e:
+        return ("估算超上限：调小 NLL_GROUPS / NLL_CTX，或换 GPU Session"
+                "（代码默认就会用 GPU）。")
+    if "sha256" in low or "lfs.oid" in low:
+        return "本地 GGUF 与 HF 上的哈希不一致：删掉那个文件重跑（会重新下载并校验）。"
+    if "重叠" in e:
+        return "校准集与评测集重叠：这是语料配置问题，换 split，不要绕过断言。"
+    return (f"看 {OUT / (stage + '.json')} 里的 traceback；修好后在新 Session 重跑即可"
+            "（HF 上的输入不用重下）。")
+
+
+def _write_failure(stage, plan=None, upload_state=None):
+    """阶段失败时写一份小 JSON —— 会话可以立刻丢掉，这份就是现场。"""
+    rec = STATE.get(stage) or {}
+    if rec.get("status") != "error":
+        return None
+    doc = {
+        "stage": stage,
+        "run_id": _run_id(),
+        "notebook_version": NOTEBOOK_VERSION,
+        "started": rec.get("started"),
+        "elapsed_sec": rec.get("elapsed_sec"),
+        "error": rec.get("error"),
+        "traceback_tail": (rec.get("traceback") or "")[-1500:],
+        "next_step": _next_step(stage, rec.get("error")),
+        "plan": plan,
+        "upload": upload_state,
+        "note": ("Kaggle 只是可丢弃的算力机：这份 JSON 和阶段 JSON 都在本地产物目录里。"
+                 "修代码 → commit → 新 Session 重跑，输入不用重下（HF 是长期源）。"),
+    }
+    write_json(OUT / "FAILURE.json", doc)
+    print("-" * 78)
+    print(f"{stage} 失败 —— 已经停在这里，不会带着残缺状态往下跑。")
+    print(f"  报错: {doc['error']}")
+    print(f"  下一步: {doc['next_step']}")
+    print(f"  现场: {OUT / 'FAILURE.json'}（含 traceback 尾）与 {OUT / (stage + '.json')}")
+    print("  你可以直接关掉 Session；修好代码后新 Session 重跑，HF 上的输入不用重下。")
+    print("-" * 78)
+    return doc
+
+
+def _upload_stage(stage, force=False):
+    """把一个阶段的小结果传到 HF 并**远端复核**。
+
+    只有 `CFG['HF_UPLOAD_AFTER_RUN']`（RUN_EVAL 会打开）或 `upload=True` 才动手。
+    失败**不改变**阶段结论，但必须明确说"哪些结果尚未持久化" —— 不许虚报。
+    """
+    names = _UPLOAD_WHITELIST.get(stage, ())
+    files = [(OUT / n, f"results/v{NOTEBOOK_VERSION}/{_run_id()}/{n}")
+             for n in names if (OUT / n).exists()]
+    if not files:
+        return {"stage": stage, "skipped": True, "why": "没有可上传的文件"}
+    if not (force or CFG.get("HF_UPLOAD_AFTER_RUN")):
+        return {"stage": stage, "skipped": True,
+                "why": "CFG['HF_UPLOAD_AFTER_RUN']=False（结果只落本地，Session 结束即丢）",
+                "not_persisted": [b for _, b in files]}
+
+    from .hf import upload_after_run
+    try:
+        rec = upload_after_run(files)
+        if rec.get("skipped"):
+            rec["not_persisted"] = [b for _, b in files]
+        else:
+            v = rec.get("verify") or {}
+            rec["remote_verified"] = bool(v.get("ok"))
+            rec["not_persisted"] = ([] if v.get("ok")
+                                    else [b for _, b in files])
+        print(f"HF 出站（{stage}）：{json.dumps(rec, ensure_ascii=False)[:400]}")
+        return rec
+    except Exception as e:
+        rec = {"stage": stage, "ok": False, "error": str(e),
+               "not_persisted": [b for _, b in files]}
+        print(f"!! HF 出站失败（{stage}）—— 这些结果**尚未持久化**："
+              f"{rec['not_persisted']}\n   原因：{e}")
+        return rec
+
+
+def _write_eval_summary(plan=None, upload_state=None):
+    """几百字节的摘要，专为"贴到聊天里"设计。数字全部来自 S6/S7 的 JSON。"""
+    s6 = _get("S6_NLL") or {}
+    s7 = _get("S7_QUALITY") or {}
+    if not (s6 or s7):
+        return None
+    st = s6.get("paired_delta_nll_iq2_minus_iq4") or {}
+    agg = s6.get("aggregate") or {}
+    inputs = ((s6.get("provenance") or {}).get("inputs") or {})
+    sm = {
+        "run_id": _run_id(),
+        "version": NOTEBOOK_VERSION,
+        "device": (s6.get("device_by_fmt") or {}),
+        "fairness_level": s6.get("fairness_level"),
+        "fairness_verified": s6.get("fairness_verified"),
+        "inputs": {f: {"source": r.get("source"),
+                       "sha256_verified": r.get("sha256_verified")}
+                   for f, r in inputs.items()},
+        "eval": {"corpus": s6.get("eval_source"), "ctx": s6.get("eval_ctx"),
+                 "groups": s6.get("groups"),
+                 "chunks_per_group": s6.get("eval_chunks_per_group")},
+        "nll": {f: round(a.get("mean_nll", float("nan")), 5) for f, a in agg.items()},
+        "delta_nll_iq2_minus_iq4": {
+            "mean": (round(st["mean"], 5) if st.get("mean") is not None else None),
+            "ci95": st.get("ci95"), "n": st.get("n"),
+            "char_weighted": (round(st["char_weighted_mean"], 5)
+                              if st.get("char_weighted_mean") is not None else None),
+        },
+        "verdict": s6.get("verdict"),
+        "throughput_tok_s": (s6.get("measured_throughput") or {}).get("tok_per_sec"),
+        "s7": ({"n_prompts": s7.get("n_prompts"),
+                "identical_rate": s7.get("identical_rate"),
+                "degenerate_repeat4": s7.get("degenerate")} if s7 else
+               "S7 not run"),
+        "upload": upload_state,
+        "limits": ["pilot：512 ctx / 8 组；bootstrap 的 n 是组数不是 token 数",
+                   "S6/S7 不是标准任务评测，不能当能力排名",
+                   "fairness_level=hf_sidecar_declared 表示没有重算核验"],
+    }
+    write_json(OUT / "EVAL_SUMMARY.json", sm)
+    print("=" * 78)
+    print("评测摘要（可直接复制粘贴，也写在 EVAL_SUMMARY.json）：")
+    print(json.dumps(sm, ensure_ascii=False, indent=1))
+    print("=" * 78)
+    return sm
 
 def _apply_overrides(overrides):
     """把 run(**overrides) 的键分流：**阶段名进 STAGES，其余进 CFG**。
@@ -164,8 +325,22 @@ def run(run_s2=None, run_s3=None, run_s4=None, run_eval=None,
         print("-" * 78)
 
     s6 = run_stage("S6_NLL", stage_s6_nll)
+    if (STATE.get("S6_NLL") or {}).get("status") == "error":
+        _write_failure("S6_NLL", plan)
+    elif s6:
+        # 阶段一完成就出站（小 JSON + 摘要），不等全部跑完 —— Session 随时可丢
+        _write_eval_summary(plan)
+        _up6 = _upload_stage("S6_NLL")
+        if s6:
+            s6["upload"] = _up6
 
     s7 = run_stage("S7_QUALITY", stage_s7_quality)
+    if (STATE.get("S7_QUALITY") or {}).get("status") == "error":
+        _write_failure("S7_QUALITY", plan)
+    elif s7:
+        _up7 = _upload_stage("S7_QUALITY")
+        s7["upload"] = _up7
+        _write_eval_summary(plan, upload_state=_up7)
 
     s8 = run_stage("S8_BF16_ANCHOR", stage_s8_bf16_anchor)
 
@@ -173,32 +348,11 @@ def run(run_s2=None, run_s3=None, run_s4=None, run_eval=None,
 
     s9 = run_stage("S9_REPORT", stage_s9_report)
 
-    if upload:
-        _upload_results()
+    if s9 or upload:
+        _upload_stage("S9_REPORT", force=bool(upload))
 
     return {"plan": plan,
             "stages": {k: (STATE.get(k) or {}).get("status") for k in STAGES}}
-
-
-def _upload_results():
-    """显式 opt-in：把本轮的小结果（JSON + report）传到 HF。
-
-    只传白名单里的小文件；GGUF 那种大件走单独的上传路径，不在自动流程里。
-    **默认不传**：`upload=False` 时连这个函数都不会被调用。
-    """
-    from .hf import upload_after_run
-    files = [(OUT / n, f"results/v{NOTEBOOK_VERSION}/{n}")
-             for n in ("report.md", "results.json",
-                       "S6_NLL.json", "S7_QUALITY.json", "S9_REPORT.json")
-             if (OUT / n).exists()]
-    try:
-        rec = upload_after_run(files)
-        print(f"HF 上传：{rec}")
-        return rec
-    except Exception as e:
-        # 上传失败不该把已经跑完的评测判成失败 —— 本地产物都还在。
-        print(f"!! HF 上传失败（本地结果不受影响）：{e}")
-        return {"ok": False, "error": str(e)}
 
 
 def main(argv=None):

@@ -2,7 +2,9 @@
 
 `trlab_kaggle.ipynb` —— 一个**可直接上传到 Kaggle** 的独立 Notebook，用来在同一份 `Qwen/Qwen3-8B` 上产出 `IQ2_XS` 与 `IQ4_XS`，并比较**真实文件字节**、**配对 NLL**、**有限配对质量**。
 
-当前版本 **v1.1.0**（HF 已存产物直接评测 + S3 回归修复）。**v1.1.0 最重要的一句**：S4/S5 的真实量化产物已经备份在 Hugging Face 私有仓库 `Atomheart-Father/trlab-qwen3-8b-quant-pilot`（commit `097e692`），所以 S6/S7 **不再需要重新下载 15 GiB BF16、不再需要重做 S3、不再需要重新量化**——它们直接从 HF 上那三个 GGUF 取输入。分支原则也随之明确：**模型与 sidecar 存 HF，代码与小型 JSON/report 存 GitHub，云算力只是可替换的执行端**。同时修掉一个 P0 回归（S3 的 `_write_stamp() got multiple values for keyword argument 'bytes'`，见第九之九）并把测试从 118 项加到 **139 项**。**S6/S7 尚未在真实 Kaggle 上跑过**，本文件所有评测相关段落都按"未运行"表述。
+当前版本 **v1.1.1**（可丢弃 GPU worker 策略）。**v1.1.1 的一句话**：模型与 provenance 已在 HF 持久保存，所以 **Kaggle 只是一台免费、可随时关机的算力机器** —— 首跑失败就直接关掉 Session，本地修代码 → commit → 新 Session 重跑，输入不用重下。据此改了三处行为：**① 评测默认用 GPU**（Kaggle 上开的就是 GPU Session，不该让 8B 在 4 核 CPU 上磨）；**② 一次只装一个模型**，跑完释放再装下一个；**③ 每个阶段跑完就把小结果出站到 HF 并远端复核**（白名单 5 个文件，不传模型/日志/secrets），失败则写 `FAILURE.json` 并明确列出"哪些结果尚未持久化"。
+
+**v1.1.0 的一句话**：S4/S5 的真实量化产物已经备份在 Hugging Face 私有仓库 `Atomheart-Father/trlab-qwen3-8b-quant-pilot`（commit `097e692`），所以 S6/S7 **不再需要重新下载 15 GiB BF16、不再需要重做 S3、不再需要重新量化**——它们直接从 HF 上那三个 GGUF 取输入。分支原则：**模型与 sidecar 存 HF，代码与小型 JSON/report 存 GitHub，云算力只是可替换的执行端**。同时修掉一个 P0 回归（S3 的 `_write_stamp() got multiple values for keyword argument 'bytes'`，见第九之九）。**S6/S7 尚未在真实 Kaggle 上跑过**，本文件所有评测相关段落都按"未运行"表述。
 
 v1.0 是一次**执行方式重构**（Issue #5）：notebook 本体从 253 KB / 28 cells 的巨物缩成 **7.3 KB / 5 cells** 的薄入口，全部逻辑搬进 `trlab/` 包的 16 个 `.py` 模块；执行包不再靠人工搬运，而是 notebook 的引导格按**钉死的 commit** 从公开仓库 sparse fetch `research/kaggle/trlab/`（约 200 KB、1–3 秒，`git rev-parse HEAD` 强校验）后再 import。用户操作收敛为**一个开关 + Run All**，取代原来的六步人工流程（取 BF16 notebook → Run All → Save Version → Add Input → 配路径 → 主 notebook）。v1.0.1 只加一个**运行前预检** `S4_PREFLIGHT`：`RUN_S4=True` 会在任何编译、任何下载之前用几秒钟核查 working 与工作区外暂存盘的挂载/容量/写权限、BF16 有没有落点、imatrix 能不能复用，不过就地 fail-closed 并只给一步要做的；同时把 `S4_QUANT` 的墙钟预算从 1800 s 提到 5400 s 并加单格式帽，降低 CPU 量化被误杀的风险。版本史：v0.1 只做环境检查与 smoke；v0.2–v0.2.2 修掉三轮逐 cell 审查的问题（S4 二次量化门槛、`--allow-requantize` 参数位置、S2 工具链预检）；v0.3.x 把 S2 收敛成开关 `RUN_S2` 并记录真实 Kaggle T4 通过；v0.4.0 把 S3 收敛成开关 `RUN_S3`；v0.5.0 把 S4 收敛成开关 `RUN_S4`（从原始 BF16 量化 IQ2_XS/IQ4_XS，禁止 Q8_0 二次量化，imatrix 命中即整段跳过 S3，量化 base 四级自取）。所有修复都有 CPU 可跑的回归测试（见第九、十节）。
 
@@ -79,23 +81,28 @@ S2/S3/S4/S5 会一条龙跑完。**唯一的例外**：BF16 有 15.26 GiB，与�
 
 **只想编 llama.cpp、先不碰模型**：把 `RUN_S2 = False` 改成 `RUN_S2 = True`，`Internet = On`，`Run all`。约 15–30 分钟（含编译，**估算值**）。
 
-**只想评测、不再量化**（v1.1.0，**最少操作**）：把开关格里的 `RUN_EVAL = False` 改成 `RUN_EVAL = True`，`Settings → Internet = On`，`Run all`。它会：
+**只想评测、不再量化**（v1.1.1，**最少操作**）：把开关格里的 `RUN_EVAL = False` 改成 `RUN_EVAL = True`，`Settings → Accelerator = GPU T4 ×2`、`Internet = On`，把 HF token 放进 `Add-ons → Secrets`（名字 `HF_TOKEN`，勾选 attach），`Run all`。它会：
 
 1. 从 HF 私有仓库 `Atomheart-Father/trlab-qwen3-8b-quant-pilot` 取 `IQ2_XS` / `IQ4_XS` / `imatrix.gguf` 三个已存产物（**不下载 15 GiB BF16、不重做 S3、不重新量化、不编译**）；
 2. 取 pinned 的 wikitext-2-raw **test** parquet（732,610 B）当评测语料（与 S3 用的 **train** 校准集严格分离，S6 会做内容级重叠断言）；
-3. **默认纯 CPU**（`EVAL_ALLOW_GPU=False` → 所有 `-ngl 0`），跑 S6 配对 NLL + S7 质量检查 + S9 报告。
+3. 跑 S6 配对 NLL + S7 质量检查 + S9 报告。**默认用 GPU**（`EVAL_ALLOW_GPU=True`，有显存就 `-ngl 99`；装不下才退 CPU，并把原因写进 `device_by_fmt`）；**一次只装一个模型**，每个格式跑完就释放；
+4. **每个阶段跑完就把小结果出站**（`results/v1.1.1/<run_id>/` 下的 `S6_NLL.json` / `S7_QUALITY.json` / `EVAL_SUMMARY.json` / `report.md` / `results.json`），并做远端复核；同时写一份几百字节的 `EVAL_SUMMARY.json` 供直接贴到聊天里。
 
-`RUN_EVAL=True` **不会**顺手打开 `EVAL_ALLOW_GPU`：GPU 会消耗额度，必须由你自己显式改成 `True`。默认规模是 8 组 × 1 chunk × 512 ctx（≈4k token/模型，纯 CPU 估算 ≈0.9 h，**假设 2.5 tok/s，不是实测**）；旧的 8×4×2048 在纯 CPU 上估算 14.6 h，会被 `EVAL_CPU_MAX_WALL_SEC` 拦下并给出三个选项，而不是跑到一半被预算杀掉。
+**`RUN_EVAL=True` 自带小结果回传**（只这 5 个白名单文件，不传模型、不传日志、不传 secrets）。想彻底不外发：`--set HF_UPLOAD_AFTER_RUN=false`，或者 CLI 里不加 `--upload` 并把它关掉 —— 但那样结果会随 Session 一起消失。
+
+要强制纯 CPU（例如只想验证链路）：`trlab.run(run_eval=True, EVAL_ALLOW_GPU=False)`，此时所有 llama 命令一律 `-ngl 0`。
 
 私有仓库需要凭据。取 token 的三条路（**都不需要把 token 写进 notebook / git / issue**）：
 
 | 方式 | 怎么做 |
 |---|---|
 | 环境变量 | 在本地 shell 里 `export HF_TOKEN=hf_xxx` 再跑 `python -m trlab --run-eval` |
-| Kaggle secret | `Add-ons → Secrets` 里加一个名为 `HF_TOKEN` 的 secret，notebook 会通过 `kaggle_secrets` 读 |
+| Kaggle secret | `Add-ons → Secrets` 里加一个名为 `HF_TOKEN` 的 secret，notebook 会通过 `kaggle_secrets` 读（**推荐**，只勾选 attach 到这一个 notebook） |
 | HF 官方缓存 | 本机 `huggingface-cli login` 之后，`~/.cache/huggingface/token` 会被自动复用 |
 
 三者都找不到时，`--check-hf` 与 S6 的预检会明确说"没有 token"并给出这三条路，**不会**打印 token、**不会**擅自把仓库改 Public。
+
+**失败了怎么办**：阶段会写 `out/FAILURE.json`（阶段名 / 报错 / traceback 尾 / **一条**下一步），并打印"你可以直接关掉 Session"。**不需要** Save Version、不需要抢救工作区 —— HF 上的输入是长期源，GitHub 上是代码，重跑只花一次下载时间。
 
 **S8（BF16 锚点）与 SX（第三方量化探索）** 仍然默认关闭，打开方式是把执行格最后一行改成 `trlab.run(run_eval=True, S8_BF16_ANCHOR=True)` —— 阶段名直接当关键字参数传（见第十节 `test_overrides_route_stages_vs_cfg`）。S8 需要高精度 GGUF 当输入、SX 需要第三方 GGUF，都不在 HF 那个仓库里。
 
@@ -939,7 +946,100 @@ CPU 不可行时 fail closed、预检在缺二进制时说唯一一步、
 `RUN_EVAL` 开关作用域、`run_ppl` 默认 `-ngl 0`、S6 从 HF 端到端、
 评测语料是 test split（不是 train）、`_ensure_eval_txt` 全流程。
 
-当前结果：**139/139 通过，约 45 秒**。
+当前结果：**139/139 通过，约 45 秒**（v1.1.1 之后是 **144 项**，见第九之十）。
+
+
+---
+
+## 九之十、v1.1.1：可丢弃 GPU worker
+
+用户 2026-10-23 明确了一条策略，它推翻了我上一版的一个决定，所以单独记一节：
+**模型、imatrix 与 provenance 已经在 HF 持久保存，所以 Kaggle 只是一台免费、
+可随时关机的算力机器。** 首跑失败就直接关 Session → 本地修代码 → commit →
+新 Session 重跑。**不需要** Save Version、不需要抢救工作区、不需要 Add Input。
+
+### 1. 评测默认用 GPU（推翻 v1.1.0 的"默认纯 CPU"）
+
+v1.1.0 我把 `EVAL_ALLOW_GPU` 默认设成 `False`，理由是"GPU 消耗额度、不擅自用"。
+用户指出这是浪费：**你开的就是 GPU Session，让 8B 在 4 核 CPU 上磨是错的**。
+现在 `EVAL_ALLOW_GPU` 默认 `True`，语义变成"**允许用，且装得下就用**"：
+
+| 情况 | `-ngl` | 记录 |
+|---|---|---|
+| 有 CUDA 显存 + 权重+余量装得下 | `99`（整模型卸载） | `device=gpu` |
+| 有显存但装不下 | `0` | `device=cpu` + **`why` 写明"装不下"** |
+| 没有 CUDA 显存 | `0` | `device=cpu` + `why` 写明"没有检测到" |
+| `EVAL_ALLOW_GPU=False` | `0` | `device=cpu` + `why` 写明"显式强制" |
+
+关键点是**不允许静默降级**：`eval_device()` 一定要给出 `why`，并且 S6/S7 把它
+逐格式写进 `device_by_fmt`。否则"以为在 GPU 上跑了 3 小时"这种事故迟早发生。
+成本估算也跟着设备走（GPU 30 tok/s / CPU 2.5 tok/s，都是**假设值**），
+且 `EVAL_CPU_MAX_WALL_SEC` 只对 CPU 生效（`budget_applies`）—— 拿 CPU 的上限
+去拦 GPU 会误杀。
+
+### 2. 一次只装一个模型
+
+`IQ2_XS` 和 `IQ4_XS` **绝不**同时压在显存/内存里。S6/S7 都是"装 A → 跑完 A →
+释放 A → 再装 B"，日志里能看到 `装入 IQ2_XS（gpu -ngl 99…）；跑完释放再装下一个`。
+`llama-perplexity` / `llama-cli` 是独立进程，进程退出即释放，所以这条是结构性
+保证而不是靠自觉；结果里 `settings.one_model_at_a_time=True` 是它的标记。
+
+### 3. 每完成一个阶段就出站 + 远端复核
+
+`RUN_EVAL=True` 现在会打开 `HF_UPLOAD_AFTER_RUN`（**只传白名单 5 个文件**）：
+
+| 阶段 | 出站文件 |
+|---|---|
+| `S6_NLL` | `S6_NLL.json`、`EVAL_SUMMARY.json` |
+| `S7_QUALITY` | `S7_QUALITY.json` |
+| `S9_REPORT` | `report.md`、`results.json`、`S9_REPORT.json` |
+
+落在 `results/v1.1.1/<run_id>/`（`run_id` 是 UTC 时间戳，这样多轮不会互相覆盖）。
+传完立刻 `verify_remote()`：size 必比、LFS 再比 `lfs.oid`。**上传失败不改阶段结论**，
+但会把文件名写进 `not_persisted` 并打印"这些结果**尚未持久化**" —— 不许虚报。
+不传的东西：GGUF（体积大、是模型资产不是运行产物）、`logs/*.log`（可能带路径）、
+任何 token。
+
+### 4. 失败现场：`FAILURE.json`
+
+任一阶段失败会写 `out/FAILURE.json`：
+
+```json
+{"stage": "S6_NLL", "run_id": "...", "error": "GuardError: ...401",
+ "traceback_tail": "...", "next_step": "配 HF token：...",
+ "upload": {...}, "note": "Kaggle 只是可丢弃的算力机：...修代码 → commit → 新 Session 重跑"}
+```
+
+`next_step` 只给**一条**（token / 缺二进制 / 超预算 / 哈希不符 / 语料重叠 / 看 traceback）。
+同时 `out/S6_NLL.json` 里仍有完整 traceback。
+
+### 5. 可粘贴摘要：`EVAL_SUMMARY.json`
+
+几百字节，专为"贴到聊天里"设计：`nll` 两个格式的均值、`delta_nll_iq2_minus_iq4`
+（mean / ci95 / n / char_weighted）、`verdict`、`fairness_level`、逐格式 `device`、
+`throughput_tok_s`、S7 的 `identical_rate` / `degenerate`、`upload` 状态、三条 `limits`。
+它由 S6/S7 的 JSON 生成，**不手抄数字**。
+
+### 6. 没有新增的东西（克制）
+
+按"简化而非叠加"的要求，这一版**没有**加：跨 Session 状态管理、Kaggle 版本保存
+备援、云端运维自动化、页面步骤。notebook 仍是 5 cells，仍然只有 `RUN_EVAL` 一个开关。
+
+### 7. 测试
+
+139 → **144 项**，新增 5 项：`test_eval_device_never_silently_degrades`（三种降级
+都要有 `why`）、`test_eval_preflight_reports_device`（默认 gpu、强制 cpu 两条路）、
+`test_upload_whitelist_has_no_models_or_logs`（白名单不能有 GGUF/日志/token）、
+`test_upload_stage_respects_optin_and_reports_not_persisted`（未授权 → 列出未持久化；
+失败 → 不抛给上层）、`test_failure_json_has_stage_and_one_next_step`、
+`test_eval_summary_is_small_and_pasteable`（<3 KB 且数字来自 JSON）。
+另外把 v1.1 里"默认纯 CPU"的 4 项断言改成"默认 GPU、显式才 CPU"。
+
+### 8. 仍未验证
+
+**S6/S7 依然没有在真实 Kaggle 上跑过**（144 项全是 CPU/mock）；带 token 的真实
+下载未实测；真实 sidecar 的 fairness 判定未走；往 HF 的真实上传未发生。
+所以"量化对 NLL / 能力的影响"**目前依然零数据**。
 
 
 ---
@@ -1109,14 +1209,18 @@ v1.0 新增的 10 项架构回归（对应 Issue #5 的验收清单）：
 31. **S4 的 CPU 耗时与峰值 RAM 未实测**。`llama-quantize` 是 CPU 路径（15.26 GiB 走内存不走显存），输入 mmap 但 `--max-buffer-size` 默认 8192 MiB 是实打实要占的。`_ram_precheck()` 只警告不拦；真的 exit 137 时按提示调小 `S4_RAM_MARGIN_GB` 或加 `--max-buffer-size`。
 32. **暂存盘路线不跨 Session**。下到暂存盘的 BF16 会话结束就没了，下次要重下；只读 Input 路线才是一次操作永久复用。这是两条路线的本质差别，报告里会记 `quant_base_origin`。
 33. **provenance 级核验弱于文件级**。三项证据（sha256 / 来源 repo+revision / 张量结构）互相独立，且"同仓库同 revision ⇒ 同一次转换"比"形状一致"强，但它仍然不是逐张量比形状。S9 报告会显式声明这一条的效力范围（`imatrix_base_consistency_level`）。
-34. **S6/S7 尚未在真实 Kaggle 上跑过**（v1.1.0）。139 项测试全是 CPU/mock；`test_s6_end_to_end_from_hf` 用的是假 HF 服务器桩。**任何"NLL 差值 / 质量差异"目前都不存在**，报告里那两节会直接写 "S6/S7 not yet evaluated"。
+34. **S6/S7 尚未在真实 Kaggle 上跑过**（v1.1.1）。144 项测试全是 CPU/mock；`test_s6_end_to_end_from_hf` 用的是假 HF 服务器桩。**任何"NLL 差值 / 质量差异"目前都不存在**，报告里那两节会直接写 "S6/S7 not yet evaluated"。
 35. **HF 的真实下载只验到 401 路径**。`python -m trlab --check-hf` 在无 token 时正确报 `token_present: false` + 401 并给三条取 token 的路；带 token 下载 2.7 / 4.56 GiB 的过程**未实测**（断点续传逻辑与 S3 的 Q8_0 下载共用同一份 `_fetch_pinned_blob`，那份是真机跑过的）。
-36. **评测成本是假设速率，不是实测吞吐**。`eval_cost_estimate()` 用 CPU 2.5 tok/s / GPU 30 tok/s 的**假设值**（`assumed_rate_note` 里写明），0.94 h 这个数字不能当承诺。真实吞吐要在第一次跑完后看 `measured_throughput` 才有。
+36. **评测成本是假设速率，不是实测吞吐**。`eval_cost_estimate()` 用 CPU 2.5 tok/s / GPU 30 tok/s 的**假设值**（`assumed_rate_note` 里写明），0.94 h / GPU 路径的小时数都不能当承诺。真实吞吐要在第一次跑完后看 `measured_throughput` 才有。
 37. **`hf_sidecar_declared` 级 fairness 未在真实产物上走过**。测试里是构造的 sidecar；真实 sidecar 的字段是否齐、`imatrix_base_consistent` 在跨 Session 时会不会误判 `false`，都要第一次真跑才知道。凡是引用 HF 产物的结论都必须带这个前缀。
-38. **上传路径只有 dry-run 与 mock 覆盖**。`upload_after_run()` 在 `HF_UPLOAD_AFTER_RUN=False` 时直接跳过；真往 HF 写东西**没有发生过**。
+38. **上传路径只有 dry-run 与 mock 覆盖**。v1.1.1 起 `RUN_EVAL=True` 会自动出站那 5 个小文件，但**真往 HF 写东西还没有发生过**；`upload_after_run()` 的异常分支只被单测覆盖。
 39. **HF 仓库是 Private，token 是硬前提**。`--check-hf` / S6 / S7 在缺 token 时都会停在预检并说清三条取 token 的路；代码**不会**擅自把仓库改 Public，也不会要求把 token 写进 notebook / git / issue。
 40. **HF 上传时只做了远端 size 对比，不是逐文件内容 sha256**。HF 对 LFS 文件提供 `lfs.oid`（= 内容 sha256）可以随时复核，但"上传时校验过什么"这件事本身要如实说：`verified_level` 只能是 `hf_sidecar_declared`。
-41. **512 ctx 的结论不能外推到长上下文**。v1.1 的默认规模是 8 组 × 1 chunk × 512 ctx，配对比较只要求两模型同设置，所以内部一致性没问题，但"在这个 ctx 下"是结论的一部分，不能省略。
+41. **512 ctx 的结论不能外推到长上下文**。默认规模是 8 组 × 1 chunk × 512 ctx，配对比较只要求两模型同设置，所以内部一致性没问题，但"在这个 ctx 下"是结论的一部分，不能省略。
+42. **"默认用 GPU"只是意图，不是保证**。`eval_device()` 只有在真的读到 CUDA 显存时才返回 `gpu`；读不到（没装 torch、驱动异常、不是 GPU Session）就是 CPU。这时**不会**报错，只会在 `device_by_fmt` / `resources.device_why` 里写原因 —— 所以看结果时**先看 device**，别假设"我开了 GPU 就一定在 GPU 上跑"。
+43. **`-ngl 99` 是"整模型卸载"，不是"保证不 OOM"**。T4 的 15 GiB 装 4.56 GiB 的 IQ4_XS 很宽裕，但如果 KV cache + compute buffer 超了，llama.cpp 会在运行时 OOM；`_fit_ngl` 的余量（`NGL_MARGIN_GB=2.0`）是静态估算。真 OOM 时按 6.2.6 降 ctx 或退 CPU。
+44. **`EVAL_CPU_MAX_WALL_SEC` 不拦 GPU**。`budget_applies` 只在 CPU 时为真；GPU 路径没有独立墙钟上限（阶段预算 `STAGE_BUDGET_SEC["S6_NLL"]=5400` 仍然生效）。
+45. **每个阶段都出站意味着重复覆盖的成本**。`results/v1.1.1/<run_id>/` 用 UTC 时间戳分目录，所以多轮不互相覆盖；但同一轮里 S6 之后和 S7 之后会各传一次 `EVAL_SUMMARY.json`（后者更新）。这是刻意换来的"随时可以关 Session"。
 
 ---
 
