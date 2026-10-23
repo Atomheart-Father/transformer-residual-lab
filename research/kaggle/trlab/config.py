@@ -501,6 +501,11 @@ def print_banner():
           + ("（在 S3 之上再跑 S4 量化 + S5 字节统计；BF16 由 S4 自己取）"
              if CFG['RUN_S4'] else "（S4/S5 不启动，不下载 BF16）"))
 
+    print(f"RUN_EVAL      : {CFG['RUN_EVAL']}"
+          + ("（只评测 S6/S7/S9：输入取自 HF 已存 GGUF，不编译、不重量化、不下 BF16；"
+             f"{'允许 GPU' if CFG['EVAL_ALLOW_GPU'] else '纯 CPU（-ngl 0）'}）"
+             if CFG['RUN_EVAL'] else "（不评测）"))
+
     print(f"开启的阶段    : {[k for k, v in STAGES.items() if v]}")
 
     if CFG['RUN_S2']:
@@ -529,6 +534,16 @@ def print_banner():
         print(f"量化格式      : {'/'.join(FORMATS)}（共用同一份 imatrix）")
         print(f"二次量化      : 禁止（ALLOW_REQUANTIZE 保持 False；base 必须是 f16/bf16）")
 
+    if CFG['RUN_EVAL']:
+        print(f"评测输入      : HF {CFG['HF_MODEL_REPO']}@{CFG['HF_MODEL_REVISION']}"
+              f"（{'已允许拉取' if CFG['HF_FETCH_ARTIFACTS'] else '拉取未允许'}）")
+        print(f"评测语料      : {EVAL_PINNED['config']}/{EVAL_PINNED['split']}"
+              f"（{EVAL_PINNED['bytes']/2**20:.2f} MiB，与校准集的 train split 严格分离）")
+        print(f"评测规模      : ctx={CFG['NLL_CTX']} × {CFG['NLL_GROUPS']} 组"
+              f" × {CFG['NLL_CHUNKS_PER_GROUP']} chunk"
+              f"（约 {CFG['NLL_CTX']*CFG['NLL_GROUPS']*CFG['NLL_CHUNKS_PER_GROUP']/1000:.1f}k token/模型）")
+        print(f"上传结果      : {'允许（显式 opt-in）' if CFG['HF_UPLOAD_AFTER_RUN'] else '禁止（默认不外发）'}")
+
     print(f"S4–S8         : "
           + ("S4/S5 开，S6–S8 与 SX 全关" if CFG['RUN_S4'] else
              ("全关（本版不量化、不下 BF16、不跑 8B）" if CFG['RUN_S3'] else "全关")))
@@ -542,6 +557,8 @@ def print_banner():
 
     print(f"网络下载      : "
           + ("S2 源码 + S3 的 Q8_0/wikitext + S4 的 BF16（均已 pin + sha256）"
-             if (CFG["RUN_S2"] or CFG["RUN_S3"] or CFG["RUN_S4"]) else "禁止"))
+             if (CFG["RUN_S2"] or CFG["RUN_S3"] or CFG["RUN_S4"]) else
+             ("HF 上已存的 3 个 GGUF + wikitext test（size/lfs.oid 双源核对）"
+              if CFG["RUN_EVAL"] else "禁止")))
 
     print(f"第三方量化入表: {'允许（不应发生）' if THIRD_PARTY_IN_COMPARISON else '禁止'}")

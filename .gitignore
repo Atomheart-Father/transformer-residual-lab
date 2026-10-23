@@ -56,3 +56,6 @@ results/smoke_18/
 # tempfile.tempdir here because some sandboxes refuse to probe /tmp.
 .tmpwork/
 research/kaggle/.trlab_tmp/
+
+# trlab run dir when invoked from the source tree (python -m trlab)
+research/kaggle/_trlab_run/
